@@ -31,7 +31,7 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router},
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, SecretKey,
 };
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio::time::{self, Duration};
@@ -674,7 +674,13 @@ async fn pipe_streams(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream
         Ok::<_, anyhow::Error>(())
     };
     let remote_to_client = async {
-        copy(&mut recv, &mut tcp_write).await?;
+        let r = copy(&mut recv, &mut tcp_write).await;
+        // The stream side is done (EOF or error): signal EOF to the local TCP
+        // peer explicitly. Relying on the write half being dropped at function
+        // exit would delay the FIN until *both* directions finish, which
+        // never happens when the peer keeps the connection open.
+        let _ = tcp_write.shutdown().await;
+        r?;
         Ok::<_, anyhow::Error>(())
     };
 

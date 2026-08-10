@@ -218,6 +218,29 @@ building anything else.
    to n0's relay) — note which one you're actually measuring, since relayed
    throughput is a different number than direct.
 
+### Loopback baseline (architecture ceiling)
+
+`scripts/bench.sh` measures the stream-forwarding path on a single machine
+(`serve --forward` + `connect --listen`, no SOCKS5 layer) against raw
+loopback TCP, with CPU sampling of both processes. Baseline on this machine
+(kernel 7.1.6, iroh 1.0.3):
+
+| measurement | result |
+|---|---|
+| raw loopback TCP (1 stream) | ~3.9 GB/s |
+| tunnel, 1 stream | ~340-380 MB/s |
+| tunnel, 4 streams (`-P 4`) | ~330 MB/s, but CPU climbs ~1.9 → ~2.9 cores |
+| CPU at 4 streams | serve ~155%, connect ~135% |
+
+Readings: throughput is roughly flat from 1 → 4 streams while CPU keeps
+climbing, which points at a shared per-connection bottleneck (QUIC crypto /
+flow control on one connection) rather than a parallelism problem. In other
+words, on this stack the tunnel sustains ~2.6-3 Gbps per QUIC connection at
+the cost of roughly 2-3 cores of user-space CPU — fine behind a 1 Gbps link,
+the bottleneck on 10 Gbps+. This is exactly the number to re-measure after
+any architecture change (TUN/datagram, io_uring) and on real hardware
+across a real network.
+
 Whatever you find, that's the real basis for deciding whether GSO/io_uring/
 LD_PRELOAD work is worth doing next, rather than assuming it from an
 architecture diagram.
