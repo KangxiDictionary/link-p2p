@@ -1,0 +1,201 @@
+# link-p2p 简体中文翻译
+# 用 msgfmt 编译为 .mo：msgfmt --check -o link-p2p.mo link-p2p.po
+# 占位符 {0}、{1} 等为 Rust format! 风格，翻译时须保留且顺序一致。
+msgid ""
+msgstr ""
+"Project-Id-Version: link-p2p 0.1.0\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: zh_CN\n"
+
+# --- 命令行 help ---
+
+msgid "Minimal TCP-over-QUIC forwarder on iroh"
+msgstr "基于 iroh 的最小 TCP-over-QUIC 转发器"
+
+msgid ""
+"link-p2p exposes a local TCP service to a P2P network (or dials one) over a "
+"direct, end-to-end encrypted QUIC connection. No TUN device, no "
+"root/admin privileges — just a persistent EndpointId and a QUIC hop."
+msgstr ""
+"link-p2p 通过一条端到端加密的直连 QUIC 连接，把本地 TCP 服务暴露到 P2P "
+"网络（或拨号接入对方的服务）。无需 TUN 设备，无需 root/管理员权限——"
+"只需要一个持久的 EndpointId 和一跳 QUIC。"
+
+msgid ""
+"QUICK START:\n"
+"    # On the machine you want to expose (e.g. its SSH server):\n"
+"    link-p2p serve --forward 127.0.0.1:22\n"
+"    # -> prints an EndpointId, share it with the other side\n"
+"\n"
+"    # On the connecting machine:\n"
+"    link-p2p connect --to <EndpointId> --listen 127.0.0.1:2222\n"
+"    ssh -p 2222 localhost\n"
+"\n"
+"SHELL COMPLETIONS:\n"
+"    link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish\n"
+"    link-p2p completions bash > /etc/bash_completion.d/link-p2p\n"
+"\n"
+"See README.md for self-hosted --relay setup and benchmarking against "
+"WireGuard/Tailscale."
+msgstr ""
+"快速开始：\n"
+"    # 在要暴露服务的机器上（例如它的 SSH 服务器）：\n"
+"    link-p2p serve --forward 127.0.0.1:22\n"
+"    # -> 打印一个 EndpointId，把它分享给对端\n"
+"\n"
+"    # 在发起连接的机器上：\n"
+"    link-p2p connect --to <EndpointId> --listen 127.0.0.1:2222\n"
+"    ssh -p 2222 localhost\n"
+"\n"
+"Shell 补全：\n"
+"    link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish\n"
+"    link-p2p completions bash > /etc/bash_completion.d/link-p2p\n"
+"\n"
+"自建 --relay 配置以及与 WireGuard/Tailscale 的基准对比，见 README.md。"
+
+msgid ""
+"Path to store/load this node's persistent secret key. If it doesn't exist "
+"yet, a new one is generated and saved here. Keep this stable if you want "
+"your EndpointId to stay the same across restarts."
+msgstr ""
+"用于存储/加载本节点持久密钥的路径。若文件不存在则生成新密钥并保存到此处。"
+"保持该文件稳定，EndpointId 即可在重启后保持不变。"
+
+msgid ""
+"Use a custom relay server instead of n0's public one, e.g. http://127.0.0.1:3340 "
+"(run `iroh-relay --dev` locally). With this set, address discovery is skipped "
+"entirely: `connect` dials the peer directly through this relay, so no DNS/pkarr "
+"lookup to iroh.link is needed. Useful for self-hosted relays and for "
+"offline/local testing."
+msgstr ""
+"使用自定义 relay 服务器替代 n0 公共 relay，例如 http://127.0.0.1:3340 "
+"（本地可用 `iroh-relay --dev` 启动）。设置后完全跳过地址发现：`connect` "
+"直接通过该 relay 拨号对端，无需查询 iroh.link 的 DNS/pkarr。适用于自建 "
+"relay 与离线/本地测试。"
+
+msgid "Expose a local TCP service to the P2P network."
+msgstr "将本地 TCP 服务暴露到 P2P 网络。"
+
+msgid "Local address to forward incoming P2P streams to, e.g. 127.0.0.1:8080"
+msgstr "转发 P2P 入站流的目标本地地址，例如 127.0.0.1:8080"
+
+msgid "Dial a remote node and expose it as a local TCP listener."
+msgstr "拨号连接远端节点，并将其暴露为本地 TCP 监听端口。"
+
+msgid "The remote node's EndpointId (printed by `serve` on startup)"
+msgstr "远端节点的 EndpointId（`serve` 启动时会打印）"
+
+msgid "Local address to listen on, e.g. 127.0.0.1:9090"
+msgstr "本地监听地址，例如 127.0.0.1:9090"
+
+msgid "Print a shell completion script to stdout."
+msgstr "向标准输出打印 shell 补全脚本。"
+
+msgid ""
+"Print a shell completion script to stdout.\n"
+"\n"
+"Redirect it to wherever your shell loads completions from, e.g. `link-p2p "
+"completions fish > ~/.config/fish/completions/link-p2p.fish`."
+msgstr ""
+"向标准输出打印 shell 补全脚本。\n"
+"\n"
+"将其重定向到你的 shell 加载补全的位置，例如 `link-p2p completions fish > "
+"~/.config/fish/completions/link-p2p.fish`。"
+
+msgid "Which shell to generate a completion script for."
+msgstr "为哪个 shell 生成补全脚本。"
+
+msgid "Control colored output: auto (colors on TTY only), always, or never."
+msgstr "控制彩色输出：auto（仅在终端显示颜色）、always 或 never。"
+
+# --- 运行时输出与日志 ---
+
+msgid "loading/creating persistent identity"
+msgstr "加载/创建持久身份"
+
+msgid "identity file exists but has unexpected length {0} (expected 64 hex chars)"
+msgstr "身份文件存在但长度异常：{0}（应为 64 个十六进制字符）"
+
+msgid "identity file exists but contains non-hex characters"
+msgstr "身份文件存在但包含非十六进制字符"
+
+msgid "writing new identity to {0}"
+msgstr "写入新身份到 {0}"
+
+msgid ""
+"endpoint did not come online within {0}.\n"
+"\n"
+"The most likely cause: outgoing UDP is blocked by a firewall.\n"
+"iroh/QUIC relies on UDP for both direct hole-punching and relay connections. "
+"Try:\n"
+"  nc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\n"
+"  RUST_LOG=iroh=debug {1}     # see exactly where it's stuck"
+msgstr ""
+"端点在 {0} 内未能上线。\n"
+"\n"
+"最常见原因：出站 UDP 被防火墙拦截。\n"
+"iroh/QUIC 依赖 UDP 进行直连打洞与 relay 连接。可尝试：\n"
+"  nc -u -v -w3 8.8.8.8 53    # 测试 UDP 出站是否正常\n"
+"  RUST_LOG=iroh=debug {1}     # 查看具体卡在哪一步"
+
+msgid "'{0}' is not a valid --relay URL"
+msgstr "'{0}' 不是合法的 --relay URL"
+
+msgid "binding endpoint"
+msgstr "绑定端点"
+
+msgid "forwarding P2P connections to: {0}"
+msgstr "P2P 连接将转发到：{0}"
+
+msgid "your EndpointId (give this to peers running `connect --to`):"
+msgstr "你的 EndpointId（把它给运行 `connect --to` 的对端）："
+
+msgid "Press Ctrl+C to stop."
+msgstr "按 Ctrl+C 停止。"
+
+msgid "shutting down..."
+msgstr "正在关闭……"
+
+msgid "connection opened"
+msgstr "连接已建立"
+
+msgid "connection ended"
+msgstr "连接已结束"
+
+msgid "connection closed"
+msgstr "连接已关闭"
+
+msgid "stream error"
+msgstr "流错误"
+
+msgid "connecting to local forward target {0}"
+msgstr "连接本地转发目标 {0}"
+
+msgid "dialing {0}..."
+msgstr "正在拨号 {0}……"
+
+msgid "connecting to remote endpoint"
+msgstr "正在连接远端端点"
+
+msgid "connected. local TCP listener on {0} now forwards to the remote peer."
+msgstr "已连接。本地 TCP 监听 {0} 现在转发到远端节点。"
+
+msgid "binding local listener on {0}"
+msgstr "绑定本地监听 {0}"
+
+msgid "'{0}' is not a valid EndpointId"
+msgstr "'{0}' 不是合法的 EndpointId"
+
+msgid "'{0}' is not a valid RelayUrl"
+msgstr "'{0}' 不是合法的 RelayUrl"
+
+msgid "finishing send stream"
+msgstr "结束发送流"
+
+msgid "copying stream data"
+msgstr "复制流数据"
+
+msgid "error"
+msgstr "错误"

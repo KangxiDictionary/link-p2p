@@ -1,0 +1,5 @@
+/target
+# Compiled translation catalogs (source of truth is the .po files)
+locales/**/*.mo
+# Locally built test tools (see scripts/local-test.sh for how to build)
+/tools/

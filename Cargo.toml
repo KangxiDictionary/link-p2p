@@ -1,0 +1,26 @@
+[package]
+name = "link-p2p"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Pin to the 1.x line; iroh's API moved a lot before 1.0 landed, so avoid
+# accidentally picking up a pre-1.0 version via a loose "*" requirement.
+iroh = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+# Generates shell completion scripts (`link-p2p completions fish`, etc).
+# Version must track clap's major version.
+clap_complete = "4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# i18n. `gettext-system` links glibc's built-in libintl on Linux (zero extra
+# deps); other platforms fall back to gettext-sys's vendored build.
+gettext-rs = { version = "0.8", features = ["gettext-system"] }
+# Terminal styling (bold/color) for our own output; clap styles --help itself.
+console = "0.16"
+
+[[bin]]
+name = "link-p2p"
+path = "src/main.rs"
