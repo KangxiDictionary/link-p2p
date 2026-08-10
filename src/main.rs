@@ -17,9 +17,10 @@
 mod i18n;
 mod style;
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -31,6 +32,7 @@ use iroh::{
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio::time::{self, Duration};
 use tracing::{info, warn};
 
@@ -83,6 +85,11 @@ struct Cli {
     /// Control colored output: auto (colors on TTY only), always, or never.
     #[arg(long, global = true, value_enum, default_value_t = ColorMode::Auto)]
     color: ColorMode,
+
+    /// Maximum number of concurrent forwarded connections. 0 means unlimited.
+    /// Prevents resource exhaustion on endpoints exposed to the network.
+    #[arg(long, global = true, default_value_t = 1024)]
+    max_conns: usize,
 }
 
 #[derive(Subcommand)]
@@ -135,6 +142,10 @@ fn localized_command() -> clap::Command {
         .mut_arg(
             "color",
             |a| a.help(tr!("Control colored output: auto (colors on TTY only), always, or never.")),
+        )
+        .mut_arg(
+            "max_conns",
+            |a| a.help(tr!("Maximum number of concurrent forwarded connections. 0 means unlimited. Prevents resource exhaustion on endpoints exposed to the network.")),
         )
         .mut_subcommand("serve", |s| {
             s.about(tr!("Expose a local TCP service to the P2P network."))
@@ -229,10 +240,25 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
 
     match cli.command {
         Command::Serve { forward } => {
-            run_serve(secret_key, forward, cli.relay.as_deref(), styler).await
+            run_serve(
+                secret_key,
+                forward,
+                cli.relay.as_deref(),
+                cli.max_conns,
+                styler,
+            )
+            .await
         }
         Command::Connect { to, listen } => {
-            run_connect(secret_key, &to, listen, cli.relay.as_deref(), styler).await
+            run_connect(
+                secret_key,
+                &to,
+                listen,
+                cli.relay.as_deref(),
+                cli.max_conns,
+                styler,
+            )
+            .await
         }
         Command::Completions { .. } => unreachable!("handled above"),
     }
@@ -243,6 +269,10 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
 /// Storage format: 64 hex chars (32-byte ed25519 seed). iroh 1.0
 /// SecretKey does not implement Display, so we hex-encode `to_bytes()`
 /// ourselves instead of relying on the old Display-based round-trip.
+///
+/// On Unix the key file is always tightened to mode 0600 (owner-only): it's
+/// a private key, and `std::fs::write` would otherwise create it with the
+/// default umask-derived permissions (usually 0644, world-readable).
 fn load_or_create_secret_key(path: &Path) -> Result<SecretKey> {
     if let Ok(hex) = std::fs::read_to_string(path) {
         let hex = hex.trim();
@@ -257,13 +287,46 @@ fn load_or_create_secret_key(path: &Path) -> Result<SecretKey> {
             bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
                 .context(tr!("identity file exists but contains non-hex characters"))?;
         }
+        // Also harden pre-existing files (older versions wrote them 0644).
+        harden_key_permissions(path)?;
         return Ok(SecretKey::from_bytes(&bytes));
     }
     let key = SecretKey::generate();
     let hex: String = key.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
-    std::fs::write(path, hex)
-        .with_context(|| tr_fmt!("writing new identity to {0}", path.display()))?;
+    write_key_file(path, &hex)?;
     Ok(key)
+}
+
+/// Write the key material to `path`. On Unix the file is created with mode
+/// 0600 directly (no window where it's world-readable), then hardened again
+/// to cover the case where the file already existed.
+fn write_key_file(path: &Path, hex: &str) -> Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts
+        .open(path)
+        .with_context(|| tr_fmt!("writing new identity to {0}", path.display()))?;
+    file.write_all(hex.as_bytes())
+        .with_context(|| tr_fmt!("writing new identity to {0}", path.display()))?;
+    harden_key_permissions(path)
+}
+
+/// Ensure the key file is owner-only (0600) on Unix. No-op elsewhere.
+#[cfg(unix)]
+fn harden_key_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| tr_fmt!("setting permissions on {0}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn harden_key_permissions(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// Wait up to `timeout` for the endpoint to establish a network path
@@ -320,6 +383,7 @@ async fn run_serve(
     secret_key: SecretKey,
     forward: SocketAddr,
     relay: Option<&str>,
+    max_conns: usize,
     styler: Styler,
 ) -> Result<()> {
     let endpoint = build_endpoint(secret_key, relay)?
@@ -345,7 +409,15 @@ async fn run_serve(
     println!();
     println!("{}", styler.dim(&tr!("Press Ctrl+C to stop.")));
 
-    let handler = ForwardHandler { target: forward };
+    let handler = ForwardHandler {
+        target: forward,
+        // 0 = unlimited. usize::MAX keeps the acquire() call shape uniform.
+        semaphore: Arc::new(Semaphore::new(if max_conns == 0 {
+            usize::MAX
+        } else {
+            max_conns
+        })),
+    };
     let router = Router::builder(endpoint.clone())
         .accept(ALPN, handler)
         .spawn();
@@ -359,6 +431,8 @@ async fn run_serve(
 #[derive(Debug, Clone)]
 struct ForwardHandler {
     target: SocketAddr,
+    /// Bounds the number of concurrently forwarded streams.
+    semaphore: Arc<Semaphore>,
 }
 
 impl ProtocolHandler for ForwardHandler {
@@ -371,6 +445,14 @@ impl ProtocolHandler for ForwardHandler {
         // run_connect below), so we keep accepting streams until the peer
         // closes the whole connection.
         loop {
+            // Bound the number of concurrently forwarded streams. We acquire
+            // the permit *before* accept_bi so a hostile peer flooding streams
+            // can't make us spawn unbounded tasks/sockets: the extra streams
+            // just queue up at the QUIC layer until a slot frees.
+            let permit = match self.semaphore.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => break, // semaphore closed; shouldn't happen
+            };
             let (send, recv) = match connection.accept_bi().await {
                 Ok(pair) => pair,
                 Err(e) => {
@@ -385,6 +467,9 @@ impl ProtocolHandler for ForwardHandler {
             };
             let target = self.target;
             tokio::spawn(async move {
+                // The permit lives as long as this stream does; dropping it
+                // after handle_forward_stream frees the slot.
+                let _permit = permit;
                 if let Err(e) = handle_forward_stream(target, send, recv).await {
                     warn!(%peer, error = %e, "{}", tr!("stream error"));
                 }
@@ -419,6 +504,7 @@ async fn run_connect(
     to: &str,
     listen: SocketAddr,
     relay: Option<&str>,
+    max_conns: usize,
     styler: Styler,
 ) -> Result<()> {
     let endpoint = build_endpoint(secret_key, relay)?
@@ -462,13 +548,25 @@ async fn run_connect(
         .await
         .with_context(|| tr_fmt!("binding local listener on {0}", listen))?;
 
+    // Same concurrency bound as serve. Here the permit is acquired *inside*
+    // the spawned task so the accept loop stays responsive: excess local
+    // connections queue in the kernel backlog, and only `max_conns` of them
+    // are actively forwarded at any time.
+    let semaphore = Arc::new(Semaphore::new(if max_conns == 0 {
+        usize::MAX
+    } else {
+        max_conns
+    }));
+
     loop {
         tokio::select! {
             accepted = tcp_listener.accept() => {
                 let (tcp_stream, client_addr) = accepted?;
                 let connection = connection.clone();
+                let semaphore = semaphore.clone();
                 tokio::spawn(async move {
                     let result = async {
+                        let _permit = semaphore.acquire_owned().await?;
                         let (send, recv) = connection.open_bi().await?;
                         pipe_streams(tcp_stream, send, recv).await
                     }
@@ -512,13 +610,38 @@ async fn pipe_streams(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream
         Ok::<_, anyhow::Error>(())
     };
 
-    // Run both directions concurrently; a half-closed TCP connection (client
-    // stops writing but still reads, or vice versa) is common and shouldn't
-    // be treated as an error on its own.
-    let (a, b) = tokio::join!(client_to_remote, remote_to_client);
-    a?;
-    b?;
-    Ok(())
+    // Run both directions concurrently. A half-closed TCP connection (client
+    // stops writing but still reads, or vice versa) is common and shouldn't be
+    // treated as an error on its own, so a *clean* completion of one direction
+    // must not cancel the other. An *error* in either direction, however,
+    // should abort the whole pipe promptly rather than waiting for the other
+    // side to give up on its own.
+    let mut client_to_remote = Box::pin(client_to_remote);
+    let mut remote_to_client = Box::pin(remote_to_client);
+    let (mut res_client, mut res_remote) = (None, None);
+    while res_client.is_none() || res_remote.is_none() {
+        tokio::select! {
+            r = &mut client_to_remote, if res_client.is_none() => {
+                res_client = Some(r);
+                if res_client.as_ref().unwrap().is_err() { break; }
+            }
+            r = &mut remote_to_client, if res_remote.is_none() => {
+                res_remote = Some(r);
+                if res_remote.as_ref().unwrap().is_err() { break; }
+            }
+        }
+    }
+    match (res_client, res_remote) {
+        (Some(a), Some(b)) => {
+            a?;
+            b?;
+            Ok(())
+        }
+        // One direction errored; the other was cancelled by the select! drop.
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => unreachable!("loop exits only when both complete or one errors"),
+    }
 }
 
 async fn copy<R, W>(reader: &mut R, writer: &mut W) -> Result<u64>

@@ -12,8 +12,10 @@ set -u
 
 RELAY_BIN="${1:-tools/iroh-relay}"
 RELAY_PORT=3340
-SERVE_PORT=8080   # python http.server (the "forward target")
-LISTEN_PORT=9999  # local port exposed by `connect`
+# Uncommon ports on purpose: 8080/9999 are frequently taken by other
+# services (e.g. ipfs listens on 8080) and would break the test.
+SERVE_PORT=18080  # python http.server (the "forward target")
+LISTEN_PORT=19999 # local port exposed by `connect`
 
 cd "$(dirname "$0")/.."
 
@@ -56,7 +58,9 @@ target/release/link-p2p serve \
     --forward "127.0.0.1:$SERVE_PORT" \
     --identity "$LOG_DIR/serve.key" >"$LOG_DIR/serve.log" 2>&1 &
 SERVE_PID=$!
-sleep 3
+# iroh runs a 3s net_report before dialing the relay, so coming online takes
+# ~4s even with a local relay; give it room on slow/constrained machines.
+sleep 6
 
 # Parse the EndpointId printed by serve. It's the line after the prompt.
 EP_ID=$(sed -n 's/^    \([0-9a-f]\{52,\}\)$/\1/p' "$LOG_DIR/serve.log" | head -1)

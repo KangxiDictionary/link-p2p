@@ -1,0 +1,211 @@
+# link-p2p 日本語（日本）翻訳
+# コンパイル：msgfmt --check -o link-p2p.mo link-p2p.po
+# プレースホルダ {0}、{1} は Rust の format! スタイル。翻訳時は順序を保つこと。
+msgid ""
+msgstr ""
+"Project-Id-Version: link-p2p 0.1.0\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: ja_JP\n"
+
+# --- コマンドラインのヘルプ ---
+
+msgid "Minimal TCP-over-QUIC forwarder on iroh"
+msgstr "iroh 上で動作する最小限の TCP-over-QUIC フォワーダー"
+
+msgid ""
+"link-p2p exposes a local TCP service to a P2P network (or dials one) over a "
+"direct, end-to-end encrypted QUIC connection. No TUN device, no "
+"root/admin privileges — just a persistent EndpointId and a QUIC hop."
+msgstr ""
+"link-p2p は、直接のエンドツーエンド暗号化 QUIC 接続を介して、ローカル TCP "
+"サービスを P2P ネットワークに公開します（またはダイヤルします）。TUN デバイス不要、"
+"root/管理者権限不要——永続的な EndpointId と QUIC ホップだけです。"
+
+msgid ""
+"QUICK START:\n"
+"    # On the machine you want to expose (e.g. its SSH server):\n"
+"    link-p2p serve --forward 127.0.0.1:22\n"
+"    # -> prints an EndpointId, share it with the other side\n"
+"\n"
+"    # On the connecting machine:\n"
+"    link-p2p connect --to <EndpointId> --listen 127.0.0.1:2222\n"
+"    ssh -p 2222 localhost\n"
+"\n"
+"SHELL COMPLETIONS:\n"
+"    link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish\n"
+"    link-p2p completions bash > /etc/bash_completion.d/link-p2p\n"
+"\n"
+"See README.md for self-hosted --relay setup and benchmarking against "
+"WireGuard/Tailscale."
+msgstr ""
+"クイックスタート：\n"
+"    # 公開したいマシンで（例：その SSH サーバー）：\n"
+"    link-p2p serve --forward 127.0.0.1:22\n"
+"    # -> EndpointId が表示されるので、相手に共有します\n"
+"\n"
+"    # 接続するマシンで：\n"
+"    link-p2p connect --to <EndpointId> --listen 127.0.0.1:2222\n"
+"    ssh -p 2222 localhost\n"
+"\n"
+"シェル補完：\n"
+"    link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish\n"
+"    link-p2p completions bash > /etc/bash_completion.d/link-p2p\n"
+"\n"
+"自己ホストの --relay 設定と WireGuard/Tailscale とのベンチマーク比較は README.md を参照。"
+
+msgid ""
+"Path to store/load this node's persistent secret key. If it doesn't exist "
+"yet, a new one is generated and saved here. Keep this stable if you want "
+"your EndpointId to stay the same across restarts."
+msgstr ""
+"このノードの永続的な秘密鍵を保存/読み込みするパス。ファイルが存在しない場合は新しい鍵を"
+"生成して保存します。このファイルを安定させておくと、再起動後も EndpointId が変わりません。"
+
+msgid ""
+"Use a custom relay server instead of n0's public one, e.g. http://127.0.0.1:3340 "
+"(run `iroh-relay --dev` locally). With this set, address discovery is skipped "
+"entirely: `connect` dials the peer directly through this relay, so no DNS/pkarr "
+"lookup to iroh.link is needed. Useful for self-hosted relays and for "
+"offline/local testing."
+msgstr ""
+"n0 の公開リレーの代わりにカスタムリレーサーバーを使用します。例：http://127.0.0.1:3340 "
+"（ローカルでは `iroh-relay --dev` で起動）。これを設定するとアドレス探索を完全にスキップ"
+"します：`connect` はこのリレーを通じて直接ピアにダイヤルするため、iroh.link への "
+"DNS/pkarr 参照は不要です。自己ホストリレーとオフライン/ローカルテストに便利です。"
+
+msgid "Expose a local TCP service to the P2P network."
+msgstr "ローカル TCP サービスを P2P ネットワークに公開します。"
+
+msgid "Local address to forward incoming P2P streams to, e.g. 127.0.0.1:8080"
+msgstr "受信 P2P ストリームを転送するローカルアドレス。例：127.0.0.1:8080"
+
+msgid "Dial a remote node and expose it as a local TCP listener."
+msgstr "リモートノードにダイヤルし、ローカル TCP リスナーとして公開します。"
+
+msgid "The remote node's EndpointId (printed by `serve` on startup)"
+msgstr "リモートノードの EndpointId（`serve` 起動時に表示されます）"
+
+msgid "Local address to listen on, e.g. 127.0.0.1:9090"
+msgstr "リッスンするローカルアドレス。例：127.0.0.1:9090"
+
+msgid "Print a shell completion script to stdout."
+msgstr "シェル補完スクリプトを標準出力に出力します。"
+
+msgid ""
+"Print a shell completion script to stdout.\n"
+"\n"
+"Redirect it to wherever your shell loads completions from, e.g. `link-p2p "
+"completions fish > ~/.config/fish/completions/link-p2p.fish`."
+msgstr ""
+"シェル補完スクリプトを標準出力に出力します。\n"
+"\n"
+"シェルが補完を読み込む場所にリダイレクトします。例：`link-p2p completions fish > "
+"~/.config/fish/completions/link-p2p.fish`。"
+
+msgid "Which shell to generate a completion script for."
+msgstr "補完スクリプトを生成するシェル。"
+
+msgid "Control colored output: auto (colors on TTY only), always, or never."
+msgstr "色付き出力の制御：auto（TTY のみ色付け）、always、never。"
+
+msgid ""
+"Maximum number of concurrent forwarded connections. 0 means unlimited. "
+"Prevents resource exhaustion on endpoints exposed to the network."
+msgstr ""
+"同時に転送する接続数の上限。0 は無制限。ネットワークに公開したエンドポイントでの"
+"リソース枯渇を防ぎます。"
+
+# --- ランタイム出力とログ ---
+
+msgid "loading/creating persistent identity"
+msgstr "永続的な ID の読み込み/作成"
+
+msgid "identity file exists but has unexpected length {0} (expected 64 hex chars)"
+msgstr "ID ファイルは存在しますが長さが異常です：{0}（64 文字の 16 進数が必要）"
+
+msgid "identity file exists but contains non-hex characters"
+msgstr "ID ファイルは存在しますが 16 進数以外の文字が含まれています"
+
+msgid "writing new identity to {0}"
+msgstr "新しい ID を {0} に書き込み中"
+
+msgid "setting permissions on {0}"
+msgstr "{0} のパーミッションを設定中"
+
+msgid ""
+"endpoint did not come online within {0}.\n"
+"\n"
+"The most likely cause: outgoing UDP is blocked by a firewall.\n"
+"iroh/QUIC relies on UDP for both direct hole-punching and relay connections. "
+"Try:\n"
+"  nc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\n"
+"  RUST_LOG=iroh=debug {1}     # see exactly where it's stuck"
+msgstr ""
+"エンドポイントが {0} 以内にオンラインになりませんでした。\n"
+"\n"
+"最も可能性の高い原因：ファイアウォールが送信 UDP をブロックしています。\n"
+"iroh/QUIC は直接ホールパンチングとリレー接続の両方で UDP に依存しています。確認方法：\n"
+"  nc -u -v -w3 8.8.8.8 53    # UDP 送信が機能するかどうか\n"
+"  RUST_LOG=iroh=debug {1}     # どこで詰まっているかを確認"
+
+msgid "'{0}' is not a valid --relay URL"
+msgstr "'{0}' は有効な --relay URL ではありません"
+
+msgid "binding endpoint"
+msgstr "エンドポイントをバインド中"
+
+msgid "forwarding P2P connections to: {0}"
+msgstr "P2P 接続の転送先：{0}"
+
+msgid "your EndpointId (give this to peers running `connect --to`):"
+msgstr "あなたの EndpointId（`connect --to` を実行するピアに共有します）："
+
+msgid "Press Ctrl+C to stop."
+msgstr "Ctrl+C で停止します。"
+
+msgid "shutting down..."
+msgstr "シャットダウン中……"
+
+msgid "connection opened"
+msgstr "接続が開かれました"
+
+msgid "connection ended"
+msgstr "接続が終了しました"
+
+msgid "connection closed"
+msgstr "接続が閉じられました"
+
+msgid "stream error"
+msgstr "ストリームエラー"
+
+msgid "connecting to local forward target {0}"
+msgstr "ローカル転送先 {0} に接続中"
+
+msgid "dialing {0}..."
+msgstr "{0} にダイヤル中……"
+
+msgid "connecting to remote endpoint"
+msgstr "リモートエンドポイントに接続中"
+
+msgid "connected. local TCP listener on {0} now forwards to the remote peer."
+msgstr "接続しました。ローカル TCP リスナー {0} はリモートピアに転送されます。"
+
+msgid "binding local listener on {0}"
+msgstr "ローカルリスナー {0} をバインド中"
+
+msgid "'{0}' is not a valid EndpointId"
+msgstr "'{0}' は有効な EndpointId ではありません"
+
+msgid "'{0}' is not a valid RelayUrl"
+msgstr "'{0}' は有効な RelayUrl ではありません"
+
+msgid "finishing send stream"
+msgstr "送信ストリームを終了中"
+
+msgid "copying stream data"
+msgstr "ストリームデータをコピー中"
+
+msgid "error"
+msgstr "エラー"

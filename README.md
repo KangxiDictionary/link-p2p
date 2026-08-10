@@ -101,8 +101,14 @@ environment locale:
 
 ```bash
 LANG=zh_CN.utf8 link-p2p --help   # Chinese help
+LANG=ja_JP.utf8 link-p2p --help   # Japanese help
+LANG=es_ES.utf8 link-p2p --help   # Spanish help
 LANG=C link-p2p --help            # English help (fallback)
 ```
+
+Catalog selection follows the environment: `LANG`/`LC_ALL` pick the locale,
+and GNU gettext's `LANGUAGE` variable (e.g. `LANGUAGE=ja_JP link-p2p`) can
+select a language without the system locale being installed.
 
 To add a language, copy `locales/zh_CN/LC_MESSAGES/link-p2p.po` to your
 locale's directory, translate the `msgstr`s, and rebuild (build.rs compiles
@@ -145,7 +151,17 @@ machine A's SSH server.
 
 Both sides persist their identity to `identity.key` in the working directory
 by default (`--identity` to change the path), so `EndpointId` stays stable
-across restarts — don't commit that file, it's a private key.
+across restarts — don't commit that file, it's a private key. On Unix the
+key file is created with mode `0600` (owner-only) and existing files are
+tightened to `0600` on every start.
+
+### Resource limits
+
+`--max-conns <N>` caps how many connections are forwarded concurrently
+(default 1024, `0` = unlimited). This matters on `serve` endpoints exposed
+to the network: without a cap, a peer flooding streams could exhaust file
+descriptors/CPU. When at capacity, extra streams/connections queue up
+instead of being dropped.
 
 ## Benchmarking against WireGuard/Tailscale (the actual point of this MVP)
 

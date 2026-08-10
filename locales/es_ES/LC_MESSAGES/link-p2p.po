@@ -1,27 +1,27 @@
-# link-p2p 简体中文翻译
-# 用 msgfmt 编译为 .mo：msgfmt --check -o link-p2p.mo link-p2p.po
-# 占位符 {0}、{1} 等为 Rust format! 风格，翻译时须保留且顺序一致。
+# Traducción de link-p2p al español
+# Compilar: msgfmt --check -o link-p2p.mo link-p2p.po
+# Los placeholders {0}, {1} son estilo format! de Rust; conserva su orden al traducir.
 msgid ""
 msgstr ""
 "Project-Id-Version: link-p2p 0.1.0\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Language: zh_CN\n"
+"Language: es_ES\n"
 
-# --- 命令行 help ---
+# --- Ayuda de línea de comandos ---
 
 msgid "Minimal TCP-over-QUIC forwarder on iroh"
-msgstr "基于 iroh 的最小 TCP-over-QUIC 转发器"
+msgstr "Reenviador TCP-over-QUIC mínimo sobre iroh"
 
 msgid ""
 "link-p2p exposes a local TCP service to a P2P network (or dials one) over a "
 "direct, end-to-end encrypted QUIC connection. No TUN device, no "
 "root/admin privileges — just a persistent EndpointId and a QUIC hop."
 msgstr ""
-"link-p2p 通过一条端到端加密的直连 QUIC 连接，把本地 TCP 服务暴露到 P2P "
-"网络（或拨号接入对方的服务）。无需 TUN 设备，无需 root/管理员权限——"
-"只需要一个持久的 EndpointId 和一跳 QUIC。"
+"link-p2p expone un servicio TCP local a una red P2P (o se conecta a uno) mediante "
+"una conexión QUIC directa cifrada de extremo a extremo. Sin dispositivo TUN, "
+"sin privilegios de root/administrador: solo un EndpointId persistente y un salto QUIC."
 
 msgid ""
 "QUICK START:\n"
@@ -40,28 +40,29 @@ msgid ""
 "See README.md for self-hosted --relay setup and benchmarking against "
 "WireGuard/Tailscale."
 msgstr ""
-"快速开始：\n"
-"    # 在要暴露服务的机器上（例如它的 SSH 服务器）：\n"
+"INICIO RÁPIDO:\n"
+"    # En la máquina que quieres exponer (p. ej. su servidor SSH):\n"
 "    link-p2p serve --forward 127.0.0.1:22\n"
-"    # -> 打印一个 EndpointId，把它分享给对端\n"
+"    # -> imprime un EndpointId, compártelo con el otro lado\n"
 "\n"
-"    # 在发起连接的机器上：\n"
+"    # En la máquina que se conecta:\n"
 "    link-p2p connect --to <EndpointId> --listen 127.0.0.1:2222\n"
 "    ssh -p 2222 localhost\n"
 "\n"
-"Shell 补全：\n"
+"COMPLETADO DE SHELL:\n"
 "    link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish\n"
 "    link-p2p completions bash > /etc/bash_completion.d/link-p2p\n"
 "\n"
-"自建 --relay 配置以及与 WireGuard/Tailscale 的基准对比，见 README.md。"
+"Consulta README.md para el relay autoalojado (--relay) y la comparación con WireGuard/Tailscale."
 
 msgid ""
 "Path to store/load this node's persistent secret key. If it doesn't exist "
 "yet, a new one is generated and saved here. Keep this stable if you want "
 "your EndpointId to stay the same across restarts."
 msgstr ""
-"用于存储/加载本节点持久密钥的路径。若文件不存在则生成新密钥并保存到此处。"
-"保持该文件稳定，EndpointId 即可在重启后保持不变。"
+"Ruta para guardar/cargar la clave secreta persistente de este nodo. Si no existe, "
+"se genera una nueva y se guarda aquí. Mantén este archivo estable para que el "
+"EndpointId no cambie entre reinicios."
 
 msgid ""
 "Use a custom relay server instead of n0's public one, e.g. http://127.0.0.1:3340 "
@@ -70,28 +71,29 @@ msgid ""
 "lookup to iroh.link is needed. Useful for self-hosted relays and for "
 "offline/local testing."
 msgstr ""
-"使用自定义 relay 服务器替代 n0 公共 relay，例如 http://127.0.0.1:3340 "
-"（本地可用 `iroh-relay --dev` 启动）。设置后完全跳过地址发现：`connect` "
-"直接通过该 relay 拨号对端，无需查询 iroh.link 的 DNS/pkarr。适用于自建 "
-"relay 与离线/本地测试。"
+"Usa un servidor relay propio en lugar del público de n0, p. ej. http://127.0.0.1:3340 "
+"(ejecuta `iroh-relay --dev` localmente). Con esto se omite por completo el "
+"descubrimiento de direcciones: `connect` dial al peer directamente a través de este "
+"relay, sin necesidad de consultar DNS/pkarr a iroh.link. Útil para relays "
+"autoalojados y pruebas offline/locales."
 
 msgid "Expose a local TCP service to the P2P network."
-msgstr "将本地 TCP 服务暴露到 P2P 网络。"
+msgstr "Expone un servicio TCP local a la red P2P."
 
 msgid "Local address to forward incoming P2P streams to, e.g. 127.0.0.1:8080"
-msgstr "转发 P2P 入站流的目标本地地址，例如 127.0.0.1:8080"
+msgstr "Dirección local a la que reenviar los streams P2P entrantes, p. ej. 127.0.0.1:8080"
 
 msgid "Dial a remote node and expose it as a local TCP listener."
-msgstr "拨号连接远端节点，并将其暴露为本地 TCP 监听端口。"
+msgstr "Marca a un nodo remoto y expónlo como un listener TCP local."
 
 msgid "The remote node's EndpointId (printed by `serve` on startup)"
-msgstr "远端节点的 EndpointId（`serve` 启动时会打印）"
+msgstr "El EndpointId del nodo remoto (impreso por `serve` al arrancar)"
 
 msgid "Local address to listen on, e.g. 127.0.0.1:9090"
-msgstr "本地监听地址，例如 127.0.0.1:9090"
+msgstr "Dirección local donde escuchar, p. ej. 127.0.0.1:9090"
 
 msgid "Print a shell completion script to stdout."
-msgstr "向标准输出打印 shell 补全脚本。"
+msgstr "Imprime un script de completado de shell en stdout."
 
 msgid ""
 "Print a shell completion script to stdout.\n"
@@ -99,39 +101,40 @@ msgid ""
 "Redirect it to wherever your shell loads completions from, e.g. `link-p2p "
 "completions fish > ~/.config/fish/completions/link-p2p.fish`."
 msgstr ""
-"向标准输出打印 shell 补全脚本。\n"
+"Imprime un script de completado de shell en stdout.\n"
 "\n"
-"将其重定向到你的 shell 加载补全的位置，例如 `link-p2p completions fish > "
-"~/.config/fish/completions/link-p2p.fish`。"
+"Redirígelo a donde tu shell cargue los completados, p. ej. `link-p2p completions "
+"fish > ~/.config/fish/completions/link-p2p.fish`."
 
 msgid "Which shell to generate a completion script for."
-msgstr "为哪个 shell 生成补全脚本。"
+msgstr "Para qué shell generar el script de completado."
 
 msgid "Control colored output: auto (colors on TTY only), always, or never."
-msgstr "控制彩色输出：auto（仅在终端显示颜色）、always 或 never。"
+msgstr "Controla la salida con colores: auto (colores solo en TTY), always o never."
 
 msgid ""
 "Maximum number of concurrent forwarded connections. 0 means unlimited. "
 "Prevents resource exhaustion on endpoints exposed to the network."
 msgstr ""
-"同时转发的最大连接数。0 表示不限制。防止暴露在网络上的端点资源耗尽。"
+"Número máximo de conexiones reenviadas simultáneamente. 0 significa ilimitado. "
+"Evita el agotamiento de recursos en endpoints expuestos a la red."
 
-# --- 运行时输出与日志 ---
+# --- Salida en tiempo de ejecución y registros ---
 
 msgid "loading/creating persistent identity"
-msgstr "加载/创建持久身份"
+msgstr "cargando/creando identidad persistente"
 
 msgid "identity file exists but has unexpected length {0} (expected 64 hex chars)"
-msgstr "身份文件存在但长度异常：{0}（应为 64 个十六进制字符）"
+msgstr "el archivo de identidad existe pero tiene una longitud inesperada: {0} (se esperaban 64 caracteres hexadecimales)"
 
 msgid "identity file exists but contains non-hex characters"
-msgstr "身份文件存在但包含非十六进制字符"
+msgstr "el archivo de identidad existe pero contiene caracteres no hexadecimales"
 
 msgid "writing new identity to {0}"
-msgstr "写入新身份到 {0}"
+msgstr "escribiendo nueva identidad en {0}"
 
 msgid "setting permissions on {0}"
-msgstr "设置 {0} 的权限"
+msgstr "estableciendo permisos en {0}"
 
 msgid ""
 "endpoint did not come online within {0}.\n"
@@ -142,69 +145,70 @@ msgid ""
 "  nc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\n"
 "  RUST_LOG=iroh=debug {1}     # see exactly where it's stuck"
 msgstr ""
-"端点在 {0} 内未能上线。\n"
+"el endpoint no se puso en línea en {0}.\n"
 "\n"
-"最常见原因：出站 UDP 被防火墙拦截。\n"
-"iroh/QUIC 依赖 UDP 进行直连打洞与 relay 连接。可尝试：\n"
-"  nc -u -v -w3 8.8.8.8 53    # 测试 UDP 出站是否正常\n"
-"  RUST_LOG=iroh=debug {1}     # 查看具体卡在哪一步"
+"La causa más probable: el firewall bloquea el UDP saliente.\n"
+"iroh/QUIC depende de UDP tanto para el hole-punching directo como para las conexiones "
+"de relay. Prueba:\n"
+"  nc -u -v -w3 8.8.8.8 53    # ¿funciona el envío de UDP?\n"
+"  RUST_LOG=iroh=debug {1}     # mira exactamente dónde se atasca"
 
 msgid "'{0}' is not a valid --relay URL"
-msgstr "'{0}' 不是合法的 --relay URL"
+msgstr "'{0}' no es una URL --relay válida"
 
 msgid "binding endpoint"
-msgstr "绑定端点"
+msgstr "enlazando endpoint"
 
 msgid "forwarding P2P connections to: {0}"
-msgstr "P2P 连接将转发到：{0}"
+msgstr "reenviando conexiones P2P a: {0}"
 
 msgid "your EndpointId (give this to peers running `connect --to`):"
-msgstr "你的 EndpointId（把它给运行 `connect --to` 的对端）："
+msgstr "tu EndpointId (dáselo a los peers que ejecuten `connect --to`):"
 
 msgid "Press Ctrl+C to stop."
-msgstr "按 Ctrl+C 停止。"
+msgstr "Pulsa Ctrl+C para detener."
 
 msgid "shutting down..."
-msgstr "正在关闭……"
+msgstr "apagando..."
 
 msgid "connection opened"
-msgstr "连接已建立"
+msgstr "conexión abierta"
 
 msgid "connection ended"
-msgstr "连接已结束"
+msgstr "conexión terminada"
 
 msgid "connection closed"
-msgstr "连接已关闭"
+msgstr "conexión cerrada"
 
 msgid "stream error"
-msgstr "流错误"
+msgstr "error de stream"
 
 msgid "connecting to local forward target {0}"
-msgstr "连接本地转发目标 {0}"
+msgstr "conectando al destino de reenvío local {0}"
 
 msgid "dialing {0}..."
-msgstr "正在拨号 {0}……"
+msgstr "marcando {0}..."
 
 msgid "connecting to remote endpoint"
-msgstr "正在连接远端端点"
+msgstr "conectando al endpoint remoto"
 
 msgid "connected. local TCP listener on {0} now forwards to the remote peer."
-msgstr "已连接。本地 TCP 监听 {0} 现在转发到远端节点。"
+msgstr "conectado. El listener TCP local {0} ahora reenvía al peer remoto."
 
 msgid "binding local listener on {0}"
-msgstr "绑定本地监听 {0}"
+msgstr "enlazando listener local en {0}"
 
 msgid "'{0}' is not a valid EndpointId"
-msgstr "'{0}' 不是合法的 EndpointId"
+msgstr "'{0}' no es un EndpointId válido"
 
 msgid "'{0}' is not a valid RelayUrl"
-msgstr "'{0}' 不是合法的 RelayUrl"
+msgstr "'{0}' no es una RelayUrl válida"
 
 msgid "finishing send stream"
-msgstr "结束发送流"
+msgstr "finalizando el stream de envío"
 
 msgid "copying stream data"
-msgstr "复制流数据"
+msgstr "copiando datos del stream"
 
 msgid "error"
-msgstr "错误"
+msgstr "error"
