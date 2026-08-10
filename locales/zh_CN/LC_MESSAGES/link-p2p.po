@@ -208,3 +208,76 @@ msgstr "复制流数据"
 
 msgid "error"
 msgstr "错误"
+
+# --- SOCKS5 代理模式 ---
+
+msgid "resolving {0}"
+msgstr "正在解析 {0}"
+
+msgid "no addresses for {0}"
+msgstr "{0} 没有可用地址"
+
+msgid "domain name too long: {0} bytes"
+msgstr "域名过长：{0} 字节"
+
+msgid "reading target header"
+msgstr "读取目标地址头部"
+
+msgid "non-utf8 domain in target header"
+msgstr "目标地址头部包含非 UTF-8 域名"
+
+msgid "unknown address type {0} in target header"
+msgstr "目标地址头部存在未知地址类型 {0}"
+
+msgid "reading SOCKS5 greeting"
+msgstr "读取 SOCKS5 握手消息"
+
+msgid "unsupported SOCKS version {0} (only SOCKS5 is supported)"
+msgstr "不支持的 SOCKS 版本 {0}（仅支持 SOCKS5）"
+
+msgid "sending SOCKS5 method selection"
+msgstr "发送 SOCKS5 认证方式协商"
+
+msgid "reading SOCKS5 request"
+msgstr "读取 SOCKS5 请求"
+
+msgid "bad SOCKS5 request version {0}"
+msgstr "错误的 SOCKS5 请求版本 {0}"
+
+msgid "only CONNECT is supported (got command {0})"
+msgstr "仅支持 CONNECT 命令（收到命令 {0}）"
+
+msgid "non-utf8 domain in SOCKS5 request"
+msgstr "SOCKS5 请求包含非 UTF-8 域名"
+
+msgid "unsupported address type {0}"
+msgstr "不支持的地址类型 {0}"
+
+msgid "sending SOCKS5 success reply"
+msgstr "发送 SOCKS5 成功响应"
+
+msgid "connecting to {0}"
+msgstr "正在连接 {0}"
+
+msgid "proxy mode: dialing the target address from each stream's header"
+msgstr "代理模式：按每个流头部中的目标地址拨号"
+
+msgid ""
+"Generic proxy mode: dial the address from each stream's header instead of a "
+"fixed --forward target. Pairs with `connect --socks5-listen`."
+msgstr ""
+"通用代理模式：按每个流头部中的目标地址拨号，而非固定的 --forward 目标。"
+"与 `connect --socks5-listen` 配合使用。"
+
+msgid ""
+"Speak SOCKS5 (no-auth, CONNECT only) on this local address; local clients "
+"can then reach any destination through the remote `serve --proxy`."
+msgstr ""
+"在此本地地址上提供 SOCKS5 服务（无认证，仅 CONNECT）；本地客户端可通过"
+"远端的 `serve --proxy` 访问任意目的地。"
+
+msgid "serve requires either --forward or --proxy"
+msgstr "serve 需要 --forward 或 --proxy 其中之一"
+
+msgid "connect requires either --listen or --socks5-listen"
+msgstr "connect 需要 --listen 或 --socks5-listen 其中之一"

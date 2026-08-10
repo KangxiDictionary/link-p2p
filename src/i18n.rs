@@ -59,8 +59,12 @@ pub(crate) use tr;
 /// replaced textually instead — our templates only use positional ones.
 macro_rules! tr_fmt {
     ($template:literal, $($arg:expr),* $(,)?) => {{
+        // clippy's from_ref suggestion for the single-arg case has a type
+        // mismatch inside a macro; the slice is intentional.
+        #[allow(clippy::unnecessary_to_owned)]
+        let _args = [$($arg.to_string()),*];
         let _template = gettextrs::gettext($template);
-        $crate::i18n::tr_fmt_impl(&_template, &[$($arg.to_string()),*])
+        $crate::i18n::tr_fmt_impl(&_template, &_args)
     }};
 }
 pub(crate) use tr_fmt;

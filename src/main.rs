@@ -15,6 +15,7 @@
 //! `cargo doc -p iroh --open` rather than assuming the overall approach is wrong.
 
 mod i18n;
+mod socks5;
 mod style;
 
 use std::io::{IsTerminal, Write};
@@ -97,8 +98,13 @@ enum Command {
     /// Expose a local TCP service to the P2P network.
     Serve {
         /// Local address to forward incoming P2P streams to, e.g. 127.0.0.1:8080
-        #[arg(long)]
-        forward: SocketAddr,
+        #[arg(long, conflicts_with = "proxy")]
+        forward: Option<SocketAddr>,
+        /// Generic proxy mode: dial the address from each stream's header
+        /// instead of a fixed --forward target. Pairs with `connect
+        /// --socks5-listen`. Conflicts with --forward.
+        #[arg(long, conflicts_with = "forward")]
+        proxy: bool,
     },
     /// Dial a remote node and expose it as a local TCP listener.
     Connect {
@@ -106,8 +112,13 @@ enum Command {
         #[arg(long)]
         to: String,
         /// Local address to listen on, e.g. 127.0.0.1:9090
-        #[arg(long)]
-        listen: SocketAddr,
+        #[arg(long, conflicts_with = "socks5_listen")]
+        listen: Option<SocketAddr>,
+        /// Speak SOCKS5 (no-auth, CONNECT only) on this local address; local
+        /// clients can then reach any destination through the remote
+        /// `serve --proxy`. Conflicts with --listen.
+        #[arg(long, conflicts_with = "listen")]
+        socks5_listen: Option<SocketAddr>,
     },
     /// Print a shell completion script to stdout.
     ///
@@ -153,6 +164,10 @@ fn localized_command() -> clap::Command {
                     "forward",
                     |a| a.help(tr!("Local address to forward incoming P2P streams to, e.g. 127.0.0.1:8080")),
                 )
+                .mut_arg(
+                    "proxy",
+                    |a| a.help(tr!("Generic proxy mode: dial the address from each stream's header instead of a fixed --forward target. Pairs with `connect --socks5-listen`.")),
+                )
         })
         .mut_subcommand("connect", |s| {
             s.about(tr!("Dial a remote node and expose it as a local TCP listener."))
@@ -163,6 +178,10 @@ fn localized_command() -> clap::Command {
                 .mut_arg(
                     "listen",
                     |a| a.help(tr!("Local address to listen on, e.g. 127.0.0.1:9090")),
+                )
+                .mut_arg(
+                    "socks5_listen",
+                    |a| a.help(tr!("Speak SOCKS5 (no-auth, CONNECT only) on this local address; local clients can then reach any destination through the remote `serve --proxy`.")),
                 )
         })
         .mut_subcommand("completions", |s| {
@@ -239,7 +258,10 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
         .context(tr!("loading/creating persistent identity"))?;
 
     match cli.command {
-        Command::Serve { forward } => {
+        Command::Serve { forward, proxy } => {
+            if !proxy && forward.is_none() {
+                anyhow::bail!(tr!("serve requires either --forward or --proxy"));
+            }
             run_serve(
                 secret_key,
                 forward,
@@ -249,11 +271,19 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             )
             .await
         }
-        Command::Connect { to, listen } => {
+        Command::Connect {
+            to,
+            listen,
+            socks5_listen,
+        } => {
+            if listen.is_none() && socks5_listen.is_none() {
+                anyhow::bail!(tr!("connect requires either --listen or --socks5-listen"));
+            }
             run_connect(
                 secret_key,
                 &to,
                 listen,
+                socks5_listen,
                 cli.relay.as_deref(),
                 cli.max_conns,
                 styler,
@@ -381,7 +411,7 @@ fn build_endpoint(secret_key: SecretKey, relay: Option<&str>) -> Result<iroh::en
 
 async fn run_serve(
     secret_key: SecretKey,
-    forward: SocketAddr,
+    forward: Option<SocketAddr>,
     relay: Option<&str>,
     max_conns: usize,
     styler: Styler,
@@ -395,10 +425,18 @@ async fn run_serve(
     wait_online(&endpoint).await?;
 
     println!("{}", styler.banner("link-p2p serve"));
-    println!(
-        "  {}",
-        tr_fmt!("forwarding P2P connections to: {0}", forward)
-    );
+    match forward {
+        Some(target) => println!(
+            "  {}",
+            tr_fmt!("forwarding P2P connections to: {0}", target)
+        ),
+        None => println!(
+            "  {}",
+            styler.info(&tr!(
+                "proxy mode: dialing the target address from each stream's header"
+            ))
+        ),
+    }
     println!(
         "  {}",
         styler.dim(&tr!(
@@ -430,7 +468,9 @@ async fn run_serve(
 
 #[derive(Debug, Clone)]
 struct ForwardHandler {
-    target: SocketAddr,
+    /// Fixed `--forward` target; `None` means `--proxy` mode where the
+    /// destination comes from each stream's header.
+    target: Option<SocketAddr>,
     /// Bounds the number of concurrently forwarded streams.
     semaphore: Arc<Semaphore>,
 }
@@ -482,15 +522,24 @@ impl ProtocolHandler for ForwardHandler {
     }
 }
 
-/// Dial the local TCP target and pipe bytes between it and the given QUIC stream.
+/// Dial the target and pipe bytes between it and the given QUIC stream.
+///
+/// With a fixed `--forward` target, dial it directly (backwards compatible
+/// with plain `connect --listen`). In `--proxy` mode (`forward: None`) read
+/// the target header off the stream first — the header was written by the
+/// peer's `connect --socks5-listen`.
 async fn handle_forward_stream(
-    target: SocketAddr,
+    forward: Option<SocketAddr>,
     send: SendStream,
-    recv: RecvStream,
+    mut recv: RecvStream,
 ) -> Result<()> {
+    let target = match forward {
+        Some(addr) => addr,
+        None => socks5::read_target(&mut recv).await?.resolve().await?,
+    };
     let tcp = TcpStream::connect(target)
         .await
-        .with_context(|| tr_fmt!("connecting to local forward target {0}", target))?;
+        .with_context(|| tr_fmt!("connecting to {0}", target))?;
     pipe_streams(tcp, send, recv).await
 }
 
@@ -502,11 +551,15 @@ async fn handle_forward_stream(
 async fn run_connect(
     secret_key: SecretKey,
     to: &str,
-    listen: SocketAddr,
+    listen: Option<SocketAddr>,
+    socks5_listen: Option<SocketAddr>,
     relay: Option<&str>,
     max_conns: usize,
     styler: Styler,
 ) -> Result<()> {
+    // Exactly one of --listen / --socks5-listen was validated by the caller.
+    let local_addr = socks5_listen.or(listen).expect("validated");
+    let is_socks5 = socks5_listen.is_some();
     let endpoint = build_endpoint(secret_key, relay)?
         .bind()
         .await
@@ -540,13 +593,13 @@ async fn run_connect(
         "{}",
         styler.ok(&tr_fmt!(
             "connected. local TCP listener on {0} now forwards to the remote peer.",
-            listen
+            local_addr
         ))
     );
 
-    let tcp_listener = TcpListener::bind(listen)
+    let tcp_listener = TcpListener::bind(local_addr)
         .await
-        .with_context(|| tr_fmt!("binding local listener on {0}", listen))?;
+        .with_context(|| tr_fmt!("binding local listener on {0}", local_addr))?;
 
     // Same concurrency bound as serve. Here the permit is acquired *inside*
     // the spawned task so the accept loop stays responsive: excess local
@@ -561,14 +614,29 @@ async fn run_connect(
     loop {
         tokio::select! {
             accepted = tcp_listener.accept() => {
-                let (tcp_stream, client_addr) = accepted?;
+                let (mut tcp_stream, client_addr) = accepted?;
                 let connection = connection.clone();
                 let semaphore = semaphore.clone();
                 tokio::spawn(async move {
                     let result = async {
-                        let _permit = semaphore.acquire_owned().await?;
-                        let (send, recv) = connection.open_bi().await?;
-                        pipe_streams(tcp_stream, send, recv).await
+                        if is_socks5 {
+                            // SOCKS5 mode: parse the local client's CONNECT
+                            // request, then tell the remote `serve --proxy`
+                            // where to dial via the stream header. The
+                            // handshake happens before the permit so a client
+                            // that never completes it doesn't hold a slot.
+                            let target = socks5::accept_handshake(&mut tcp_stream).await?;
+                            let _permit = semaphore.acquire_owned().await?;
+                            let (mut send, recv) = connection.open_bi().await?;
+                            socks5::write_target(&mut send, &target).await?;
+                            pipe_streams(tcp_stream, send, recv).await
+                        } else {
+                            // Plain mode: forward to the remote serve's
+                            // fixed --forward target.
+                            let _permit = semaphore.acquire_owned().await?;
+                            let (send, recv) = connection.open_bi().await?;
+                            pipe_streams(tcp_stream, send, recv).await
+                        }
                     }
                     .await;
                     if let Err(e) = result {

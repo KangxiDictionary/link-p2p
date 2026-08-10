@@ -209,3 +209,77 @@ msgstr "ストリームデータをコピー中"
 
 msgid "error"
 msgstr "エラー"
+
+# --- SOCKS5 プロキシモード ---
+
+msgid "resolving {0}"
+msgstr "{0} を解決中"
+
+msgid "no addresses for {0}"
+msgstr "{0} のアドレスが見つかりません"
+
+msgid "domain name too long: {0} bytes"
+msgstr "ドメイン名が長すぎます：{0} バイト"
+
+msgid "reading target header"
+msgstr "ターゲットヘッダーの読み取り中"
+
+msgid "non-utf8 domain in target header"
+msgstr "ターゲットヘッダーに非 UTF-8 のドメインが含まれています"
+
+msgid "unknown address type {0} in target header"
+msgstr "ターゲットヘッダーに不明なアドレスタイプ {0}"
+
+msgid "reading SOCKS5 greeting"
+msgstr "SOCKS5 グリーティングの読み取り中"
+
+msgid "unsupported SOCKS version {0} (only SOCKS5 is supported)"
+msgstr "サポートされていない SOCKS バージョン {0}（SOCKS5 のみ対応）"
+
+msgid "sending SOCKS5 method selection"
+msgstr "SOCKS5 メソッド選択の送信中"
+
+msgid "reading SOCKS5 request"
+msgstr "SOCKS5 リクエストの読み取り中"
+
+msgid "bad SOCKS5 request version {0}"
+msgstr "不正な SOCKS5 リクエストバージョン {0}"
+
+msgid "only CONNECT is supported (got command {0})"
+msgstr "CONNECT のみサポートされています（コマンド {0} を受信）"
+
+msgid "non-utf8 domain in SOCKS5 request"
+msgstr "SOCKS5 リクエストに非 UTF-8 のドメインが含まれています"
+
+msgid "unsupported address type {0}"
+msgstr "サポートされていないアドレスタイプ {0}"
+
+msgid "sending SOCKS5 success reply"
+msgstr "SOCKS5 成功応答の送信中"
+
+msgid "connecting to {0}"
+msgstr "{0} に接続中"
+
+msgid "proxy mode: dialing the target address from each stream's header"
+msgstr "プロキシモード：各ストリームのヘッダーにあるターゲットアドレスへダイヤルします"
+
+msgid ""
+"Generic proxy mode: dial the address from each stream's header instead of a "
+"fixed --forward target. Pairs with `connect --socks5-listen`."
+msgstr ""
+"汎用プロキシモード：固定の --forward ターゲットの代わりに、各ストリームの"
+"ヘッダーにあるアドレスへダイヤルします。`connect --socks5-listen` と組み合わせて"
+"使用します。"
+
+msgid ""
+"Speak SOCKS5 (no-auth, CONNECT only) on this local address; local clients "
+"can then reach any destination through the remote `serve --proxy`."
+msgstr ""
+"このローカルアドレスで SOCKS5（認証なし、CONNECT のみ）を提供します。"
+"ローカルクライアントは遠端の `serve --proxy` を通じて任意の宛先にアクセスできます。"
+
+msgid "serve requires either --forward or --proxy"
+msgstr "serve には --forward または --proxy のいずれかが必要です"
+
+msgid "connect requires either --listen or --socks5-listen"
+msgstr "connect には --listen または --socks5-listen のいずれかが必要です"

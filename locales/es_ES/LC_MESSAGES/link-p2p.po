@@ -212,3 +212,76 @@ msgstr "copiando datos del stream"
 
 msgid "error"
 msgstr "error"
+
+# --- Modo proxy SOCKS5 ---
+
+msgid "resolving {0}"
+msgstr "resolviendo {0}"
+
+msgid "no addresses for {0}"
+msgstr "no hay direcciones para {0}"
+
+msgid "domain name too long: {0} bytes"
+msgstr "el nombre de dominio es demasiado largo: {0} bytes"
+
+msgid "reading target header"
+msgstr "leyendo la cabecera del destino"
+
+msgid "non-utf8 domain in target header"
+msgstr "dominio no UTF-8 en la cabecera del destino"
+
+msgid "unknown address type {0} in target header"
+msgstr "tipo de dirección desconocido {0} en la cabecera del destino"
+
+msgid "reading SOCKS5 greeting"
+msgstr "leyendo el saludo SOCKS5"
+
+msgid "unsupported SOCKS version {0} (only SOCKS5 is supported)"
+msgstr "versión SOCKS no compatible {0} (solo se admite SOCKS5)"
+
+msgid "sending SOCKS5 method selection"
+msgstr "enviando la selección de método SOCKS5"
+
+msgid "reading SOCKS5 request"
+msgstr "leyendo la petición SOCKS5"
+
+msgid "bad SOCKS5 request version {0}"
+msgstr "versión de petición SOCKS5 incorrecta {0}"
+
+msgid "only CONNECT is supported (got command {0})"
+msgstr "solo se admite CONNECT (se recibió el comando {0})"
+
+msgid "non-utf8 domain in SOCKS5 request"
+msgstr "dominio no UTF-8 en la petición SOCKS5"
+
+msgid "unsupported address type {0}"
+msgstr "tipo de dirección no compatible {0}"
+
+msgid "sending SOCKS5 success reply"
+msgstr "enviando la respuesta de éxito SOCKS5"
+
+msgid "connecting to {0}"
+msgstr "conectando a {0}"
+
+msgid "proxy mode: dialing the target address from each stream's header"
+msgstr "modo proxy: marcando a la dirección de destino de la cabecera de cada stream"
+
+msgid ""
+"Generic proxy mode: dial the address from each stream's header instead of a "
+"fixed --forward target. Pairs with `connect --socks5-listen`."
+msgstr ""
+"Modo proxy genérico: marca a la dirección de la cabecera de cada stream en lugar "
+"de un destino fijo --forward. Se combina con `connect --socks5-listen`."
+
+msgid ""
+"Speak SOCKS5 (no-auth, CONNECT only) on this local address; local clients "
+"can then reach any destination through the remote `serve --proxy`."
+msgstr ""
+"Ofrece SOCKS5 (sin autenticación, solo CONNECT) en esta dirección local; los "
+"clientes locales pueden alcanzar cualquier destino a través del `serve --proxy` remoto."
+
+msgid "serve requires either --forward or --proxy"
+msgstr "serve requiere --forward o --proxy"
+
+msgid "connect requires either --listen or --socks5-listen"
+msgstr "connect requiere --listen o --socks5-listen"

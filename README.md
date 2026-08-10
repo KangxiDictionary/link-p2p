@@ -7,11 +7,40 @@ and measured before adding SOCKS5, QoS policy, LD_PRELOAD interception, GSO/io_u
 ## What this does
 
 - `serve` binds an iroh Endpoint, prints its `EndpointId`, and forwards every
-  incoming QUIC stream to a fixed local TCP address (e.g. your game server,
-  SSH, whatever you're exposing).
+  incoming QUIC stream either to a fixed local TCP address (`--forward`, e.g.
+  your game server, SSH, whatever you're exposing) or, in `--proxy` mode, to
+  whatever address the stream's header asks for.
 - `connect` dials a remote `EndpointId` once, then opens a fresh QUIC stream
   per local TCP connection you make to it, on the *same* underlying
-  connection (so NAT traversal / relay negotiation only happens once).
+  connection (so NAT traversal / relay negotiation only happens once). It
+  exposes either a plain forward (`--listen`) or a SOCKS5 server
+  (`--socks5-listen`).
+
+### SOCKS5 proxy (`serve --proxy` + `connect --socks5-listen`)
+
+Instead of pinning a single destination, the `serve` side can act as a
+generic proxy: each stream carries a tiny target header (reusing SOCKS5's own
+address encoding), and `serve` dials wherever it points. Domain names are
+resolved on the `serve` side, so you can reach hosts that only the remote
+network can resolve — same as a real VPN:
+
+```bash
+# machine A: generic proxy endpoint
+link-p2p serve --proxy
+
+# machine B: local SOCKS5 server for browsers / curl / tun2socks
+link-p2p connect --socks5-listen 127.0.0.1:1080 --to <EndpointId from A>
+
+curl --socks5 127.0.0.1:1080 http://anything/            # IP target
+curl --socks5-hostname 127.0.0.1:1080 http://internal-x/ # resolved on A
+```
+
+The SOCKS5 implementation is minimal by design: no-auth, CONNECT only. That
+is fine bound to 127.0.0.1; don't expose `--socks5-listen` on a real
+interface without adding username/password auth first.
+
+The old single-port modes still exist unchanged (`serve --forward` + `connect
+--listen`) — the proxy is an addition, not a replacement.
 
 Both directions use iroh's default `presets::N0` config, which enables n0's
 public relay + discovery infrastructure — so this will generally work even
@@ -61,12 +90,18 @@ Also supports `powershell` and `elvish`. Re-run after upgrading if flags change.
 
 ## What this deliberately does NOT do yet
 
-- No SOCKS5 / transparent interception (LD_PRELOAD) — you connect to a fixed
-  local port, same as a normal SSH `-L` forward.
+- SOCKS5 is there but minimal: no username/password auth, no UDP
+  ASSOCIATE, no bind. Only CONNECT over 127.0.0.1.
+- No transparent interception (LD_PRELOAD / TUN) — clients must speak
+  SOCKS5 or use the fixed-port modes.
 - No per-stream QoS / datagram mode for "unreliable" traffic — every stream
   is a reliable QUIC stream (bidi, ordered).
-- No GSO/io_uring tuning — this is the naive `tokio::io::copy` path. Measure
-  first, then decide if that's actually your bottleneck.
+- No GSO/io_uring tuning — this is the naive `tokio::io::copy` path. Note
+  that UDP GSO (batch sends) is already handled automatically by iroh's UDP
+  stack (noq-udp) when the kernel supports it (4.18+, via `UDP_SEGMENT`); on
+  this machine it's active. That's different from the app-level GSO/io_uring
+  work that a benchmark would tell you whether to pursue. Measure first, then
+  decide if that's actually your bottleneck.
 - No "full mesh" — this is one dialer, one listener, one forwarded target.
 - **No tokio runtime/scheduling tuning** — `#[tokio::main]` uses the default
   multi-thread runtime (one OS thread per core), and it's one spawned task
