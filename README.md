@@ -265,6 +265,16 @@ sharding (MPTCP-style splitting into N QUIC connections) does **not** lift
 this ceiling; only a data-plane change (e.g. WireGuard-style, or accepting
 ~5 Gbps) would. Numbers are machine-specific; re-run on real hardware.
 
+Is the ~650 MB/s wall crypto? No — AEAD is cheap on this CPU
+(`openssl speed`): AES-128-GCM ~2.3 GB/s/core and ChaCha20-Poly1305 ~1.5
+GB/s/core at 1300-byte packets (realistic QUIC packet size). The wall is
+QUIC protocol processing (ACK/congestion/stream state machines, userspace
+I/O), not encryption. A WireGuard-style data plane (one AEAD per packet,
+minimal protocol overhead) would almost certainly exceed it — but the ~5
+Gbps ceiling already exceeds typical real links, so that rewrite was
+shelved on ROI grounds, not feasibility. (boringtun could not be run in
+this sandbox: TUN device creation needs CAP_NET_ADMIN.)
+
 Whatever you find, that's the real basis for deciding whether GSO/io_uring/
 LD_PRELOAD work is worth doing next, rather than assuming it from an
 architecture diagram.
