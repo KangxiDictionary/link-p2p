@@ -241,6 +241,30 @@ the bottleneck on 10 Gbps+. This is exactly the number to re-measure after
 any architecture change (TUN/datagram, io_uring) and on real hardware
 across a real network.
 
+### Multi-connection scaling (does sharding help?)
+
+`scripts/bench-multi.sh` runs N fully independent serve+connect pairs (own
+identity, own UDP socket, own QUIC connection, all confirmed on direct
+paths) to test whether aggregate throughput scales with the number of
+*connections* rather than streams. Same machine, with a raw-TCP control on
+the same interface:
+
+| k connections | tunnel aggregate | per-connection | CPU | raw TCP (same path) |
+|---|---|---|---|---|
+| 1 | 346 MB/s | 346 | ~2 cores | 3.4 GB/s |
+| 2 | 538 MB/s | 269 | ~4.4 cores | — |
+| 4 | 619 MB/s | 155 | ~7.9 cores | 3.7 GB/s |
+| 8 | 647 MB/s | 81 | ~10.2 cores | 3.4 GB/s |
+
+Raw TCP on the same interface scales fine with parallel connections (3.4+
+GB/s at k=1, 4, 8), so the interface, the relay, and the kernel are not the
+shared limit. The QUIC stack aggregate plateaus at ~650 MB/s while CPU keeps
+climbing — a shared resource inside the data path (crypto/memory bandwidth)
+that independent connections all compete for. Consequence: connection
+sharding (MPTCP-style splitting into N QUIC connections) does **not** lift
+this ceiling; only a data-plane change (e.g. WireGuard-style, or accepting
+~5 Gbps) would. Numbers are machine-specific; re-run on real hardware.
+
 Whatever you find, that's the real basis for deciding whether GSO/io_uring/
 LD_PRELOAD work is worth doing next, rather than assuming it from an
 architecture diagram.
