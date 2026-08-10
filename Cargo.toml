@@ -20,6 +20,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 gettext-rs = { version = "0.8", features = ["gettext-system"] }
 # Terminal styling (bold/color) for our own output; clap styles --help itself.
 console = "0.16"
+# TUN device support (TUN mode: whole-machine IP reachability, needs root).
+# The `async` feature is off by default; AsyncDevice is what we drive with tokio.
+tun2 = { version = "4", features = ["async"] }
+# Address derivation for TUN mode (blake3 already in the tree via iroh).
+blake3 = "1"
+# QUIC datagram payload type for TUN mode.
+bytes = "1"
 
 [[bin]]
 name = "link-p2p"

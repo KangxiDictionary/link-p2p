@@ -51,9 +51,13 @@ vip(ep) = 100.64.0.0/10 段内，取 BLAKE3(EndpointId) 的低 22 bit 作为主�
 - CLI 形态（沿用现有 serve/connect 的角色模型）：
 
 ```
-link-p2p tun serve  --listen                 # 被访问侧：接受连接，创建 tun0
-link-p2p tun connect --to <EndpointId> ...   # 访问侧：拨号，创建 tun0
+link-p2p tun serve  [--tun-ip <addr>] [--mtu <mtu>]   # 被访问侧：接受连接，创建 tun0
+link-p2p tun connect --to <EndpointId> [--tun-ip <addr>] [--mtu <mtu>]  # 访问侧：拨号，创建 tun0
 ```
+
+serve 侧不需要监听地址参数（虚拟 IP 由派生或 `--tun-ip` 决定，本模式没有
+TCP 监听端口）。`--tun-ip` 覆盖本端虚拟 IP 派生；`--mtu`（默认 1280，> 1280
+拒绝）作为 MTU 上限，最终 MTU = `min(--mtu, max_datagram_size())`。
 
 两侧各自 `--identity`/`--relay` 语义与现有模式一致。`--tun-ip`/`--mtu` 为本模式独有。
 - 不共享模式切换逻辑；两个模式的代码路径在 `tun` 模块内部完全独立，唯一共用的是 `i18n`/`style`/endpoint 构建这些基础设施。

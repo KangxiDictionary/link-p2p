@@ -140,10 +140,10 @@ msgid ""
 "endpoint did not come online within {0}.\n"
 "\n"
 "The most likely cause: outgoing UDP is blocked by a firewall.\n"
-"iroh/QUIC relies on UDP for both direct hole-punching and relay connections. "
-"Try:\n"
-"  nc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\n"
-"  RUST_LOG=iroh=debug {1}     # see exactly where it's stuck"
+"iroh/QUIC relies on UDP for both direct hole-punching and\n"
+"relay connections. Try:\n"
+"nc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\n"
+"RUST_LOG=iroh=debug {1}     # see exactly where it's stuck"
 msgstr ""
 "el endpoint no se puso en línea en {0}.\n"
 "\n"
@@ -182,9 +182,6 @@ msgstr "conexión cerrada"
 
 msgid "stream error"
 msgstr "error de stream"
-
-msgid "connecting to local forward target {0}"
-msgstr "conectando al destino de reenvío local {0}"
 
 msgid "dialing {0}..."
 msgstr "marcando {0}..."
@@ -285,3 +282,141 @@ msgstr "serve requiere --forward o --proxy"
 
 msgid "connect requires either --listen or --socks5-listen"
 msgstr "connect requiere --listen o --socks5-listen"
+
+# --- Modo TUN ---
+
+msgid "Make two machines reachable at the IP layer over QUIC datagrams."
+msgstr "Hace dos máquinas alcanzables entre sí en la capa IP mediante datagramas QUIC."
+
+msgid ""
+"Make two machines reachable at the IP layer over QUIC datagrams.\n"
+"\n"
+"Creates a TUN interface (needs root / CAP_NET_ADMIN) and routes the peer's "
+"virtual IP through it. Unlike `serve`/`connect`, which forward one TCP "
+"port, this bridges the whole machine: TCP, UDP and ICMP all work on the "
+"peer's virtual IP, with no per-port setup. Point-to-point only in v1 — see "
+"docs/tun-design.md."
+msgstr ""
+"Hace dos máquinas alcanzables entre sí en la capa IP mediante datagramas QUIC.\n"
+"\n"
+"Crea una interfaz TUN (requiere root / CAP_NET_ADMIN) y enruta la IP virtual "
+"del peer a través de ella. A diferencia de `serve`/`connect`, que reenvían un "
+"único puerto TCP, esto puentea toda la máquina: TCP, UDP e ICMP funcionan en "
+"la IP virtual del peer, sin configuración por puerto. Solo punto a punto en v1 — "
+"ver docs/tun-design.md."
+
+msgid "Exposed side: accept a peer and bridge this machine to it at the IP layer."
+msgstr "Lado expuesto: acepta un peer y puentea esta máquina con él en la capa IP."
+
+msgid ""
+"Exposed side: accept a peer and bridge this machine to it at the IP layer. "
+"Prints this node's virtual IP and EndpointId, then forwards all packets to "
+"the first peer that dials."
+msgstr ""
+"Lado expuesto: acepta un peer y puentea esta máquina con él en la capa IP. "
+"Muestra la IP virtual y el EndpointId de este nodo, y luego reenvía todos los "
+"paquetes al primer peer que marque."
+
+msgid "Dial a peer and bridge this machine to it at the IP layer."
+msgstr "Marca a un peer y puentea esta máquina con él en la capa IP."
+
+msgid ""
+"Override this node's virtual IP (default: derived from its EndpointId, "
+"inside 100.64.0.0/10)."
+msgstr ""
+"Sobrescribe la IP virtual de este nodo (predeterminada: derivada de su "
+"EndpointId, dentro de 100.64.0.0/10)."
+
+msgid ""
+"Upper bound for the TUN interface MTU (default 1280). The final MTU is "
+"min(this, the negotiated QUIC datagram max); values above 1280 are refused."
+msgstr ""
+"Límite superior del MTU de la interfaz TUN (predeterminado 1280). El MTU final es "
+"min(este valor, el máximo de datagrama QUIC negociado); se rechazan valores por "
+"encima de 1280."
+
+msgid "The remote node's EndpointId (printed by `tun serve` on startup)"
+msgstr "EndpointId del nodo remoto (impreso por `tun serve` al iniciar)"
+
+msgid ""
+"--mtu must be at most 1280 (got {0}); higher values would fragment the outer "
+"QUIC datagrams"
+msgstr ""
+"--mtu debe ser como máximo 1280 (se recibió {0}); valores mayores fragmentarían "
+"los datagramas QUIC externos"
+
+msgid ""
+"the peer or path does not support QUIC datagrams; TUN mode cannot work over "
+"this connection.\n"
+"Refusing to start rather than silently falling back to a stream transport."
+msgstr ""
+"El peer o la ruta no admiten datagramas QUIC; el modo TUN no puede funcionar en "
+"esta conexión.\n"
+"Se niega a iniciar en lugar de degradar silenciosamente a un transporte por stream."
+
+msgid "running `ip {0}`"
+msgstr "ejecutando `ip {0}`"
+
+msgid "command `ip {0}` failed: {1}"
+msgstr "el comando `ip {0}` falló: {1}"
+
+msgid "checking local interfaces for the virtual IP"
+msgstr "comprobando interfaces locales para la IP virtual"
+
+msgid ""
+"virtual IP {0} is already assigned to a local interface.\n"
+"Pick a different one with --tun-ip."
+msgstr ""
+"La IP virtual {0} ya está asignada a una interfaz local.\n"
+"Elige otra con --tun-ip."
+
+msgid "TUN mode currently supports Linux only"
+msgstr "El modo TUN actualmente solo admite Linux"
+
+msgid "creating TUN device (needs root / CAP_NET_ADMIN)"
+msgstr "creando dispositivo TUN (requiere root / CAP_NET_ADMIN)"
+
+msgid "reading TUN interface name"
+msgstr "leyendo el nombre de la interfaz TUN"
+
+msgid "reading packet from TUN device"
+msgstr "leyendo paquete del dispositivo TUN"
+
+msgid "sending datagram to peer failed"
+msgstr "falló el envío de datagrama al peer"
+
+msgid "writing packet to TUN device"
+msgstr "escribiendo paquete en el dispositivo TUN"
+
+msgid "peer disconnected"
+msgstr "peer desconectado"
+
+msgid "your virtual IP (the peer reaches you here):"
+msgstr "tu IP virtual (el peer te alcanza aquí):"
+
+msgid "your EndpointId (give this to peers running `tun connect --to`):"
+msgstr "tu EndpointId (dáselo a los peers que ejecuten `tun connect --to`):"
+
+msgid "TUN session established"
+msgstr "sesión TUN establecida"
+
+msgid "rejecting malformed incoming connection"
+msgstr "rechazando conexión entrante malformada"
+
+msgid "completing connection handshake"
+msgstr "completando el handshake de la conexión"
+
+msgid "endpoint closed"
+msgstr "endpoint cerrado"
+
+msgid "TUN session error"
+msgstr "error de sesión TUN"
+
+msgid "connected. your virtual IP: {0}"
+msgstr "conectado. tu IP virtual: {0}"
+
+msgid "peer {0} is reachable at {1}"
+msgstr "el peer {0} es alcanzable en {1}"
+
+msgid "peer disconnected, exiting..."
+msgstr "peer desconectado, saliendo..."

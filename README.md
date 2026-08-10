@@ -1,6 +1,7 @@
 # link-p2p (MVP)
 
-A minimal TCP-over-QUIC port forwarder on top of [iroh](https://github.com/n0-computer/iroh) 1.0.
+A minimal TCP-over-QUIC port forwarder on top of [iroh](https://github.com/n0-computer/iroh) 1.0,
+with a point-to-point TUN mode for whole-machine IP reachability.
 This is step 1 of the roadmap discussed earlier — get one real P2P hop working
 and measured before adding SOCKS5, QoS policy, LD_PRELOAD interception, GSO/io_uring, etc.
 
@@ -15,6 +16,49 @@ and measured before adding SOCKS5, QoS policy, LD_PRELOAD interception, GSO/io_u
   connection (so NAT traversal / relay negotiation only happens once). It
   exposes either a plain forward (`--listen`) or a SOCKS5 server
   (`--socks5-listen`).
+- `tun` (needs root / CAP_NET_ADMIN, Linux) bridges two entire machines at
+  the IP layer over unreliable QUIC datagrams — one TUN interface, one /32
+  route, any protocol, no per-port setup. See below.
+
+### Whole-machine TUN mode (`tun serve` / `tun connect`)
+
+The stream modes forward one TCP port. `tun` instead bridges two entire
+machines at the IP layer: a TUN interface is created on each side, the peer's
+virtual IP is routed into it, and every packet (TCP/UDP/ICMP) crosses the
+tunnel as an *unreliable* QUIC datagram (reliability is the inner protocol's
+job — carrying inner TCP over a reliable stream would stack a second
+retransmission layer underneath and reintroduce head-of-line blocking).
+
+```bash
+# machine A (needs root / CAP_NET_ADMIN)
+sudo link-p2p tun serve
+# -> prints your virtual IP and EndpointId, e.g. 100.64.4.21
+
+# machine B
+sudo link-p2p tun connect --to <EndpointId from A>
+
+# now, on either machine:
+ping 100.64.x.y        # the other side's virtual IP
+ssh user@100.64.x.y    # any service, any port — the whole machine is there
+```
+
+Virtual IPs are derived deterministically from each side's EndpointId
+(`100.64.0.0/10`, RFC 6598 CGNAT space) via BLAKE3, so no coordination
+server is needed: both sides compute both addresses from the EndpointIds
+they already hold. A startup check refuses to run if the derived address
+collides with a local interface (e.g. Tailscale's own 100.x address);
+`--tun-ip` overrides the derivation, and `--mtu` (default 1280, values above
+1280 refused) bounds the interface MTU — the final MTU is `min(--mtu, the
+negotiated QUIC datagram max)`, and a connection that didn't negotiate
+datagrams is refused outright rather than silently falling back to streams.
+
+**TUN mode is a privileged mode**: creating the interface and installing the
+route needs `root` / `CAP_NET_ADMIN`, and v1 is Linux-only (macOS/Windows
+return a clear "Linux only" error). The stream modes remain unprivileged;
+the two coexist and don't replace each other. If you want `tun` without full
+root, `sudo setcap cap_net_admin+ep $(which link-p2p)` covers the network
+bits. Full design rationale and the real-hardware acceptance checklist live
+in `docs/tun-design.md`.
 
 ### SOCKS5 proxy (`serve --proxy` + `connect --socks5-listen`)
 
@@ -92,17 +136,22 @@ Also supports `powershell` and `elvish`. Re-run after upgrading if flags change.
 
 - SOCKS5 is there but minimal: no username/password auth, no UDP
   ASSOCIATE, no bind. Only CONNECT over 127.0.0.1.
-- No transparent interception (LD_PRELOAD / TUN) — clients must speak
-  SOCKS5 or use the fixed-port modes.
-- No per-stream QoS / datagram mode for "unreliable" traffic — every stream
-  is a reliable QUIC stream (bidi, ordered).
+- No LD_PRELOAD-style transparent interception — clients must speak SOCKS5,
+  use the fixed-port modes, or use TUN mode.
+- TUN mode is point-to-point and Linux-only in v1: no mesh / address books /
+  discovery / ACLs. Datagram behavior over a *relay* path is unmeasured so
+  far (the sandbox can't force a relay-only path); the design doc treats
+  direct-path behavior as assumed and relay-path as a real-hardware follow-up.
+- No per-stream QoS / datagram mode for "unreliable" traffic in the stream
+  modes — every stream is a reliable QUIC stream (bidi, ordered). TUN mode
+  does use unreliable datagrams, but that's a separate path.
 - No GSO/io_uring tuning — this is the naive `tokio::io::copy` path. Note
   that UDP GSO (batch sends) is already handled automatically by iroh's UDP
   stack (noq-udp) when the kernel supports it (4.18+, via `UDP_SEGMENT`); on
   this machine it's active. That's different from the app-level GSO/io_uring
   work that a benchmark would tell you whether to pursue. Measure first, then
   decide if that's actually your bottleneck.
-- No "full mesh" — this is one dialer, one listener, one forwarded target.
+- No "full mesh" — every mode is one dialer, one listener, one peer.
 - **No tokio runtime/scheduling tuning** — `#[tokio::main]` uses the default
   multi-thread runtime (one OS thread per core), and it's one spawned task
   per stream. That's the right default for an I/O-bound forwarder and there's
@@ -197,6 +246,9 @@ tightened to `0600` on every start.
 to the network: without a cap, a peer flooding streams could exhaust file
 descriptors/CPU. When at capacity, extra streams/connections queue up
 instead of being dropped.
+
+TUN mode is a single point-to-point QUIC connection and is not affected by
+`--max-conns`.
 
 ## Benchmarking against WireGuard/Tailscale (the actual point of this MVP)
 

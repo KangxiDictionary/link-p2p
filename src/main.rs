@@ -17,9 +17,10 @@
 mod i18n;
 mod socks5;
 mod style;
+mod tun;
 
 use std::io::{IsTerminal, Write};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -120,6 +121,17 @@ enum Command {
         #[arg(long, conflicts_with = "listen")]
         socks5_listen: Option<SocketAddr>,
     },
+    /// Make two machines reachable at the IP layer over QUIC datagrams.
+    ///
+    /// Creates a TUN interface (needs root / CAP_NET_ADMIN) and routes the
+    /// peer's virtual IP through it. Unlike `serve`/`connect`, which forward
+    /// one TCP port, this bridges the whole machine: TCP, UDP and ICMP all
+    /// work on the peer's virtual IP, with no per-port setup. Point-to-point
+    /// only in v1 — see docs/tun-design.md.
+    Tun {
+        #[command(subcommand)]
+        command: TunCommand,
+    },
     /// Print a shell completion script to stdout.
     ///
     /// Redirect it to wherever your shell loads completions from, e.g.
@@ -127,6 +139,40 @@ enum Command {
     Completions {
         /// Which shell to generate a completion script for.
         shell: Shell,
+    },
+}
+
+/// Subcommands of `link-p2p tun`.
+#[derive(Subcommand)]
+enum TunCommand {
+    /// Exposed side: accept a peer and bridge this machine to it at the IP
+    /// layer. Prints this node's virtual IP and EndpointId, then forwards all
+    /// packets to the first peer that dials.
+    Serve {
+        /// Override this node's virtual IP (default: derived from its
+        /// EndpointId, inside 100.64.0.0/10).
+        #[arg(long)]
+        tun_ip: Option<Ipv4Addr>,
+        /// Upper bound for the TUN interface MTU (default 1280). The final
+        /// MTU is min(this, the negotiated QUIC datagram max); values above
+        /// 1280 are refused.
+        #[arg(long, default_value_t = 1280)]
+        mtu: u16,
+    },
+    /// Dial a peer and bridge this machine to it at the IP layer.
+    Connect {
+        /// The remote node's EndpointId (printed by `tun serve` on startup)
+        #[arg(long)]
+        to: String,
+        /// Override this node's virtual IP (default: derived from its
+        /// EndpointId, inside 100.64.0.0/10).
+        #[arg(long)]
+        tun_ip: Option<Ipv4Addr>,
+        /// Upper bound for the TUN interface MTU (default 1280). The final
+        /// MTU is min(this, the negotiated QUIC datagram max); values above
+        /// 1280 are refused.
+        #[arg(long, default_value_t = 1280)]
+        mtu: u16,
     },
 }
 
@@ -183,6 +229,41 @@ fn localized_command() -> clap::Command {
                     "socks5_listen",
                     |a| a.help(tr!("Speak SOCKS5 (no-auth, CONNECT only) on this local address; local clients can then reach any destination through the remote `serve --proxy`.")),
                 )
+        })
+        .mut_subcommand("tun", |s| {
+            s.about(tr!("Make two machines reachable at the IP layer over QUIC datagrams."))
+                .long_about(tr!(
+                    "Make two machines reachable at the IP layer over QUIC datagrams.\n\nCreates a TUN interface (needs root / CAP_NET_ADMIN) and routes the peer's virtual IP through it. Unlike `serve`/`connect`, which forward one TCP port, this bridges the whole machine: TCP, UDP and ICMP all work on the peer's virtual IP, with no per-port setup. Point-to-point only in v1 — see docs/tun-design.md."
+                ))
+                .mut_subcommand("serve", |ss| {
+                    ss.about(tr!("Exposed side: accept a peer and bridge this machine to it at the IP layer."))
+                        .long_about(tr!(
+                            "Exposed side: accept a peer and bridge this machine to it at the IP layer. Prints this node's virtual IP and EndpointId, then forwards all packets to the first peer that dials."
+                        ))
+                        .mut_arg(
+                            "tun_ip",
+                            |a| a.help(tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 100.64.0.0/10).")),
+                        )
+                        .mut_arg(
+                            "mtu",
+                            |a| a.help(tr!("Upper bound for the TUN interface MTU (default 1280). The final MTU is min(this, the negotiated QUIC datagram max); values above 1280 are refused.")),
+                        )
+                })
+                .mut_subcommand("connect", |ss| {
+                    ss.about(tr!("Dial a peer and bridge this machine to it at the IP layer."))
+                        .mut_arg(
+                            "to",
+                            |a| a.help(tr!("The remote node's EndpointId (printed by `tun serve` on startup)")),
+                        )
+                        .mut_arg(
+                            "tun_ip",
+                            |a| a.help(tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 100.64.0.0/10).")),
+                        )
+                        .mut_arg(
+                            "mtu",
+                            |a| a.help(tr!("Upper bound for the TUN interface MTU (default 1280). The final MTU is min(this, the negotiated QUIC datagram max); values above 1280 are refused.")),
+                        )
+                })
         })
         .mut_subcommand("completions", |s| {
             s.about(tr!("Print a shell completion script to stdout."))
@@ -290,6 +371,17 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             )
             .await
         }
+        Command::Tun { command } => match command {
+            TunCommand::Serve { tun_ip, mtu } => {
+                tun::validate_mtu(mtu)?;
+                tun::run_tun_serve(secret_key, tun_ip, mtu, cli.relay.as_deref(), styler).await
+            }
+            TunCommand::Connect { to, tun_ip, mtu } => {
+                tun::validate_mtu(mtu)?;
+                tun::run_tun_connect(secret_key, &to, tun_ip, mtu, cli.relay.as_deref(), styler)
+                    .await
+            }
+        },
         Command::Completions { .. } => unreachable!("handled above"),
     }
 }

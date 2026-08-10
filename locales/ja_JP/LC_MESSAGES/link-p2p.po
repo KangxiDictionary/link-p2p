@@ -138,10 +138,10 @@ msgid ""
 "endpoint did not come online within {0}.\n"
 "\n"
 "The most likely cause: outgoing UDP is blocked by a firewall.\n"
-"iroh/QUIC relies on UDP for both direct hole-punching and relay connections. "
-"Try:\n"
-"  nc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\n"
-"  RUST_LOG=iroh=debug {1}     # see exactly where it's stuck"
+"iroh/QUIC relies on UDP for both direct hole-punching and\n"
+"relay connections. Try:\n"
+"nc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\n"
+"RUST_LOG=iroh=debug {1}     # see exactly where it's stuck"
 msgstr ""
 "エンドポイントが {0} 以内にオンラインになりませんでした。\n"
 "\n"
@@ -179,9 +179,6 @@ msgstr "接続が閉じられました"
 
 msgid "stream error"
 msgstr "ストリームエラー"
-
-msgid "connecting to local forward target {0}"
-msgstr "ローカル転送先 {0} に接続中"
 
 msgid "dialing {0}..."
 msgstr "{0} にダイヤル中……"
@@ -283,3 +280,138 @@ msgstr "serve には --forward または --proxy のいずれかが必要です"
 
 msgid "connect requires either --listen or --socks5-listen"
 msgstr "connect には --listen または --socks5-listen のいずれかが必要です"
+
+# --- TUN モード ---
+
+msgid "Make two machines reachable at the IP layer over QUIC datagrams."
+msgstr "QUIC データグラムで 2 台のマシンを IP 層で相互到達可能にする。"
+
+msgid ""
+"Make two machines reachable at the IP layer over QUIC datagrams.\n"
+"\n"
+"Creates a TUN interface (needs root / CAP_NET_ADMIN) and routes the peer's "
+"virtual IP through it. Unlike `serve`/`connect`, which forward one TCP "
+"port, this bridges the whole machine: TCP, UDP and ICMP all work on the "
+"peer's virtual IP, with no per-port setup. Point-to-point only in v1 — see "
+"docs/tun-design.md."
+msgstr ""
+"QUIC データグラムで 2 台のマシンを IP 層で相互到達可能にする。\n"
+"\n"
+"TUN インターフェースを作成し（root / CAP_NET_ADMIN が必要）、ピアの仮想 IP を"
+"それにルーティングする。単一の TCP ポートを転送する `serve`/`connect` と違い、"
+"マシン全体をブリッジする：TCP・UDP・ICMP すべてがピアの仮想 IP で使える。"
+"ポートごとの設定は不要。v1 はポイントツーポイントのみ — docs/tun-design.md 参照。"
+
+msgid "Exposed side: accept a peer and bridge this machine to it at the IP layer."
+msgstr "被アクセス側：ピアを受け入れ、IP 層でこのマシンをブリッジする。"
+
+msgid ""
+"Exposed side: accept a peer and bridge this machine to it at the IP layer. "
+"Prints this node's virtual IP and EndpointId, then forwards all packets to "
+"the first peer that dials."
+msgstr ""
+"被アクセス側：ピアを受け入れ、IP 層でこのマシンをブリッジする。このノードの"
+"仮想 IP と EndpointId を表示し、最初にダイヤルしたピアへすべてのパケットを"
+"転送する。"
+
+msgid "Dial a peer and bridge this machine to it at the IP layer."
+msgstr "ピアにダイヤルし、IP 層でこのマシンをブリッジする。"
+
+msgid ""
+"Override this node's virtual IP (default: derived from its EndpointId, "
+"inside 100.64.0.0/10)."
+msgstr ""
+"このノードの仮想 IP を上書きする（既定：EndpointId から導出、100.64.0.0/10 内）。"
+
+msgid ""
+"Upper bound for the TUN interface MTU (default 1280). The final MTU is "
+"min(this, the negotiated QUIC datagram max); values above 1280 are refused."
+msgstr ""
+"TUN インターフェースの MTU 上限（既定 1280）。最終 MTU は min(この値, ネゴシエートされた"
+"QUIC データグラム上限)。1280 を超える値は拒否される。"
+
+msgid "The remote node's EndpointId (printed by `tun serve` on startup)"
+msgstr "リモートノードの EndpointId（起動時に `tun serve` が表示する）"
+
+msgid ""
+"--mtu must be at most 1280 (got {0}); higher values would fragment the outer "
+"QUIC datagrams"
+msgstr ""
+"--mtu は最大 1280 まで（指定値 {0}）；それより大きいと外側の QUIC データグラムが"
+"断片化する"
+
+msgid ""
+"the peer or path does not support QUIC datagrams; TUN mode cannot work over "
+"this connection.\n"
+"Refusing to start rather than silently falling back to a stream transport."
+msgstr ""
+"ピアまたは経路が QUIC データグラムに対応していません。この接続では TUN モードは"
+"利用できません。\n"
+"ストリーム転送に黙ってフォールバックせず、起動を拒否します。"
+
+msgid "running `ip {0}`"
+msgstr "`ip {0}` を実行中"
+
+msgid "command `ip {0}` failed: {1}"
+msgstr "コマンド `ip {0}` が失敗：{1}"
+
+msgid "checking local interfaces for the virtual IP"
+msgstr "仮想 IP がローカルインターフェースで使用中か確認中"
+
+msgid ""
+"virtual IP {0} is already assigned to a local interface.\n"
+"Pick a different one with --tun-ip."
+msgstr ""
+"仮想 IP {0} はすでにローカルインターフェースに割り当てられています。\n"
+"--tun-ip で別のアドレスを指定してください。"
+
+msgid "TUN mode currently supports Linux only"
+msgstr "TUN モードは現在 Linux のみ対応"
+
+msgid "creating TUN device (needs root / CAP_NET_ADMIN)"
+msgstr "TUN デバイスを作成中（root / CAP_NET_ADMIN が必要）"
+
+msgid "reading TUN interface name"
+msgstr "TUN インターフェース名を読み取り中"
+
+msgid "reading packet from TUN device"
+msgstr "TUN デバイスからパケットを読み取り中"
+
+msgid "sending datagram to peer failed"
+msgstr "ピアへのデータグラム送信に失敗"
+
+msgid "writing packet to TUN device"
+msgstr "TUN デバイスへのパケット書き込み中"
+
+msgid "peer disconnected"
+msgstr "ピアが切断されました"
+
+msgid "your virtual IP (the peer reaches you here):"
+msgstr "あなたの仮想 IP（ピアはここに到達します）："
+
+msgid "your EndpointId (give this to peers running `tun connect --to`):"
+msgstr "あなたの EndpointId（`tun connect --to` を実行するピアに渡す）："
+
+msgid "TUN session established"
+msgstr "TUN セッションが確立されました"
+
+msgid "rejecting malformed incoming connection"
+msgstr "不正な入来接続を拒否中"
+
+msgid "completing connection handshake"
+msgstr "接続ハンドシェイクを完了中"
+
+msgid "endpoint closed"
+msgstr "エンドポイントが閉じられました"
+
+msgid "TUN session error"
+msgstr "TUN セッションエラー"
+
+msgid "connected. your virtual IP: {0}"
+msgstr "接続しました。あなたの仮想 IP：{0}"
+
+msgid "peer {0} is reachable at {1}"
+msgstr "ピア {0} は {1} で到達可能です"
+
+msgid "peer disconnected, exiting..."
+msgstr "ピアが切断されました。終了します……"

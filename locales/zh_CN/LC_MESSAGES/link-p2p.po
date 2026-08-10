@@ -137,10 +137,10 @@ msgid ""
 "endpoint did not come online within {0}.\n"
 "\n"
 "The most likely cause: outgoing UDP is blocked by a firewall.\n"
-"iroh/QUIC relies on UDP for both direct hole-punching and relay connections. "
-"Try:\n"
-"  nc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\n"
-"  RUST_LOG=iroh=debug {1}     # see exactly where it's stuck"
+"iroh/QUIC relies on UDP for both direct hole-punching and\n"
+"relay connections. Try:\n"
+"nc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\n"
+"RUST_LOG=iroh=debug {1}     # see exactly where it's stuck"
 msgstr ""
 "端点在 {0} 内未能上线。\n"
 "\n"
@@ -178,9 +178,6 @@ msgstr "连接已关闭"
 
 msgid "stream error"
 msgstr "流错误"
-
-msgid "connecting to local forward target {0}"
-msgstr "连接本地转发目标 {0}"
 
 msgid "dialing {0}..."
 msgstr "正在拨号 {0}……"
@@ -281,3 +278,135 @@ msgstr "serve 需要 --forward 或 --proxy 其中之一"
 
 msgid "connect requires either --listen or --socks5-listen"
 msgstr "connect 需要 --listen 或 --socks5-listen 其中之一"
+
+# --- TUN 模式 ---
+
+msgid "Make two machines reachable at the IP layer over QUIC datagrams."
+msgstr "通过 QUIC datagram 让两台机器在 IP 层互相可达。"
+
+msgid ""
+"Make two machines reachable at the IP layer over QUIC datagrams.\n"
+"\n"
+"Creates a TUN interface (needs root / CAP_NET_ADMIN) and routes the peer's "
+"virtual IP through it. Unlike `serve`/`connect`, which forward one TCP "
+"port, this bridges the whole machine: TCP, UDP and ICMP all work on the "
+"peer's virtual IP, with no per-port setup. Point-to-point only in v1 — see "
+"docs/tun-design.md."
+msgstr ""
+"通过 QUIC datagram 让两台机器在 IP 层互相可达。\n"
+"\n"
+"创建一个 TUN 接口（需要 root / CAP_NET_ADMIN），并把对端的虚拟 IP 路由到它。"
+"与只转发单个 TCP 端口的 `serve`/`connect` 不同，本模式桥接整台机器：TCP、"
+"UDP、ICMP 都能通过对端虚拟 IP 访问，无需逐个端口配置。v1 仅支持点对点——"
+"见 docs/tun-design.md。"
+
+msgid "Exposed side: accept a peer and bridge this machine to it at the IP layer."
+msgstr "被访问侧：接受对端连接，并在 IP 层桥接本机与对端。"
+
+msgid ""
+"Exposed side: accept a peer and bridge this machine to it at the IP layer. "
+"Prints this node's virtual IP and EndpointId, then forwards all packets to "
+"the first peer that dials."
+msgstr ""
+"被访问侧：接受对端连接，并在 IP 层桥接本机与对端。打印本节点的虚拟 IP 与 "
+"EndpointId，然后向第一个拨号的对端转发所有数据包。"
+
+msgid "Dial a peer and bridge this machine to it at the IP layer."
+msgstr "拨号连接对端，并在 IP 层桥接本机与对端。"
+
+msgid ""
+"Override this node's virtual IP (default: derived from its EndpointId, "
+"inside 100.64.0.0/10)."
+msgstr ""
+"覆盖本节点的虚拟 IP（默认：由其 EndpointId 派生，位于 100.64.0.0/10 段内）。"
+
+msgid ""
+"Upper bound for the TUN interface MTU (default 1280). The final MTU is "
+"min(this, the negotiated QUIC datagram max); values above 1280 are refused."
+msgstr ""
+"TUN 接口 MTU 的上限（默认 1280）。最终 MTU 为 min(该值, 协商出的 QUIC "
+"datagram 上限)；超过 1280 的值会被拒绝。"
+
+msgid "The remote node's EndpointId (printed by `tun serve` on startup)"
+msgstr "远端节点的 EndpointId（`tun serve` 启动时会打印）"
+
+msgid ""
+"--mtu must be at most 1280 (got {0}); higher values would fragment the outer "
+"QUIC datagrams"
+msgstr ""
+"--mtu 最大只能为 1280（收到 {0}）；更大的值会导致外层 QUIC datagram 分片"
+
+msgid ""
+"the peer or path does not support QUIC datagrams; TUN mode cannot work over "
+"this connection.\n"
+"Refusing to start rather than silently falling back to a stream transport."
+msgstr ""
+"对端或路径不支持 QUIC datagram；此连接上无法使用 TUN 模式。\n"
+"拒绝启动，而不是静默回退到 stream 传输。"
+
+msgid "running `ip {0}`"
+msgstr "正在执行 `ip {0}`"
+
+msgid "command `ip {0}` failed: {1}"
+msgstr "命令 `ip {0}` 执行失败：{1}"
+
+msgid "checking local interfaces for the virtual IP"
+msgstr "检查本地接口是否占用该虚拟 IP"
+
+msgid ""
+"virtual IP {0} is already assigned to a local interface.\n"
+"Pick a different one with --tun-ip."
+msgstr ""
+"虚拟 IP {0} 已被本地某个接口占用。\n"
+"请用 --tun-ip 指定其他地址。"
+
+msgid "TUN mode currently supports Linux only"
+msgstr "TUN 模式目前仅支持 Linux"
+
+msgid "creating TUN device (needs root / CAP_NET_ADMIN)"
+msgstr "创建 TUN 设备（需要 root / CAP_NET_ADMIN）"
+
+msgid "reading TUN interface name"
+msgstr "读取 TUN 接口名称"
+
+msgid "reading packet from TUN device"
+msgstr "从 TUN 设备读取数据包"
+
+msgid "sending datagram to peer failed"
+msgstr "向对端发送 datagram 失败"
+
+msgid "writing packet to TUN device"
+msgstr "向 TUN 设备写入数据包"
+
+msgid "peer disconnected"
+msgstr "对端已断开"
+
+msgid "your virtual IP (the peer reaches you here):"
+msgstr "你的虚拟 IP（对端通过它访问本机）："
+
+msgid "your EndpointId (give this to peers running `tun connect --to`):"
+msgstr "你的 EndpointId（把它给运行 `tun connect --to` 的对端）："
+
+msgid "TUN session established"
+msgstr "TUN 会话已建立"
+
+msgid "rejecting malformed incoming connection"
+msgstr "拒绝格式异常的入站连接"
+
+msgid "completing connection handshake"
+msgstr "完成连接握手"
+
+msgid "endpoint closed"
+msgstr "端点已关闭"
+
+msgid "TUN session error"
+msgstr "TUN 会话错误"
+
+msgid "connected. your virtual IP: {0}"
+msgstr "已连接。你的虚拟 IP：{0}"
+
+msgid "peer {0} is reachable at {1}"
+msgstr "对端 {0} 在 {1} 可达"
+
+msgid "peer disconnected, exiting..."
+msgstr "对端已断开，正在退出……"
