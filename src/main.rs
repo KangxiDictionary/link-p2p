@@ -71,10 +71,13 @@ struct Cli {
     command: Command,
 
     /// Path to store/load this node's persistent secret key. If it doesn't
-    /// exist yet, a new one is generated and saved here. Keep this stable if
-    /// you want your EndpointId to stay the same across restarts.
-    #[arg(long, global = true, default_value = "identity.key")]
-    identity: PathBuf,
+    /// exist yet, a new one is generated and saved there. Default: the XDG
+    /// config dir, `$XDG_CONFIG_HOME/link-p2p/identity.key` (usually
+    /// `~/.config/link-p2p/identity.key`); a legacy `./identity.key` in the
+    /// working directory is migrated there once. Keep this stable if you
+    /// want your EndpointId to stay the same across restarts.
+    #[arg(long, global = true)]
+    identity: Option<PathBuf>,
 
     /// Use a custom relay server instead of n0's public one, e.g.
     /// http://127.0.0.1:3340 (run `iroh-relay --dev` locally). With this set,
@@ -150,7 +153,7 @@ enum TunCommand {
     /// packets to the first peer that dials.
     Serve {
         /// Override this node's virtual IP (default: derived from its
-        /// EndpointId, inside 100.64.0.0/10).
+        /// EndpointId, inside 172.24.0.0/16).
         #[arg(long)]
         tun_ip: Option<Ipv4Addr>,
         /// Upper bound for the TUN interface MTU (default 1280). The final
@@ -165,7 +168,7 @@ enum TunCommand {
         #[arg(long)]
         to: String,
         /// Override this node's virtual IP (default: derived from its
-        /// EndpointId, inside 100.64.0.0/10).
+        /// EndpointId, inside 172.24.0.0/16).
         #[arg(long)]
         tun_ip: Option<Ipv4Addr>,
         /// Upper bound for the TUN interface MTU (default 1280). The final
@@ -190,7 +193,7 @@ fn localized_command() -> clap::Command {
         ))
         .mut_arg(
             "identity",
-            |a| a.help(tr!("Path to store/load this node's persistent secret key. If it doesn't exist yet, a new one is generated and saved here. Keep this stable if you want your EndpointId to stay the same across restarts.")),
+            |a| a.help(tr!("Path to store/load this node's persistent secret key. If it doesn't exist yet, a new one is generated and saved there. Default: the XDG config dir, $XDG_CONFIG_HOME/link-p2p/identity.key (usually ~/.config/link-p2p/identity.key); a legacy ./identity.key in the working directory is migrated there once. Keep this stable if you want your EndpointId to stay the same across restarts.")),
         )
         .mut_arg(
             "relay",
@@ -242,7 +245,7 @@ fn localized_command() -> clap::Command {
                         ))
                         .mut_arg(
                             "tun_ip",
-                            |a| a.help(tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 100.64.0.0/10).")),
+                            |a| a.help(tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16).")),
                         )
                         .mut_arg(
                             "mtu",
@@ -257,7 +260,7 @@ fn localized_command() -> clap::Command {
                         )
                         .mut_arg(
                             "tun_ip",
-                            |a| a.help(tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 100.64.0.0/10).")),
+                            |a| a.help(tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16).")),
                         )
                         .mut_arg(
                             "mtu",
@@ -335,7 +338,8 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
         .init();
 
     let styler = style::apply_color_mode(color_mode);
-    let secret_key = load_or_create_secret_key(&cli.identity)
+    let identity = resolve_identity_path(cli.identity)?;
+    let secret_key = load_or_create_secret_key(&identity)
         .context(tr!("loading/creating persistent identity"))?;
 
     match cli.command {
@@ -386,6 +390,78 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
     }
 }
 
+/// Resolve the identity file path: an explicit `--identity` wins; otherwise
+/// the XDG config location. A legacy `./identity.key` in the working
+/// directory (pre-XDG versions kept it there) is migrated to the XDG
+/// location once, so existing EndpointIds stay stable across the move.
+fn resolve_identity_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+    let xdg = default_identity_path();
+    if xdg.exists() {
+        return Ok(xdg);
+    }
+    let legacy = PathBuf::from("identity.key");
+    if !legacy.exists() {
+        return Ok(xdg);
+    }
+    match migrate_identity(&legacy, &xdg) {
+        Ok(()) => {
+            info!(
+                "{}",
+                tr_fmt!(
+                    "migrated legacy identity from {0} to {1}",
+                    legacy.display(),
+                    xdg.display()
+                )
+            );
+            Ok(xdg)
+        }
+        Err(e) => {
+            // Keep the EndpointId stable: fall back to the legacy file
+            // rather than silently generating a brand-new identity.
+            warn!(error = %e, "{}", tr!("identity migration failed; using the legacy file"));
+            Ok(legacy)
+        }
+    }
+}
+
+/// The XDG config location for the identity key:
+/// `$XDG_CONFIG_HOME/link-p2p/identity.key`, or `~/.config/link-p2p/...`
+/// when `XDG_CONFIG_HOME` is unset. Falls back to `./identity.key` if
+/// neither `XDG_CONFIG_HOME` nor `HOME` is set.
+fn default_identity_path() -> PathBuf {
+    if let Some(base) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        return PathBuf::from(base).join("link-p2p").join("identity.key");
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        return PathBuf::from(home)
+            .join(".config")
+            .join("link-p2p")
+            .join("identity.key");
+    }
+    PathBuf::from("identity.key")
+}
+
+/// Copy the legacy identity file to the XDG location (directory created as
+/// needed), keeping the key material and thus the EndpointId intact.
+fn migrate_identity(from: &Path, to: &Path) -> Result<()> {
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| tr_fmt!("creating identity directory {0}", parent.display()))?;
+    }
+    std::fs::copy(from, to).with_context(|| {
+        tr_fmt!(
+            "migrating legacy identity from {0} to {1}",
+            from.display(),
+            to.display()
+        )
+    })?;
+    harden_key_permissions(to)?;
+    Ok(())
+}
+
 /// Load a persisted SecretKey from `path`, or generate + save a new one.
 ///
 /// Storage format: 64 hex chars (32-byte ed25519 seed). iroh 1.0
@@ -423,6 +499,12 @@ fn load_or_create_secret_key(path: &Path) -> Result<SecretKey> {
 /// 0600 directly (no window where it's world-readable), then hardened again
 /// to cover the case where the file already existed.
 fn write_key_file(path: &Path, hex: &str) -> Result<()> {
+    // The XDG default lives under a per-app config dir that may not exist
+    // yet; create it so the very first run can persist the new key.
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| tr_fmt!("creating identity directory {0}", parent.display()))?;
+    }
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -703,13 +785,17 @@ async fn run_connect(
         max_conns
     }));
 
+    // Track every spawned forwarder so Ctrl+C can drain them (bounded)
+    // instead of dropping them mid-flush.
+    let mut tasks = Vec::new();
+
     loop {
         tokio::select! {
             accepted = tcp_listener.accept() => {
                 let (mut tcp_stream, client_addr) = accepted?;
                 let connection = connection.clone();
                 let semaphore = semaphore.clone();
-                tokio::spawn(async move {
+                tasks.push(tokio::spawn(async move {
                     let result = async {
                         if is_socks5 {
                             // SOCKS5 mode: parse the local client's CONNECT
@@ -734,18 +820,26 @@ async fn run_connect(
                     if let Err(e) = result {
                         warn!(%client_addr, error = %e, "{}", tr!("stream error"));
                     }
-                });
+                }));
             }
             _ = tokio::signal::ctrl_c() => {
-                // Stop accepting new local connections. Streams already
-                // spawned above keep running in their own tasks and finish
-                // on their own — we don't forcibly cut them here. The
-                // process exits once main() returns and those tasks are
-                // dropped, so a truly graceful drain would need to track
-                // and await their JoinHandles; left out for this MVP.
+                // Stop accepting new local connections.
                 println!("{}", styler.warn(&tr!("shutting down...")));
                 break;
             }
+        }
+    }
+    // Graceful drain: give in-flight streams a bounded window to flush their
+    // last bytes before the runtime is torn down, instead of cutting them off
+    // the instant the process exits. Long-running streams are cut at the
+    // timeout.
+    const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+    let drain_deadline = tokio::time::sleep(DRAIN_TIMEOUT);
+    tokio::pin!(drain_deadline);
+    for task in tasks {
+        tokio::select! {
+            _ = task => {}
+            _ = &mut drain_deadline => break,
         }
     }
     Ok(())

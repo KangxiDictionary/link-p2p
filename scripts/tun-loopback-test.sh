@@ -11,6 +11,17 @@
 #
 # Optional overrides:
 #   LINK_P2P=/elsewhere/link-p2p RELAY_BIN=/elsewhere/iroh-relay sudo scripts/tun-loopback-test.sh
+#
+# NOTE: this loopback test can NOT validate the tunnel's datagram data path.
+# Both VIPs live on the same machine, so the kernel's `local` routing table
+# (priority 0) beats the main-table /32 routes into the TUN devices: ping
+# traffic is delivered locally and never enters the TUN. A passing ping here
+# proves nothing about the datagram pump, and a failing one usually means the
+# address range is being filtered by local netfilter rules (e.g. Tailscale
+# DROPs 100.64/10 sources not arriving on tailscale0 — this machine hit
+# exactly that). The script validates process startup, connection
+# establishment and MTU negotiation only. The real data-path check is a ping
+# across two machines.
 
 set -eo pipefail
 
@@ -22,6 +33,7 @@ RELAY_URL="http://127.0.0.1:3340"
 
 ID_SERVE=$(mktemp -u /tmp/lp-tun-serve.key.XXXX)
 ID_CONN=$(mktemp -u /tmp/lp-tun-conn.key.XXXX)
+ID_CONN2=$(mktemp -u /tmp/lp-tun-conn2.key.XXXX)
 
 # Prevent any proxy from intercepting loopback relay traffic.
 export NO_PROXY="127.0.0.1,localhost,::1" no_proxy="127.0.0.1,localhost,::1"
@@ -36,7 +48,7 @@ cleanup() {
     kill $SERVE_PID 2>/dev/null || true
     kill $RELAY_PID 2>/dev/null || true
     wait 2>/dev/null
-    rm -f "$ID_SERVE" "$ID_CONN"
+    rm -f "$ID_SERVE" "$ID_CONN" "$ID_CONN2"
     # Interfaces auto-destroyed when the link-p2p processes exit (fd close).
     echo -e "${CYAN}TUN interfaces auto-destroyed on fd close.${NC}"
 }
@@ -182,6 +194,62 @@ echo -e "${DIM}# -s 1200 -M do${NC}"
 ping -c 4 -W 2 -s 1200 -M do "$SERVE_VIP" || echo -e "${RED}^^ FAILED${NC}"
 echo ""
 
+# --- 7.5 peer-exit route cleanup + reconnect (regression) ---
+# The serve side must drop the peer's /32 route when the session ends, and a
+# reconnect with a different virtual IP must not leave the old route behind.
+echo -e "${CYAN}=== peer-exit route cleanup + reconnect ===${NC}"
+OLD_CONN_VIP=$CONN_VIP
+
+echo -e "${DIM}# SIGINT the connect; serve should remove its route...${NC}"
+kill -INT $CONN_PID 2>/dev/null
+sleep 3
+if ip route show | grep -qF "$OLD_CONN_VIP dev link-p2p0"; then
+    echo -e "${RED}FAIL: stale route $OLD_CONN_VIP still on link-p2p0 after peer exit${NC}"
+    exit 1
+fi
+echo -e "${GREEN}OK: route $OLD_CONN_VIP removed after peer exit${NC}"
+
+echo -e "${DIM}# reconnect with a fresh identity (different VIP)...${NC}"
+ID_CONN2=$(mktemp -u /tmp/lp-tun-conn2.key.XXXX)
+LANG=C "$LINK_P2P" tun connect \
+    --to "$SERVE_ID" --relay "$RELAY_URL" --identity "$ID_CONN2" \
+    >/tmp/lp-tun-conn2.log 2>&1 &
+CONN_PID=$!
+
+SECONDS=0
+while [ $SECONDS -lt 20 ]; do
+    if grep -q "connected\." /tmp/lp-tun-conn2.log 2>/dev/null; then break; fi
+    if ! kill -0 "$CONN_PID" 2>/dev/null; then
+        echo -e "${RED}second tun connect died. Log:${NC}"
+        cat /tmp/lp-tun-conn2.log
+        exit 1
+    fi
+    sleep 1
+done
+sleep 1
+# The new connect may get link-p2p1 or a higher index once the old device is
+# destroyed; match any link-p2p address that isn't the serve's.
+NEW_CONN_VIP=$(ip -o -4 addr show 2>/dev/null \
+    | awk -F'[ /]+' '/link-p2p[0-9]+[[:space:]]*inet/{print $4}' \
+    | grep -v "^$SERVE_VIP$" | head -1 || true)
+if [ -z "$NEW_CONN_VIP" ]; then
+    echo -e "${RED}no connect VIP after reconnect${NC}"
+    exit 1
+fi
+echo -e "  new connect VIP: ${GREEN}$NEW_CONN_VIP${NC}"
+
+if ip route show | grep -qF "$OLD_CONN_VIP dev link-p2p0"; then
+    echo -e "${RED}FAIL: old route $OLD_CONN_VIP reappeared after reconnect${NC}"
+    exit 1
+fi
+if ip route show | grep -qF "$NEW_CONN_VIP dev link-p2p0"; then
+    echo -e "${GREEN}OK: route to new peer VIP $NEW_CONN_VIP installed, no stale routes${NC}"
+else
+    echo -e "${RED}FAIL: no route to new peer VIP $NEW_CONN_VIP${NC}"
+    exit 1
+fi
+echo ""
+
 # --- 8. interface state ---
 echo -e "${CYAN}=== Interfaces ===${NC}"
 ip -o -4 addr show 2>/dev/null | grep -i link-p2p || echo "(none)"
@@ -189,5 +257,5 @@ echo ""
 ip route show | grep -i link-p2p || echo "(no link-p2p routes)"
 echo ""
 
-echo -e "${DIM}Full logs: /tmp/lp-tun-{relay,serve,conn}.log${NC}"
+echo -e "${DIM}Full logs: /tmp/lp-tun-{relay,serve,conn,conn2}.log${NC}"
 echo -e "${GREEN}=== test complete ===${NC}"

@@ -57,11 +57,16 @@ msgstr ""
 
 msgid ""
 "Path to store/load this node's persistent secret key. If it doesn't exist "
-"yet, a new one is generated and saved here. Keep this stable if you want "
-"your EndpointId to stay the same across restarts."
+"yet, a new one is generated and saved there. Default: the XDG config dir, "
+"$XDG_CONFIG_HOME/link-p2p/identity.key (usually ~/.config/link-p2p/"
+"identity.key); a legacy ./identity.key in the working directory is migrated "
+"there once. Keep this stable if you want your EndpointId to stay the same "
+"across restarts."
 msgstr ""
-"用于存储/加载本节点持久密钥的路径。若文件不存在则生成新密钥并保存到此处。"
-"保持该文件稳定，EndpointId 即可在重启后保持不变。"
+"存储/加载本节点持久密钥的路径。若文件不存在则生成新密钥并保存到此处。"
+"默认：XDG 配置目录 $XDG_CONFIG_HOME/link-p2p/identity.key（通常为 "
+"~/.config/link-p2p/identity.key）；工作目录里的旧文件 ./identity.key 会在"
+"首次运行时迁移过去。保持该文件稳定，EndpointId 即可在重启后保持不变。"
 
 msgid ""
 "Use a custom relay server instead of n0's public one, e.g. http://127.0.0.1:3340 "
@@ -316,9 +321,9 @@ msgstr "拨号连接对端，并在 IP 层桥接本机与对端。"
 
 msgid ""
 "Override this node's virtual IP (default: derived from its EndpointId, "
-"inside 100.64.0.0/10)."
+"inside 172.24.0.0/16)."
 msgstr ""
-"覆盖本节点的虚拟 IP（默认：由其 EndpointId 派生，位于 100.64.0.0/10 段内）。"
+"覆盖本节点的虚拟 IP（默认：由其 EndpointId 派生，位于 172.24.0.0/16 段内）。"
 
 msgid ""
 "Upper bound for the TUN interface MTU (default 1280). The final MTU is "
@@ -416,3 +421,21 @@ msgstr "TUN datagram 协商：max_datagram_size={0}，接口 MTU={1}"
 
 msgid "TUN interface MTU raised {0} → {1} (datagram path MTU converged)"
 msgstr "TUN 接口 MTU 已提升 {0} → {1}（datagram 路径 MTU 探测收敛）"
+
+msgid "peer did not complete the TUN address exchange"
+msgstr "对端未完成 TUN 地址交换"
+
+msgid "peer announced an unusable virtual IP {0}"
+msgstr "对端宣告了不可用的虚拟 IP {0}"
+
+msgid "creating identity directory {0}"
+msgstr "创建身份目录 {0}"
+
+msgid "migrating legacy identity from {0} to {1}"
+msgstr "正在将旧身份从 {0} 迁移到 {1}"
+
+msgid "migrated legacy identity from {0} to {1}"
+msgstr "已将旧身份从 {0} 迁移到 {1}"
+
+msgid "identity migration failed; using the legacy file"
+msgstr "身份迁移失败；继续使用旧文件"

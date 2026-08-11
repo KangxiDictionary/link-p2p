@@ -70,12 +70,67 @@ macro_rules! tr_fmt {
 pub(crate) use tr_fmt;
 
 /// Replace `{0}`, `{1}`, ... in `template` with the corresponding `args`.
+///
+/// One-pass scan of the template: tokens are located in the original text
+/// and the output is built by concatenation, so an argument that itself
+/// contains placeholder-shaped text (e.g. "{1}") is inserted verbatim and
+/// never re-scanned. The previous implementation replaced tokens one at a
+/// time, which let an argument containing "{1}" be substituted a second time
+/// by a later pass. Out-of-range indexes and stray braces stay literal.
 pub fn tr_fmt_impl(template: &str, args: &[String]) -> String {
-    let mut out = template.to_string();
-    for (i, arg) in args.iter().enumerate() {
-        out = out.replace(&format!("{{{i}}}"), arg);
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    loop {
+        let Some(start) = rest.find('{') else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let digits_end = after.bytes().take_while(u8::is_ascii_digit).count();
+        if digits_end == 0 || after.as_bytes().get(digits_end) != Some(&b'}') {
+            // Stray "{" (no digits, or no closing "}"): keep the brace
+            // literal and keep scanning from the next character.
+            out.push('{');
+            rest = after;
+            continue;
+        }
+        let token_len = digits_end + 1; // digits + closing '}'
+        match after[..digits_end].parse::<usize>() {
+            Ok(i) if i < args.len() => out.push_str(&args[i]),
+            _ => {
+                // Out-of-range or malformed index: keep the token verbatim.
+                out.push('{');
+                out.push_str(&after[..token_len]);
+            }
+        }
+        rest = &after[token_len..];
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn args_are_not_rescanned() {
+        // The {0} argument itself contains "{1}": it must be inserted
+        // verbatim, not substituted again by a later pass.
+        let args = ["{1}".to_string(), "X".to_string()];
+        assert_eq!(tr_fmt_impl("{0} and {1}", &args), "{1} and X");
+    }
+
+    #[test]
+    fn literal_fallback_cases() {
+        // Out-of-range index, stray brace, and plain text stay untouched.
+        let args = ["a".to_string()];
+        assert_eq!(tr_fmt_impl("{0} {1} {", &args), "a {1} {");
+        assert_eq!(tr_fmt_impl("plain", &args), "plain");
+        // Multi-digit indexes work.
+        let args2 = ["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(tr_fmt_impl("{2}{0}{1}", &args2), "cab");
+    }
 }
 
 fn resolve_locale_dir() -> Option<PathBuf> {

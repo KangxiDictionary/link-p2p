@@ -57,11 +57,16 @@ msgstr ""
 
 msgid ""
 "Path to store/load this node's persistent secret key. If it doesn't exist "
-"yet, a new one is generated and saved here. Keep this stable if you want "
-"your EndpointId to stay the same across restarts."
+"yet, a new one is generated and saved there. Default: the XDG config dir, "
+"$XDG_CONFIG_HOME/link-p2p/identity.key (usually ~/.config/link-p2p/"
+"identity.key); a legacy ./identity.key in the working directory is migrated "
+"there once. Keep this stable if you want your EndpointId to stay the same "
+"across restarts."
 msgstr ""
 "このノードの永続的な秘密鍵を保存/読み込みするパス。ファイルが存在しない場合は新しい鍵を"
-"生成して保存します。このファイルを安定させておくと、再起動後も EndpointId が変わりません。"
+"生成して保存します。既定：XDG 設定ディレクトリ $XDG_CONFIG_HOME/link-p2p/identity.key"
+"（通常は ~/.config/link-p2p/identity.key）。作業ディレクトリの旧ファイル ./identity.key は"
+"初回実行時にそこへ移行されます。このファイルを安定させておくと、再起動後も EndpointId が変わりません。"
 
 msgid ""
 "Use a custom relay server instead of n0's public one, e.g. http://127.0.0.1:3340 "
@@ -319,9 +324,9 @@ msgstr "ピアにダイヤルし、IP 層でこのマシンをブリッジする
 
 msgid ""
 "Override this node's virtual IP (default: derived from its EndpointId, "
-"inside 100.64.0.0/10)."
+"inside 172.24.0.0/16)."
 msgstr ""
-"このノードの仮想 IP を上書きする（既定：EndpointId から導出、100.64.0.0/10 内）。"
+"このノードの仮想 IP を上書きする（既定：EndpointId から導出、172.24.0.0/16 内）。"
 
 msgid ""
 "Upper bound for the TUN interface MTU (default 1280). The final MTU is "
@@ -421,3 +426,21 @@ msgstr "TUN データグラム交渉：max_datagram_size={0}、インターフ�
 
 msgid "TUN interface MTU raised {0} → {1} (datagram path MTU converged)"
 msgstr "TUN インターフェース MTU を {0} → {1} に引き上げ（データグラム経路 MTU が収束）"
+
+msgid "peer did not complete the TUN address exchange"
+msgstr "ピアが TUN アドレス交換を完了しませんでした"
+
+msgid "peer announced an unusable virtual IP {0}"
+msgstr "ピアが使用できない仮想 IP {0} を通知しました"
+
+msgid "creating identity directory {0}"
+msgstr "ID ディレクトリ {0} を作成中"
+
+msgid "migrating legacy identity from {0} to {1}"
+msgstr "旧 ID を {0} から {1} に移行中"
+
+msgid "migrated legacy identity from {0} to {1}"
+msgstr "旧 ID を {0} から {1} に移行しました"
+
+msgid "identity migration failed; using the legacy file"
+msgstr "ID の移行に失敗しました。旧ファイルを使用します"

@@ -25,31 +25,39 @@ use tun2::AbstractDevice;
 use crate::i18n::{tr, tr_fmt};
 use crate::style::Styler;
 
-/// ALPN for TUN mode. Distinct from the stream-forwarding ALPN so a `tun`
-/// peer and a `serve --forward` peer can't handshake into the wrong protocol.
-pub const TUN_ALPN: &[u8] = b"link-p2p/tun/0";
+/// ALPN for TUN mode. Versioned: "1" added the one-shot VIP exchange stream;
+/// a "0" peer would install a route to the wrong address, so a version
+/// mismatch must fail the handshake rather than misroute. Distinct from the
+/// stream-forwarding ALPN so a `tun` peer and a `serve --forward` peer can't
+/// handshake into the wrong protocol either.
+pub const TUN_ALPN: &[u8] = b"link-p2p/tun/1";
 
-/// 100.64.0.0/10 — RFC 6598 carrier-grade NAT space. CGNAT space keeps the
-/// virtual addresses out of the way of typical LANs (and of Tailscale, which
-/// uses the same space — hence the startup collision check below).
-const VIP_BASE: u32 = 0x6440_0000; // 100.64.0.0
-const VIP_HOST_BITS: u32 = 0x003F_FFFF; // low 22 bits of the hash
+/// 172.24.0.0/16 — a slice of RFC 1918's 172.16.0.0/12 that common tools
+/// (Docker's default bridge 172.17/16, typical home-router DHCP pools) don't
+/// grab by default. Deliberately NOT RFC 6598's 100.64.0.0/10: measured on
+/// real hardware (2026-08), Tailscale's netfilter rules DROP every packet
+/// with a 100.64/10 source that doesn't arrive on tailscale0
+/// (`-A ts-input -s 100.64.0.0/10 ! -i tailscale0 -j DROP`), which
+/// blackholes a tunnel in that range in both directions. This choice only
+/// dodges the conflicts we know about — the startup collision check
+/// (ensure_vip_free) stays as the universal fallback.
+const VIP_BASE: u32 = 0xAC18_0000; // 172.24.0.0
+/// Low 16 bits of the hash — one /16's worth of host bits.
+const VIP_HOST_BITS: u32 = 0x0000_FFFF;
 
-/// Derive this node's virtual IP from its EndpointId.
+/// Derive this node's *default* virtual IP from its EndpointId, used when
+/// `--tun-ip` isn't given.
 ///
-/// `0x6440_0000 | (BLAKE3(endpoint_id) & 0x003F_FFFF)` — deterministic, so
-/// both sides can compute both addresses from the EndpointIds they already
-/// hold, with no coordination server (design decision 1). 22 host bits ≈ 4M
-/// addresses; point-to-point collision probability is negligible, and the
-/// local-interface check catches the cases that do collide.
+/// `0xAC18_0000 | (BLAKE3(endpoint_id) & 0x0000_FFFF)` — deterministic, so
+/// both sides can compute the default without coordination (design decision
+/// 1). 16 host bits ≈ 64K addresses; point-to-point collision probability is
+/// negligible, and the local-interface check catches the cases that do
+/// collide. The *peer's* address is no longer derived: each side announces
+/// the address it actually bound during the handshake (see
+/// exchange_peer_vip), so `--tun-ip` overrides stay consistent.
 pub fn derive_vip(endpoint_id: EndpointId) -> Ipv4Addr {
     let hash = blake3::hash(endpoint_id.as_bytes());
-    let raw = u32::from_be_bytes([
-        hash.as_bytes()[0],
-        hash.as_bytes()[1],
-        hash.as_bytes()[2],
-        0,
-    ]);
+    let raw = u32::from_be_bytes([0, 0, hash.as_bytes()[0], hash.as_bytes()[1]]);
     Ipv4Addr::from(VIP_BASE | (raw & VIP_HOST_BITS))
 }
 
@@ -85,7 +93,10 @@ fn choose_mtu(user_mtu: u16, conn: &Connection) -> Result<u16> {
         "the peer or path does not support QUIC datagrams; TUN mode cannot work over this connection.\n\
          Refusing to start rather than silently falling back to a stream transport."
     ))?;
-    let mtu = std::cmp::min(user_mtu, max_dgram as u16);
+    // max_datagram_size is a usize; clamp before narrowing so a value above
+    // u16::MAX can't truncate into a misleadingly small MTU.
+    let max_dgram = u16::try_from(max_dgram).unwrap_or(u16::MAX);
+    let mtu = std::cmp::min(user_mtu, max_dgram);
     info!("choose_mtu({user_mtu}, {max_dgram}) = {mtu}");
     Ok(mtu)
 }
@@ -115,8 +126,9 @@ fn run_ip(args: &[&str]) -> Result<()> {
 }
 
 /// Refuse to start if the derived/override VIP is already assigned to a local
-/// interface (e.g. Tailscale's own 100.x address). Deterministic derivation
-/// makes collisions rare but real — see design decision 1.
+/// interface. The range choice (VIP_BASE) only dodges the conflicts we know
+/// about, so this check is the universal fallback against *any* third-party
+/// address collision — it stays even though collisions are rare.
 #[cfg(target_os = "linux")]
 fn ensure_vip_free(vip: Ipv4Addr) -> Result<()> {
     let out = Command::new("ip")
@@ -125,7 +137,7 @@ fn ensure_vip_free(vip: Ipv4Addr) -> Result<()> {
         .context(tr!("checking local interfaces for the virtual IP"))?;
     let text = String::from_utf8_lossy(&out.stdout);
     // `-o` prints one line per address; matching on the padded token keeps
-    // 100.64.1.2 from false-positiving on 100.64.1.20.
+    // 172.24.0.2 from false-positiving on 172.24.0.20.
     let needle = format!(" inet {vip}/");
     if text.contains(&needle) {
         bail!(tr_fmt!(
@@ -192,6 +204,20 @@ fn add_peer_route(_tun_name: &str, _peer_vip: Ipv4Addr) -> Result<()> {
     bail!(tr!("TUN mode currently supports Linux only"))
 }
 
+/// Remove the peer's route when a session ends, so a later peer with a
+/// different virtual IP doesn't leave stale routes on the TUN interface.
+/// Best-effort: a route that is already gone (or was never installed) must
+/// not fail the teardown.
+#[cfg(target_os = "linux")]
+fn del_peer_route(tun_name: &str, peer_vip: Ipv4Addr) -> Result<()> {
+    run_ip(&["route", "del", &format!("{peer_vip}/32"), "dev", tun_name])
+}
+
+#[cfg(not(target_os = "linux"))]
+fn del_peer_route(_tun_name: &str, _peer_vip: Ipv4Addr) -> Result<()> {
+    Ok(())
+}
+
 /// Lower the interface MTU to the connection's datagram ceiling. `serve`
 /// creates the device before the connection exists, so it clamps down here
 /// once the peer's negotiated max is known.
@@ -233,6 +259,56 @@ fn refresh_tun_mtu(
 #[cfg(not(target_os = "linux"))]
 fn set_tun_mtu(_tun_name: &str, _mtu: u16) -> Result<()> {
     bail!(tr!("TUN mode currently supports Linux only"))
+}
+
+// ---------------------------------------------------------------------------
+// VIP exchange: each side tells the peer which address is really on its TUN
+// interface, so routes point at the peer's actual VIP (derived or --tun-ip).
+// ---------------------------------------------------------------------------
+
+/// How long the one-shot VIP exchange may take before the session fails. A
+/// peer that completes the QUIC handshake but never answers is either an old
+/// build or misbehaving — failing beats hanging forever.
+const VIP_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Announce our actual virtual IP to the peer and learn theirs, over a
+/// one-shot bidi stream opened right after the QUIC handshake.
+///
+/// Without this, each side derived the peer's VIP from its EndpointId and
+/// routed to that guess — which silently breaks the moment one side uses
+/// `--tun-ip` (the derived address is then not what's on the peer's
+/// interface). Exchanging the address makes both sides agree by construction.
+///
+/// Wire format: 4 bytes, the IPv4 octets. The dialer (`tun connect`) speaks
+/// first, the acceptor (`tun serve`) replies with its own.
+async fn exchange_peer_vip(conn: &Connection, own_vip: Ipv4Addr, dialer: bool) -> Result<Ipv4Addr> {
+    let exchange = async {
+        let (mut send, mut recv) = if dialer {
+            conn.open_bi().await?
+        } else {
+            conn.accept_bi().await?
+        };
+        let mut buf = [0u8; 4];
+        if dialer {
+            send.write_all(&own_vip.octets()).await?;
+            recv.read_exact(&mut buf).await?;
+        } else {
+            recv.read_exact(&mut buf).await?;
+            send.write_all(&own_vip.octets()).await?;
+        }
+        send.finish()?;
+        Ok::<_, anyhow::Error>(Ipv4Addr::from(buf))
+    };
+    let peer_vip = time::timeout(VIP_EXCHANGE_TIMEOUT, exchange)
+        .await
+        .context(tr!("peer did not complete the TUN address exchange"))??;
+    if peer_vip.is_unspecified() || peer_vip.is_broadcast() || peer_vip.is_multicast() {
+        bail!(tr_fmt!(
+            "peer announced an unusable virtual IP {0}",
+            peer_vip
+        ));
+    }
+    Ok(peer_vip)
 }
 
 // ---------------------------------------------------------------------------
@@ -379,8 +455,18 @@ pub async fn run_tun_serve(
                     .await
                     .context(tr!("completing connection handshake"))?;
                 let peer = conn.remote_id();
-                let peer_vip = derive_vip(peer);
                 info!(%peer, "{}", tr!("TUN session established"));
+
+                // The peer's real VIP — its derived default or its --tun-ip
+                // override — announced during the handshake. Kept outside the
+                // session block so it survives for route cleanup below.
+                let peer_vip = match exchange_peer_vip(&conn, own_vip, false).await {
+                    Ok(vip) => vip,
+                    Err(e) => {
+                        warn!(%peer, error = %e, "{}", tr!("TUN session error"));
+                        continue;
+                    }
+                };
 
                 let result = async {
                     add_peer_route(&tun_name, peer_vip)?;
@@ -404,6 +490,11 @@ pub async fn run_tun_serve(
                 }
                 .await;
 
+                // Session over (peer gone, error, or Ctrl+C): drop the peer's
+                // route so a later peer with a different VIP doesn't leave a
+                // stale route on the TUN interface. Best-effort.
+                let _ = del_peer_route(&tun_name, peer_vip);
+
                 match result {
                     Ok(SessionEnd::CtrlC) => break,
                     Ok(SessionEnd::PeerGone) => { /* keep accepting */ }
@@ -416,6 +507,10 @@ pub async fn run_tun_serve(
             }
         }
     }
+    // Close gracefully: send close frames to any connected peer instead of
+    // dropping the socket, so the peer's session (and route cleanup) ends
+    // immediately.
+    endpoint.close().await;
     Ok(())
 }
 
@@ -439,7 +534,6 @@ pub async fn run_tun_connect(
         .with_context(|| tr_fmt!("'{0}' is not a valid EndpointId", to))?;
     let own_id = endpoint.id();
     let own_vip = tun_ip.unwrap_or_else(|| derive_vip(own_id));
-    let peer_vip = derive_vip(peer_id);
     // Collision check first (needs no network): fail fast on a taken address.
     ensure_vip_free(own_vip)?;
     crate::wait_online(&endpoint).await?;
@@ -463,6 +557,9 @@ pub async fn run_tun_connect(
         .connect(dial_addr, TUN_ALPN)
         .await
         .context(tr!("connecting to remote endpoint"))?;
+    // The peer's actual VIP (derived default or `--tun-ip` override) comes
+    // from the handshake — never re-derived from its EndpointId.
+    let peer_vip = exchange_peer_vip(&conn, own_vip, true).await?;
 
     // Fail closed on datagram support before creating any interface.
     let mtu = choose_mtu(mtu, &conn)?;
@@ -491,8 +588,12 @@ pub async fn run_tun_connect(
     println!("{}", styler.dim(&tr!("Press Ctrl+C to stop.")));
 
     let mut mtu = mtu;
-    let result = run_datagram_loop(&tun, &tun_name, &conn, mtu, &mut mtu, peer_id, styler).await?;
-    match result {
+    let result = run_datagram_loop(&tun, &tun_name, &conn, mtu, &mut mtu, peer_id, styler).await;
+    // Close gracefully instead of dropping the socket: the peer's datagram
+    // loop then fails immediately (route cleanup on the serve side is
+    // instant) and iroh doesn't log its ungraceful-drop error.
+    endpoint.close().await;
+    match result? {
         SessionEnd::CtrlC => {}
         SessionEnd::PeerGone => {
             println!("{}", styler.warn(&tr!("peer disconnected, exiting...")));

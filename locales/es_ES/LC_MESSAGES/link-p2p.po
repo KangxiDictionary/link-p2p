@@ -57,12 +57,17 @@ msgstr ""
 
 msgid ""
 "Path to store/load this node's persistent secret key. If it doesn't exist "
-"yet, a new one is generated and saved here. Keep this stable if you want "
-"your EndpointId to stay the same across restarts."
+"yet, a new one is generated and saved there. Default: the XDG config dir, "
+"$XDG_CONFIG_HOME/link-p2p/identity.key (usually ~/.config/link-p2p/"
+"identity.key); a legacy ./identity.key in the working directory is migrated "
+"there once. Keep this stable if you want your EndpointId to stay the same "
+"across restarts."
 msgstr ""
 "Ruta para guardar/cargar la clave secreta persistente de este nodo. Si no existe, "
-"se genera una nueva y se guarda aquí. Mantén este archivo estable para que el "
-"EndpointId no cambie entre reinicios."
+"se genera una nueva y se guarda aquí. Predeterminado: el directorio de configuración "
+"XDG, $XDG_CONFIG_HOME/link-p2p/identity.key (normalmente ~/.config/link-p2p/identity.key); "
+"un identity.key heredado (./identity.key) en el directorio de trabajo se migra allí una vez. "
+"Mantén este archivo estable para que tu EndpointId no cambie entre reinicios."
 
 msgid ""
 "Use a custom relay server instead of n0's public one, e.g. http://127.0.0.1:3340 "
@@ -322,10 +327,10 @@ msgstr "Marca a un peer y puentea esta máquina con él en la capa IP."
 
 msgid ""
 "Override this node's virtual IP (default: derived from its EndpointId, "
-"inside 100.64.0.0/10)."
+"inside 172.24.0.0/16)."
 msgstr ""
 "Sobrescribe la IP virtual de este nodo (predeterminada: derivada de su "
-"EndpointId, dentro de 100.64.0.0/10)."
+"EndpointId, dentro de 172.24.0.0/16)."
 
 msgid ""
 "Upper bound for the TUN interface MTU (default 1280). The final MTU is "
@@ -426,3 +431,21 @@ msgstr "Negociación de datagramas TUN: max_datagram_size={0}, MTU de interfaz={
 
 msgid "TUN interface MTU raised {0} → {1} (datagram path MTU converged)"
 msgstr "MTU de la interfaz TUN elevado de {0} a {1} (el MTU de la ruta de datagramas ha convergido)"
+
+msgid "peer did not complete the TUN address exchange"
+msgstr "el par no completó el intercambio de direcciones TUN"
+
+msgid "peer announced an unusable virtual IP {0}"
+msgstr "el par anunció una IP virtual no utilizable: {0}"
+
+msgid "creating identity directory {0}"
+msgstr "creando el directorio de identidad {0}"
+
+msgid "migrating legacy identity from {0} to {1}"
+msgstr "migrando la identidad heredada de {0} a {1}"
+
+msgid "migrated legacy identity from {0} to {1}"
+msgstr "identidad heredada migrada de {0} a {1}"
+
+msgid "identity migration failed; using the legacy file"
+msgstr "falló la migración de la identidad; se usa el archivo heredado"

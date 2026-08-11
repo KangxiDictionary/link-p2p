@@ -32,25 +32,30 @@ retransmission layer underneath and reintroduce head-of-line blocking).
 ```bash
 # machine A (needs root / CAP_NET_ADMIN)
 sudo link-p2p tun serve
-# -> prints your virtual IP and EndpointId, e.g. 100.64.4.21
+# -> prints your virtual IP and EndpointId, e.g. 172.24.0.21
 
 # machine B
 sudo link-p2p tun connect --to <EndpointId from A>
 
 # now, on either machine:
-ping 100.64.x.y        # the other side's virtual IP
-ssh user@100.64.x.y    # any service, any port — the whole machine is there
+ping 172.24.x.y        # the other side's virtual IP
+ssh user@172.24.x.y    # any service, any port — the whole machine is there
 ```
 
-Virtual IPs are derived deterministically from each side's EndpointId
-(`100.64.0.0/10`, RFC 6598 CGNAT space) via BLAKE3, so no coordination
-server is needed: both sides compute both addresses from the EndpointIds
-they already hold. A startup check refuses to run if the derived address
-collides with a local interface (e.g. Tailscale's own 100.x address);
-`--tun-ip` overrides the derivation, and `--mtu` (default 1280, values above
-1280 refused) bounds the interface MTU — the final MTU is `min(--mtu, the
-negotiated QUIC datagram max)`, and a connection that didn't negotiate
-datagrams is refused outright rather than silently falling back to streams.
+Each side's virtual IP defaults to a deterministic BLAKE3 derivation from
+its EndpointId (`172.24.0.0/16`), and the two sides exchange the address
+each one actually bound during the handshake — so routes always point at
+the peer's real VIP, including `--tun-ip` overrides. The range deliberately
+avoids RFC 6598's `100.64.0.0/10`: Tailscale's netfilter rules drop any
+packet with a 100.64/10 source that doesn't arrive on `tailscale0`, which
+blackholes a tunnel in that range in both directions (measured on real
+hardware). A startup check refuses to run if the address collides with a
+local interface — that check, not the range choice, is the universal
+fallback against third-party address conflicts. `--tun-ip` overrides the
+derivation, and `--mtu` (default 1280, values above 1280 refused) bounds the
+interface MTU — the final MTU is `min(--mtu, the negotiated QUIC datagram
+max)`, and a connection that didn't negotiate datagrams is refused outright
+rather than silently falling back to streams.
 
 **TUN mode is a privileged mode**: creating the interface and installing the
 route needs `root` / `CAP_NET_ADMIN`, and v1 is Linux-only (macOS/Windows
@@ -214,6 +219,15 @@ round-trip. It expects a release build and an `iroh-relay` server binary
 `cargo install iroh-relay --features server` and copy it there, or pass the
 path as an argument).
 
+For TUN mode, `sudo scripts/tun-loopback-test.sh` starts a local relay plus
+`tun serve`/`tun connect` on one machine and checks MTU negotiation plus the
+peer-exit route lifecycle (route removed on disconnect, no stale route after
+reconnecting with a different identity). Caveat: both virtual IPs live on
+the same machine, so the kernel's local routing table answers the pings
+without entering the TUN — the script validates process startup, connection
+and MTU negotiation, and route cleanup, but **not** the datagram data path;
+that needs a ping across two machines.
+
 ## Run
 
 On machine A (the side being exposed, e.g. forwarding to a local SSH server):
@@ -233,11 +247,14 @@ On machine B:
 Now `ssh -p 2222 localhost` on machine B goes over the P2P QUIC link to
 machine A's SSH server.
 
-Both sides persist their identity to `identity.key` in the working directory
-by default (`--identity` to change the path), so `EndpointId` stays stable
-across restarts — don't commit that file, it's a private key. On Unix the
-key file is created with mode `0600` (owner-only) and existing files are
-tightened to `0600` on every start.
+Both sides persist their identity to the XDG config dir by default —
+`$XDG_CONFIG_HOME/link-p2p/identity.key` (usually
+`~/.config/link-p2p/identity.key`); `--identity` overrides the path. A legacy
+`identity.key` in the working directory is migrated to the XDG location on
+first run, so existing `EndpointId`s stay stable. `EndpointId` stays stable
+across restarts because the key is persisted — don't commit that file, it's
+a private key. On Unix the key file is created with mode `0600` (owner-only)
+and existing files are tightened to `0600` on every start.
 
 ### Resource limits
 
