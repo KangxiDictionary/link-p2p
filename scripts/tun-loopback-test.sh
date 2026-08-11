@@ -82,7 +82,11 @@ while [ $SECONDS -lt 20 ]; do
     sleep 1
 done
 
-SERVE_ID=$(grep -oE '[0-9a-zA-Z+/=_-]{40,60}' /tmp/lp-tun-serve.log | tail -1 || true)
+SERVE_ID=$(grep -oE '[0-9a-zA-Z+/=_-]{50,70}' /tmp/lp-tun-serve.log | tail -1 || true)
+if [ -z "$SERVE_ID" ]; then
+    # Fallback: serve prints the id immediately after the "your EndpointId" line.
+    SERVE_ID=$(awk '/your EndpointId/{getline; gsub(/[[:space:]]/, ""); print}' /tmp/lp-tun-serve.log | tr -d '\r' || true)
+fi
 if [ -z "$SERVE_ID" ]; then
     echo -e "${RED}Could not extract EndpointId from serve output.${NC}"
     echo "  last serve lines:"
