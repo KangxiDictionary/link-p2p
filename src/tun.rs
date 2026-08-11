@@ -17,6 +17,7 @@ use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use iroh::endpoint::Connection;
 use iroh::{EndpointAddr, EndpointId, SecretKey};
+use tokio::time::{self, Duration};
 use tracing::{info, warn};
 #[cfg(target_os = "linux")]
 use tun2::AbstractDevice;
@@ -71,6 +72,14 @@ pub fn validate_mtu(mtu: u16) -> Result<()> {
 /// Fails closed: if datagrams weren't negotiated on this connection, TUN
 /// mode cannot work at all — refusing beats silently falling back to a
 /// stream-based transport, which would reintroduce head-of-line blocking.
+///
+/// NOTE: the first call happens right after the handshake, when the QUIC
+/// PMTUD probe is still at its RFC 9000 starting value (1200) — on a path
+/// that supports more, `max_datagram_size()` climbs to the real value a few
+/// ms later. A one-shot clamp at this point is therefore conservative
+/// (e.g. 1162 instead of the design's 1280). The datagram loop re-checks
+/// periodically and raises the TUN MTU once PMTUD has converged (see
+/// run_datagram_loop).
 fn choose_mtu(user_mtu: u16, conn: &Connection) -> Result<u16> {
     let max_dgram = conn.max_datagram_size().context(tr!(
         "the peer or path does not support QUIC datagrams; TUN mode cannot work over this connection.\n\
@@ -191,6 +200,36 @@ fn set_tun_mtu(tun_name: &str, mtu: u16) -> Result<()> {
     run_ip(&["link", "set", "dev", tun_name, "mtu", &mtu.to_string()])
 }
 
+/// Update the TUN interface MTU if the connection's datagram ceiling has
+/// risen since the last check. The initial clamp runs right after the
+/// handshake, when QUIC PMTUD is still at its 1200-byte starting value; as
+/// the path probe converges, `max_datagram_size()` climbs (e.g. 1162 →
+/// 1414), and the interface MTU should follow it up to the user's --mtu
+/// bound. Never lowers the MTU: a drop would mean the path shrank, which
+/// the sender must not exploit after we've already told the peer our limit.
+#[cfg(target_os = "linux")]
+fn refresh_tun_mtu(tun_name: &str, user_mtu: u16, conn: &Connection, mtu: &mut u16) -> Result<()> {
+    let Some(max_dgram) = conn.max_datagram_size() else {
+        return Ok(()); // datagrams gone (shouldn't happen); keep current MTU
+    };
+    let candidate = std::cmp::min(user_mtu, max_dgram as u16);
+    if candidate > *mtu {
+        *mtu = candidate;
+        set_tun_mtu(tun_name, candidate)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn refresh_tun_mtu(
+    _tun_name: &str,
+    _user_mtu: u16,
+    _conn: &Connection,
+    _mtu: &mut u16,
+) -> Result<()> {
+    Ok(())
+}
+
 #[cfg(not(target_os = "linux"))]
 fn set_tun_mtu(_tun_name: &str, _mtu: u16) -> Result<()> {
     bail!(tr!("TUN mode currently supports Linux only"))
@@ -220,14 +259,20 @@ enum SessionEnd {
 /// `send_datagram_wait` (not `send_datagram`) so congestion backpressures
 /// into the TUN read loop instead of silently dropping inner packets: with
 /// drops, inner TCP would just retransmit into the same full buffer forever.
+///
+/// Also periodically refreshes the interface MTU upward (see choose_mtu for
+/// why the initial clamp is conservative).
 async fn run_datagram_loop(
     tun: &tun2::AsyncDevice,
+    tun_name: &str,
     conn: &Connection,
-    mtu: u16,
+    user_mtu: u16,
+    mtu: &mut u16,
     peer: EndpointId,
     styler: Styler,
 ) -> Result<SessionEnd> {
-    let mut buf = vec![0u8; mtu as usize + 64];
+    let mut buf = vec![0u8; *mtu as usize + 64];
+    let mut refresh = time::interval(Duration::from_secs(2));
     loop {
         tokio::select! {
             r = tun.recv(&mut buf) => {
@@ -249,6 +294,17 @@ async fn run_datagram_loop(
                         info!(%peer, error = %e, "{}", tr!("peer disconnected"));
                         return Ok(SessionEnd::PeerGone);
                     }
+                }
+            }
+            _ = refresh.tick() => {
+                let old = *mtu;
+                refresh_tun_mtu(tun_name, user_mtu, conn, mtu)?;
+                if *mtu != old {
+                    info!(%peer, "{}", tr_fmt!(
+                        "TUN interface MTU raised {0} → {1} (datagram path MTU converged)",
+                        old, *mtu
+                    ));
+                    buf.resize(*mtu as usize + 64, 0);
                 }
             }
             _ = tokio::signal::ctrl_c() => {
@@ -328,7 +384,7 @@ pub async fn run_tun_serve(
 
                 let result = async {
                     add_peer_route(&tun_name, peer_vip)?;
-                    let mtu = choose_mtu(mtu, &conn)?;
+                    let mut mtu = choose_mtu(mtu, &conn)?;
                     set_tun_mtu(&tun_name, mtu)?;
                     // Observability for the MTU-symmetry question: max_datagram_size
                     // is a per-end value (local path MTU estimate + peer-advertised
@@ -344,7 +400,7 @@ pub async fn run_tun_serve(
                         conn.max_datagram_size().unwrap_or_default(),
                         mtu
                     ));
-                    run_datagram_loop(&tun, &conn, mtu, peer, styler).await
+                    run_datagram_loop(&tun, &tun_name, &conn, mtu, &mut mtu, peer, styler).await
                 }
                 .await;
 
@@ -434,7 +490,9 @@ pub async fn run_tun_connect(
     );
     println!("{}", styler.dim(&tr!("Press Ctrl+C to stop.")));
 
-    match run_datagram_loop(&tun, &conn, mtu, peer_id, styler).await? {
+    let mut mtu = mtu;
+    let result = run_datagram_loop(&tun, &tun_name, &conn, mtu, &mut mtu, peer_id, styler).await?;
+    match result {
         SessionEnd::CtrlC => {}
         SessionEnd::PeerGone => {
             println!("{}", styler.warn(&tr!("peer disconnected, exiting...")));

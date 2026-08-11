@@ -423,3 +423,6 @@ msgstr "peer desconectado, saliendo..."
 
 msgid "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}"
 msgstr "Negociación de datagramas TUN: max_datagram_size={0}, MTU de interfaz={1}"
+
+msgid "TUN interface MTU raised {0} → {1} (datagram path MTU converged)"
+msgstr "MTU de la interfaz TUN elevado de {0} a {1} (el MTU de la ruta de datagramas ha convergido)"

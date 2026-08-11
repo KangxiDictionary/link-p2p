@@ -413,3 +413,6 @@ msgstr "对端已断开，正在退出……"
 
 msgid "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}"
 msgstr "TUN datagram 协商：max_datagram_size={0}，接口 MTU={1}"
+
+msgid "TUN interface MTU raised {0} → {1} (datagram path MTU converged)"
+msgstr "TUN 接口 MTU 已提升 {0} → {1}（datagram 路径 MTU 探测收敛）"

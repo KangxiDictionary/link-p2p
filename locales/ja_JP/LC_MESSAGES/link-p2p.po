@@ -418,3 +418,6 @@ msgstr "ピアが切断されました。終了します……"
 
 msgid "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}"
 msgstr "TUN データグラム交渉：max_datagram_size={0}、インターフェース MTU={1}"
+
+msgid "TUN interface MTU raised {0} → {1} (datagram path MTU converged)"
+msgstr "TUN インターフェース MTU を {0} → {1} に引き上げ（データグラム経路 MTU が収束）"
