@@ -76,9 +76,9 @@ fn choose_mtu(user_mtu: u16, conn: &Connection) -> Result<u16> {
         "the peer or path does not support QUIC datagrams; TUN mode cannot work over this connection.\n\
          Refusing to start rather than silently falling back to a stream transport."
     ))?;
-    // noq guarantees max_datagram_size is a little over 1 KiB, so this is
-    // always in u16 range.
-    Ok(std::cmp::min(user_mtu, max_dgram as u16))
+    let mtu = std::cmp::min(user_mtu, max_dgram as u16);
+    info!("choose_mtu({user_mtu}, {max_dgram}) = {mtu}");
+    Ok(mtu)
 }
 
 // ---------------------------------------------------------------------------
