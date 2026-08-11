@@ -52,8 +52,24 @@ case "${1:-}" in
         echo "  === share this with the connect side ==="
         grep -E "EndpointId|virtual IP" "$LOG_S" || true
         echo ""
-        echo "  serve PID: $PID    Ctrl+C to stop."
-        wait $PID
+        echo "  serve PID: $PID"
+
+        # Watch the log for path events so the user can see what happened
+        # without having to background the script and tail -f.
+        echo "  waiting for NAT verdict (Ctrl+C anytime to stop)..."
+        DEADLINE=$((SECONDS + 90))
+        while [ $SECONDS -lt $DEADLINE ]; do
+            if grep -q "path::selected" "$LOG_S" 2>/dev/null; then
+                echo ""
+                echo "  === NAT verdict (from $LOG_S) ==="
+                grep -E "Established.*path|path.*selected|path_remote" "$LOG_S" | tail -10
+                break
+            fi
+            sleep 2
+        done
+        echo ""
+        echo "  Full log: $LOG_S    Ctrl+C to stop."
+        wait $PID 2>/dev/null || true
         ;;
     connect)
         EP="${2:-}"
