@@ -410,3 +410,6 @@ msgstr "对端 {0} 在 {1} 可达"
 
 msgid "peer disconnected, exiting..."
 msgstr "对端已断开，正在退出……"
+
+msgid "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}"
+msgstr "TUN datagram 协商：max_datagram_size={0}，接口 MTU={1}"

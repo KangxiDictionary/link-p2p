@@ -415,3 +415,6 @@ msgstr "ピア {0} は {1} で到達可能です"
 
 msgid "peer disconnected, exiting..."
 msgstr "ピアが切断されました。終了します……"
+
+msgid "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}"
+msgstr "TUN データグラム交渉：max_datagram_size={0}、インターフェース MTU={1}"

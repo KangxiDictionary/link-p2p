@@ -420,3 +420,6 @@ msgstr "el peer {0} es alcanzable en {1}"
 
 msgid "peer disconnected, exiting..."
 msgstr "peer desconectado, saliendo..."
+
+msgid "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}"
+msgstr "Negociación de datagramas TUN: max_datagram_size={0}, MTU de interfaz={1}"

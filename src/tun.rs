@@ -330,6 +330,17 @@ pub async fn run_tun_serve(
                     add_peer_route(&tun_name, peer_vip)?;
                     let mtu = choose_mtu(mtu, &conn)?;
                     set_tun_mtu(&tun_name, mtu)?;
+                    // Observability for the MTU-symmetry question: max_datagram_size
+                    // is a per-end value (local path MTU estimate + peer-advertised
+                    // limit), so the two sides' numbers may legitimately differ —
+                    // e.g. different egress interface MTUs. Compare this line across
+                    // both machines; if they differ, the receiver's tun MTU is the
+                    // min of the two and oversize sends silently drop.
+                    info!(%peer, "{}", tr_fmt!(
+                        "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}",
+                        conn.max_datagram_size().unwrap_or_default(),
+                        mtu
+                    ));
                     run_datagram_loop(&tun, &conn, mtu, peer, styler).await
                 }
                 .await;
@@ -398,6 +409,13 @@ pub async fn run_tun_connect(
     let mtu = choose_mtu(mtu, &conn)?;
     let (tun, tun_name) = create_tun_device(own_vip, mtu)?;
     add_peer_route(&tun_name, peer_vip)?;
+    // Same observability line as `tun serve`: compare this across both machines
+    // to check the MTU-symmetry assumption (see the comment in run_tun_serve).
+    info!(%peer_id, "{}", tr_fmt!(
+        "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}",
+        conn.max_datagram_size().unwrap_or_default(),
+        mtu
+    ));
 
     println!(
         "{}",
