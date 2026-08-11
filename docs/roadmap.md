@@ -7,6 +7,60 @@ they block real-world deployability.
 
 ---
 
+## Research update & prioritized implementation path (2026-08)
+
+Before re-ordering the gaps below, one finding changes the shape of this whole
+roadmap enough that it's worth stating up front:
+
+**iroh shipped 1.0 in June 2026, on its own QUIC fork ("noq"), which
+implements the IETF `QUIC-NAT-TRAVERSAL` draft *inside* the QUIC connection
+itself** rather than as a bolt-on STUN/ICE layer. In production this reports
+~90% direct-connection rates across real-world NAT combinations, and its
+`MagicSocket` layer already does continuous multi-path probing with
+uninterrupted switchover — i.e. connection migration — because the congestion
+controller is aware of the hole-punch/path-switch as a native QUIC operation,
+not an application-level reconnect. Practically: **Layer 1, items 1 and 2 are
+not "build this from scratch" tasks — they are "upgrade to iroh 1.0 (if not
+already), then measure and integration-test what iroh already does."** That
+turns two of the hardest, highest-risk items in this doc into calibration
+work instead of protocol-design work. See the per-item notes in Layer 1 below.
+
+This matters for sequencing, because it means the *actually* hard, novel work
+that only this project can do is concentrated in Layer 2 (coordination/ACL)
+and Layer 3/4 (platform breadth, edge cases) — and those two categories have
+very different profiles for a solo-maintainer-plus-community project:
+
+- Layer 2 (discovery, trust, ACL) is **design-sensitive** — get the model
+  wrong and every client has to migrate later. Worth doing carefully,
+  yourself, before a wide release.
+- Layer 3/4 (macOS/Windows TUN backends, mobile clients, MTU/firewall edge
+  cases) is **parallelizable and contribution-friendly** — self-contained,
+  testable independently, and exactly the kind of "I need this on my OS" work
+  that GitHub issues/PRs are good at surfacing and fixing. These are good
+  candidates to explicitly leave as `good first issue` / `help wanted` once
+  public, rather than something to pre-build solo.
+
+### Recommended phase order
+
+| Phase | Scope | Why here | Effort |
+|---|---|---|---|
+| **0 — Verify, don't rebuild** | Upgrade to iroh 1.0/noq if not already on it; run the NAT-matrix test plan from gap #1 against the *existing* stack before writing any new traversal code; do the real-hardware relay benchmark from gap #3 | Cheapest possible win — may close gaps #1 and #3 with zero new code, just measurement + a version bump | days |
+| **1 — Confirm migration, add relay redundancy** | End-to-end WiFi↔4G migration test against iroh's MagicSocket (gap #2); configure/measure multiple relay endpoints for redundancy (gap #1's remaining item) | Builds on Phase 0's findings; still mostly integration testing, not new protocol code | 1–2 weeks |
+| **2 — Lightweight discovery (no server)** | Replace manual `--to EndpointId` with `iroh-gossip`-based announce/lookup scoped to a shared network secret (passphrase → topic id). No coordination server, no hosting burden — stays true to the "throw it on GitHub, GPL-3" model | This is the item that most limits usability today (gap #4) and is achievable without taking on server-operator responsibility | 2–4 weeks |
+| **3 — Local ACL enforcement** | Policy file (TOML), evaluated locally per node: `{peer EndpointId or tag} → {allowed ports/CIDRs}`, default-deny, checked at `accept()` in both socks5 and TUN paths | Directly answers gap #6 without needing gap #5's full trust-model overhaul first — start with local policy, centralize later if a coordination server ever exists | 1–2 weeks |
+| **4 — (Optional, community-driven) coordination server** | A minimal Headscale-style control plane: device roster, revocation, OIDC login, policy push | Highest engineering cost, most infrastructure-operator burden, and exactly the kind of well-scoped, independently testable subsystem that's realistic to hand to a contributor once the project has users asking for it | open-ended — treat as a stretch goal, not v1 |
+| **5 — Platform breadth** | macOS/Windows TUN backends, mobile clients, packaging | Mark these as `help wanted` from day one — they need platform-specific testing this project's maintainer(s) may not have hardware/time for | community-paced |
+| **6 — Edge-case hardening** | IPv6, MTU black-holes, TLS-intercepting proxies, high-latency paths | Inherently needs real, diverse user traffic to surface — cannot be meaningfully pre-built solo; triage as issues arrive | ongoing |
+
+The net effect of this reordering versus the original "blocker order" is: two
+of the six Layer-1/2 blockers (NAT traversal, migration) likely collapse into
+one verification phase, which frees up real time to get the discovery + ACL
+design (Phase 2/3) right *before* opening the repo up — because that's the
+part a later contributor can't easily fix without a breaking protocol change,
+whereas TUN backends and edge cases can be bolted on incrementally forever.
+
+---
+
 ## Current state (v1)
 
 | capability | status |
@@ -52,6 +106,20 @@ path effectively degrades.
   we need to implement application-layer STUN/ICE.
 - Multiple relay endpoints for redundancy, and relay health monitoring.
 
+**Implementation path (updated after research):** iroh 1.0 (June 2026) ships
+its own QUIC fork ("noq") implementing the `QUIC-NAT-TRAVERSAL` IETF draft
+natively inside the QUIC handshake, not as a separate STUN/ICE layer —
+n0 reports ~90% direct-connection rates in production across real NAT
+combinations, with congestion-control-aware hole-punch loss detection built
+in. **This means "evaluate whether we need application-layer STUN/ICE" is
+very likely answered "no" — don't build one.** The remaining real work is:
+(1) confirm the crate is pinned to iroh ≥1.0 and using `noq`, not an older
+Quinn-based version; (2) run the NAT-matrix test plan above against what's
+already there, since it's now a measurement task, not a design task; (3) the
+multiple-relay-endpoints item is still genuinely open and should be built as
+config (a list of relay URLs with basic health-check/failover), independent
+of the traversal question.
+
 ---
 
 ### 2. Connection migration on network changes
@@ -74,6 +142,20 @@ rebuild, not a migration.
 - Test the WiFi→4G handover scenario end to end.
 - Graceful fallback: if migration fails, the current reconnect-on-disconnect
   behaviour must still work.
+
+**Implementation path (updated after research):** as of iroh 1.0, `MagicSocket`
+continuously probes multiple candidate paths (direct IPv4/IPv6, relay) and
+switches to the lowest-latency one with no connection interruption — this is
+exactly "migration" and is handled inside iroh, below the application. So the
+"design a migration path" item is largely **not our code to write**; what
+*is* our code is making sure the layers above the iroh `Connection` don't
+defeat it — specifically, the TUN datagram loop's current behaviour of
+treating a transient path error as `PeerGone` and tearing down the whole
+session (full re-handshake + new VIP exchange) needs to change to: distinguish
+a genuine peer-close from a recoverable path event, and only tear down on the
+former. That's a scoped fix in the TUN read/write loop, not a new subsystem —
+re-classify the error path, then do the WiFi→4G end-to-end test to confirm
+iroh's migration is actually reaching the TUN layer transparently.
 
 ---
 
@@ -113,6 +195,28 @@ rendezvous protocol. This was an explicit v1 decision ("TUN v1 无任何服务�
 - Ideally tied to a user/org identity so the discovery scope is bounded.
 - Examples: Tailscale's coordination server (keyed by SSO identity), iroh's
   own gossipsub discovery (which could be a lighter-weight starting point).
+
+**Implementation path:** given the project's constraints (single/small
+maintainer, no appetite for running or maintaining hosted infrastructure),
+prefer the serverless option first: `iroh-gossip` (n0's own pub/sub overlay,
+already part of the iroh ecosystem, scales down to phone-class devices) gives
+a discovery mechanism with zero hosting burden. Design:
+1. A "network" is defined by a shared secret (a passphrase, or a generated
+   token distributed out-of-band — same trust model as a Tailscale authkey,
+   minus the server).
+2. `BLAKE3(secret)` derives a gossip topic id. Devices that know the secret
+   join the same topic and periodically announce `{EndpointId, device label,
+   VIP}`.
+3. Each node keeps a local cache of the roster it has seen (replaces manual
+   `--to` copy/paste); staleness = last-seen timeout.
+4. Revocation, in this model, means rotating the secret and re-announcing —
+   coarse (all-or-nothing), but matches the no-server constraint. A real
+   per-device revocation list requires Phase 4's coordination server; don't
+   block this phase on it.
+
+This is the item most worth getting right before a public release, since a
+later switch to a different discovery mechanism is a breaking protocol
+change for every existing user.
 
 ---
 
@@ -159,6 +263,22 @@ there's no second-level authorisation.
 - Policy should be centrally defined (at the coordination server) and enforced
   locally by each node.
 
+**Implementation path:** don't wait for a coordination server (gap #5/Phase 4)
+to ship a first version of this — Tailscale's own model separates policy
+*authorship* (their ACL/grants file) from policy *enforcement* (local, on
+each node), and the enforcement half is independent and buildable now:
+1. A local TOML policy file: rules of the form
+   `{ src = "<EndpointId or tag>", dst_ports = [...], dst_cidr = "..." }`,
+   default-deny.
+2. Enforced at the two places connections currently get accepted
+   unconditionally: `ForwardHandler::accept()`'s stream-open in `main.rs`,
+   and the SOCKS5 `Target` resolution in `socks5.rs` before dialing out.
+3. Once Phase 4's coordination server exists (if it ever does), it becomes a
+   *distributor* of this same policy file format to all nodes — the local
+   enforcement code doesn't need to change, only where the file comes from.
+This gets real access control into the tool immediately instead of gating it
+behind the much larger trust-model project in gap #5.
+
 ---
 
 ## Layer 3: Usability and platform breadth
@@ -197,3 +317,28 @@ there's no second-level authorisation.
 - **GSO / io_uring performance work**: the loopback benchmarks showed the
   bottleneck is QUIC protocol processing, not the kernel I/O path, so kernel
   batching won't lift the ceiling until the QUIC overhead is addressed.
+
+---
+
+## Release strategy notes
+
+For a GPL-3.0, community-supported release (no dedicated hosted
+infrastructure, no full-time maintainer team), the phase order above implies
+a rough "what to finish before `git push --tags v0.x` and posting it" line:
+
+- **Before release:** Phase 0–3 (verify NAT/migration on iroh 1.0, relay
+  redundancy, gossip-based discovery, local ACL). These are the parts a
+  breaking change is expensive to make later, once real users have adopted a
+  given discovery/trust model.
+- **Fine to release without, and better sourced from real users:** everything
+  in Phase 5/6 (non-Linux TUN backends, mobile, IPv6, MTU/proxy edge cases).
+  Label these clearly in the README/issue templates as known gaps and
+  `help wanted` — that's an honest and genuinely useful way to use a
+  community, versus discovering later that core protocol assumptions need to
+  change.
+- **Explicitly optional / stretch:** Phase 4 (hosted coordination server).
+  It's the one piece of this roadmap that turns "run a CLI tool" into "run
+  and secure a server," which is a meaningfully bigger ask of a solo/small
+  maintainer — fine to scope it as a separate sub-project or leave to
+  whoever in the community wants centralized/enterprise features badly
+  enough to build and run it.
