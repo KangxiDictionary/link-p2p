@@ -449,3 +449,9 @@ msgstr "identidad heredada migrada de {0} a {1}"
 
 msgid "identity migration failed; using the legacy file"
 msgstr "falló la migración de la identidad; se usa el archivo heredado"
+
+msgid "could not remove the legacy identity file {0} (you can delete it manually)"
+msgstr "no se pudo eliminar el archivo de identidad heredado {0} (puedes eliminarlo manualmente)"
+
+msgid "could not remove peer route"
+msgstr "no se pudo eliminar la ruta del par"

@@ -22,7 +22,7 @@ mod tun;
 use std::io::{IsTerminal, Write};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -35,6 +35,7 @@ use iroh::{
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
 use tracing::{info, warn};
 
@@ -44,6 +45,10 @@ use crate::style::{ColorMode, Styler};
 /// ALPN identifies this application protocol during the QUIC/TLS handshake.
 /// Bump the version suffix if you make a breaking change to the framing.
 const ALPN: &[u8] = b"link-p2p/tcp-forward/0";
+
+/// How long Ctrl+C waits for in-flight forwarded streams to flush before
+/// cutting them off (used by both `serve` and `connect`).
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Parser)]
 #[command(
@@ -459,6 +464,14 @@ fn migrate_identity(from: &Path, to: &Path) -> Result<()> {
         )
     })?;
     harden_key_permissions(to)?;
+    // The key material is now safely at its XDG home; drop the legacy copy
+    // so the private key doesn't linger in the working directory.
+    if let Err(e) = std::fs::remove_file(from) {
+        warn!(error = %e, "{}", tr_fmt!(
+            "could not remove the legacy identity file {0} (you can delete it manually)",
+            from.display()
+        ));
+    }
     Ok(())
 }
 
@@ -621,6 +634,10 @@ async fn run_serve(
     println!();
     println!("{}", styler.dim(&tr!("Press Ctrl+C to stop.")));
 
+    // Every per-stream forwarder is our own spawned task; the router's
+    // accept loop doesn't know about them, so keep the handles here for the
+    // drain on shutdown.
+    let tasks: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
     let handler = ForwardHandler {
         target: forward,
         // 0 = unlimited. usize::MAX keeps the acquire() call shape uniform.
@@ -629,6 +646,7 @@ async fn run_serve(
         } else {
             max_conns
         })),
+        tasks: tasks.clone(),
     };
     let router = Router::builder(endpoint.clone())
         .accept(ALPN, handler)
@@ -637,6 +655,18 @@ async fn run_serve(
     tokio::signal::ctrl_c().await?;
     println!("{}", styler.warn(&tr!("shutting down...")));
     router.shutdown().await?;
+    // router.shutdown() only stops the router's own accept loop — the
+    // per-stream forwarders are our tasks, so give them the same bounded
+    // drain window as run_connect.
+    let pending = std::mem::take(&mut *tasks.lock().unwrap());
+    let drain_deadline = tokio::time::sleep(DRAIN_TIMEOUT);
+    tokio::pin!(drain_deadline);
+    for task in pending {
+        tokio::select! {
+            _ = task => {}
+            _ = &mut drain_deadline => break,
+        }
+    }
     Ok(())
 }
 
@@ -647,6 +677,9 @@ struct ForwardHandler {
     target: Option<SocketAddr>,
     /// Bounds the number of concurrently forwarded streams.
     semaphore: Arc<Semaphore>,
+    /// Every spawned per-stream forwarder, so Ctrl+C can drain them
+    /// (bounded, see DRAIN_TIMEOUT) instead of cutting them off mid-flush.
+    tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl ProtocolHandler for ForwardHandler {
@@ -680,7 +713,7 @@ impl ProtocolHandler for ForwardHandler {
                 }
             };
             let target = self.target;
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 // The permit lives as long as this stream does; dropping it
                 // after handle_forward_stream frees the slot.
                 let _permit = permit;
@@ -688,6 +721,7 @@ impl ProtocolHandler for ForwardHandler {
                     warn!(%peer, error = %e, "{}", tr!("stream error"));
                 }
             });
+            self.tasks.lock().unwrap().push(task);
         }
 
         connection.closed().await;
@@ -832,8 +866,7 @@ async fn run_connect(
     // Graceful drain: give in-flight streams a bounded window to flush their
     // last bytes before the runtime is torn down, instead of cutting them off
     // the instant the process exits. Long-running streams are cut at the
-    // timeout.
-    const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+    // timeout (DRAIN_TIMEOUT).
     let drain_deadline = tokio::time::sleep(DRAIN_TIMEOUT);
     tokio::pin!(drain_deadline);
     for task in tasks {

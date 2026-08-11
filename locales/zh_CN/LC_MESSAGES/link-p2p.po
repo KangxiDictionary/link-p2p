@@ -439,3 +439,9 @@ msgstr "已将旧身份从 {0} 迁移到 {1}"
 
 msgid "identity migration failed; using the legacy file"
 msgstr "身份迁移失败；继续使用旧文件"
+
+msgid "could not remove the legacy identity file {0} (you can delete it manually)"
+msgstr "无法删除旧身份文件 {0}（可手动删除）"
+
+msgid "could not remove peer route"
+msgstr "无法移除对端路由"

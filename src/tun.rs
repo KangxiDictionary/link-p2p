@@ -492,8 +492,11 @@ pub async fn run_tun_serve(
 
                 // Session over (peer gone, error, or Ctrl+C): drop the peer's
                 // route so a later peer with a different VIP doesn't leave a
-                // stale route on the TUN interface. Best-effort.
-                let _ = del_peer_route(&tun_name, peer_vip);
+                // stale route on the TUN interface. Best-effort, but never
+                // silent — a failure here is how zombie routes get diagnosed.
+                if let Err(e) = del_peer_route(&tun_name, peer_vip) {
+                    warn!(%peer, error = %e, "{}", tr!("could not remove peer route"));
+                }
 
                 match result {
                     Ok(SessionEnd::CtrlC) => break,

@@ -444,3 +444,9 @@ msgstr "旧 ID を {0} から {1} に移行しました"
 
 msgid "identity migration failed; using the legacy file"
 msgstr "ID の移行に失敗しました。旧ファイルを使用します"
+
+msgid "could not remove the legacy identity file {0} (you can delete it manually)"
+msgstr "旧 ID ファイル {0} を削除できませんでした（手動で削除できます）"
+
+msgid "could not remove peer route"
+msgstr "ピアルートを削除できませんでした"
