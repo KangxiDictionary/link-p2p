@@ -37,17 +37,30 @@ cleanup() {
     kill $RELAY_PID 2>/dev/null || true
     wait 2>/dev/null
     rm -f "$ID_SERVE" "$ID_CONN"
+    # Interfaces auto-destroyed when the link-p2p processes exit (fd close).
     echo -e "${CYAN}TUN interfaces auto-destroyed on fd close.${NC}"
 }
 trap cleanup EXIT INT TERM
 
 # --- prerequisites ---
 [ "$(id -u)" -eq 0 ] || { echo -e "${RED}Must be root.  Run: sudo $0${NC}"; exit 1; }
-[ -x "$LINK_P2P"  ] || { echo -e "${RED}$LINK_P2P not built.  cargo build --release${NC}"; exit 1; }
+[ -x "$LINK_P2P"  ] || { echo -e "${RED}$LINK_P2P not built.  Run: cargo build --release${NC}"; exit 1; }
 [ -x "$RELAY_BIN" ] || { echo -e "${RED}$RELAY_BIN not found.  Build iroh-relay first.${NC}"; exit 1; }
 [ -c /dev/net/tun ] || { echo -e "${RED}/dev/net/tun missing.  modprobe tun?${NC}"; exit 1; }
 
 echo -e "${CYAN}=== link-p2p TUN loopback smoke test ===${NC}"
+
+# Warn if the binary predates the last commit (stale release build).
+BUILD_TIME=$(stat -c %Y "$LINK_P2P" 2>/dev/null || echo 0)
+if [ -f "$REPO_DIR/src/tun.rs" ]; then
+    SRC_TIME=$(stat -c %Y "$REPO_DIR/src/tun.rs" 2>/dev/null || echo 0)
+    if [ "$BUILD_TIME" -lt "$SRC_TIME" ]; then
+        echo -e "${DIM}Source ($REPO_DIR/src/tun.rs) is newer than $LINK_P2P.${NC}"
+        echo -e "${DIM}Consider: cargo build --release${NC}"
+        echo ""
+    fi
+fi
+
 echo ""
 
 # --- 1. relay ---
@@ -70,7 +83,6 @@ LANG=C "$LINK_P2P" tun serve \
     >/tmp/lp-tun-serve.log 2>&1 &
 SERVE_PID=$!
 
-# Wait for the banner (local relay → online in <2s).
 SECONDS=0
 while [ $SECONDS -lt 20 ]; do
     if grep -q "your EndpointId" /tmp/lp-tun-serve.log 2>/dev/null; then break; fi
@@ -82,11 +94,9 @@ while [ $SECONDS -lt 20 ]; do
     sleep 1
 done
 
-SERVE_ID=$(grep -oE '[0-9a-zA-Z+/=_-]{50,70}' /tmp/lp-tun-serve.log | tail -1 || true)
-if [ -z "$SERVE_ID" ]; then
-    # Fallback: serve prints the id immediately after the "your EndpointId" line.
-    SERVE_ID=$(awk '/your EndpointId/{getline; gsub(/[[:space:]]/, ""); print}' /tmp/lp-tun-serve.log | tr -d '\r' || true)
-fi
+# Extract EndpointId — id printed on its own line immediately after the
+# "your EndpointId" prompt.  Read the line after the marker with awk.
+SERVE_ID=$(awk '/your EndpointId/{getline; gsub(/[[:space:]]+/, ""); if(length($0)>=50) print}' /tmp/lp-tun-serve.log || true)
 if [ -z "$SERVE_ID" ]; then
     echo -e "${RED}Could not extract EndpointId from serve output.${NC}"
     echo "  last serve lines:"
@@ -117,21 +127,24 @@ done
 echo -e "  connect PID: $CONN_PID"
 echo ""
 
-# --- 4. extract VIPs ---
-SERVE_VIP=$(grep "your virtual IP" /tmp/lp-tun-serve.log | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | tail -1 || true)
-CONN_VIP=$(grep -oE "connected.*virtual IP: [0-9.]+" /tmp/lp-tun-conn.log | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | tail -1 || true)
+# --- 4. extract VIPs from ip addr (kernel is the authority, not our logs) ---
+sleep 1  # let ip route/addr settle
+
+# link-p2p%d: first device = serve, second = connect.
+SERVE_VIP=$(ip -o -4 addr show 2>/dev/null \
+    | awk -F'[ /]+' '/link-p2p0[[:space:]]*inet/{print $4}' || true)
+CONN_VIP=$(ip -o -4 addr show 2>/dev/null \
+    | awk -F'[ /]+' '/link-p2p1[[:space:]]*inet/{print $4}' || true)
 
 if [ -z "$SERVE_VIP" ] || [ -z "$CONN_VIP" ]; then
-    echo -e "${RED}Could not extract VIPs from logs.${NC}"
-    echo "  serve:"
-    grep -E "(virtual IP|negotiation)" /tmp/lp-tun-serve.log || true
-    echo "  connect:"
-    grep -E "(virtual IP|negotiation)" /tmp/lp-tun-conn.log || true
+    echo -e "${RED}Could not find TUN interface IPs from 'ip addr'.${NC}"
+    echo "  ip -o -4 addr show | grep link-p2p:"
+    ip -o -4 addr show 2>/dev/null | grep -i link-p2p || echo "  (none)"
     exit 1
 fi
 
-echo -e "  serve VIP  : ${GREEN}$SERVE_VIP${NC}   (peer dials this machine)"
-echo -e "  connect VIP: ${GREEN}$CONN_VIP${NC}   (peer = serve)"
+echo -e "  serve VIP  : ${GREEN}$SERVE_VIP${NC}   (on link-p2p0)"
+echo -e "  connect VIP: ${GREEN}$CONN_VIP${NC}   (on link-p2p1)"
 echo ""
 
 # --- 5. MTU negotiation ---
@@ -142,7 +155,7 @@ done
 echo ""
 
 # --- 6. ping serve → connect ---
-echo -e "${CYAN}=== ping  serve → connect (${CONN_VIP}) ===${NC}"
+echo -e "${CYAN}=== ping  serve (link-p2p0) → connect (${CONN_VIP}) ===${NC}"
 
 echo -e "${DIM}# bare${NC}"
 ping -c 4 -W 2 "$CONN_VIP" || echo -e "${RED}^^ FAILED${NC}"
@@ -159,7 +172,7 @@ ping -c 4 -W 2 -s 1500 -M do "$CONN_VIP" \
 echo ""
 
 # --- 7. ping connect → serve (reverse direction) ---
-echo -e "${CYAN}=== ping  connect → serve (${SERVE_VIP}) ===${NC}"
+echo -e "${CYAN}=== ping  connect (link-p2p1) → serve (${SERVE_VIP}) ===${NC}"
 
 echo -e "${DIM}# bare${NC}"
 ping -c 4 -W 2 "$SERVE_VIP" || echo -e "${RED}^^ FAILED${NC}"
@@ -171,7 +184,7 @@ echo ""
 
 # --- 8. interface state ---
 echo -e "${CYAN}=== Interfaces ===${NC}"
-ip -o -4 addr show | grep -i link-p2p || echo "(none)"
+ip -o -4 addr show 2>/dev/null | grep -i link-p2p || echo "(none)"
 echo ""
 ip route show | grep -i link-p2p || echo "(no link-p2p routes)"
 echo ""
