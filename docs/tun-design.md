@@ -41,7 +41,8 @@ vip(ep) = 100.64.0.0/10 段内，取 BLAKE3(EndpointId) 的低 22 bit 作为主�
 - 选 **1280** 的理由：内层 IPv6 最小 MTU 就是 1280，设 1280 保证任何内层协议都能承载；外层 1280+34 ≈ 1314，在 1492（PPPoE）、IPv6 外层（40B 头 → 1368）、以及走 relay 的路径上都放得下，**任何常见路径都不会触发外层分片**。
 - 不要设 1500：内层 1500 的包在外层会超 1500 → 要么外层 IP 分片（QUIC 禁 IP 分片），要么丢包——这就是"能连但巨卡"的来源。
 - 运行时必须 `max_datagram_size()` 钳制：noq 保证"至少 1KB 出头"，若协商值 < 1280（理论上极少见）以协商值为准。
-- **已知限制：`max_datagram_size()` 是本端值，不是双向对称的**。noq 的 `max_size()` = `min(本端 current_mtu() 预算, 对端公告的 max_datagram_frame_size)`，前者由本端自己发 PMTUD 探测、受本端出网接口 MTU 约束（PPPoE/VPN/Tailscale exit node 等都会让两端不一致），后者默认 65535 档、对称。若两端报值不同，接收端把自己的 tun MTU 设得更小的一方会静默丢弃超限包（不报错）。v1 不做双向协商：真机验收第 3 步前，先对比两台机器 `RUST_LOG=link_p2p=info` 里的 `TUN datagram negotiation` 日志行（连接建立后各打印一次 `max_datagram_size` 与最终接口 MTU）；若不一致且 ping 大包丢包，再补 mini handshake（各开一条 uni stream 交换 MTU，取 min）。
+- **已知限制：`max_datagram_size()` 是本端值，不是双向对称的**。noq 的 `max_size()` = `min(本端 current_mtu() 预算, 对端公告的 max_datagram_frame_size)`，前者由本端自己发 PMTUD 探测、受本端出网接口 MTU 约束（PPPoE/VPN/Tailscale exit node 等都会让两端不一致），后者默认 65535 档、对称。
+- **判读校准（重要）：两端数字不相等本身无害**。每端 tun MTU = `min(1280, 自己的 max_datagram_size)`，只要两边都 ≥ 1280，最终都会被同一个 1280 封顶，差值被抹平。**真正的危险信号是任一端 < 1280**：该端的 tun MTU 被迫小于对端，对端仍按 1280 发包，超出部分在该端 tun 写入时被内核静默丢弃（该端自己的发送没问题，被自己的较小上限钳制）。真机判据：看两台机器 `RUST_LOG=link_p2p=info` 里 `TUN datagram negotiation` 行的 `max_datagram_size` 相对 1280 的位置，而非两数是否相等；`ping -s 1200/1500` 只作交叉确认。若任一端 < 1280 且大包丢包，再补 mini handshake（各开一条 uni stream 交换 MTU，取 min）。注意：该值在会话期间可能随路径 MTU 变化漂移，日志只反映建连时刻。
 - 内层超过 MTU 的包由内核在 TUN 接口做标准 IP 分片，隧道层不处理分片。
 
 ## 决策 3：与现有 stream 模式的关系 —— 独立子命令，共存

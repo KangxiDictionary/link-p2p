@@ -333,9 +333,12 @@ pub async fn run_tun_serve(
                     // Observability for the MTU-symmetry question: max_datagram_size
                     // is a per-end value (local path MTU estimate + peer-advertised
                     // limit), so the two sides' numbers may legitimately differ —
-                    // e.g. different egress interface MTUs. Compare this line across
-                    // both machines; if they differ, the receiver's tun MTU is the
-                    // min of the two and oversize sends silently drop.
+                    // e.g. different egress interface MTUs. That alone is harmless:
+                    // both sides' tun MTU is capped at the same 1280. The dangerous
+                    // signal is either side BELOW 1280 — that side's tun MTU is
+                    // smaller than the peer's, and the peer's oversize sends get
+                    // silently dropped at this side's tun write (this side's own
+                    // sends are fine, they're clamped to its own smaller max).
                     info!(%peer, "{}", tr_fmt!(
                         "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}",
                         conn.max_datagram_size().unwrap_or_default(),
