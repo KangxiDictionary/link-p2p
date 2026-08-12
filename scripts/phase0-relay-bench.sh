@@ -17,7 +17,9 @@
 # Before running this, check the NAT-matrix test first to confirm whether
 # your two machines actually go through the relay. If they get a direct
 # connection (path_remote=Ip), this benchmark won't measure the relay path
-# unless you force it (e.g. iptables DROP the direct UDP port on both sides).
+# unless you force it — use '$0 force-relay <peer-IP>' on both machines to
+# drop inbound UDP from the peer (direct path dies, TCP relay unaffected),
+# and '$0 clear-relay <peer-IP>' afterwards.
 #
 # Prerequisites: iperf3 on both machines.
 set -eu
@@ -39,10 +41,28 @@ CONN_ARGS="--identity $ID_C"
 usage() {
     echo "Usage: $0 serve                          (machine A)"
     echo "       $0 connect <EndpointId> <real-IP> (machine B)"
+    echo "       $0 force-relay <peer-public-IP>   (both machines: block direct path)"
+    echo "       $0 clear-relay <peer-public-IP>   (remove the block after testing)"
     exit 1
 }
 
 case "${1:-}" in
+    force-relay)
+        # Drop inbound UDP from the peer's public IP. This kills the direct
+        # hole-punched path; the relay (TCP/WebSocket) is unaffected, so
+        # everything is forced through the relay. Run on BOTH machines with
+        # the other side's public IP (find it in the iroh debug logs, or use
+        # a "what's my IP" service). Requires root.
+        PEER_IP="${2:?usage: $0 force-relay <peer-public-ip>}"
+        iptables -I INPUT -p udp -s "$PEER_IP" -j DROP
+        echo "applied: iptables -I INPUT -p udp -s $PEER_IP -j DROP"
+        echo "run '$0 clear-relay $PEER_IP' after the test to restore"
+        ;;
+    clear-relay)
+        PEER_IP="${2:?usage: $0 clear-relay <peer-public-ip>}"
+        iptables -D INPUT -p udp -s "$PEER_IP" -j DROP
+        echo "removed DROP rule for $PEER_IP"
+        ;;
     serve)
         rm -f "$ID_S" "$LOG_S"
         echo "=== Phase 0 relay-bench: serve ==="
