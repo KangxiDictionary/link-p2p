@@ -332,20 +332,15 @@ enum SessionEnd {
 /// reintroduce head-of-line blocking — one dropped packet stalling every
 /// later one.
 ///
-/// After a send or read error on the datagram connection, whether the error
-/// means the peer is genuinely gone (connection-closed and should tear down
-/// the session) or was just a transient path blip that iroh is recovering
-/// from via its built-in connection migration (MagicSocket).
+/// Datagram errors (send or read) are NOT treated as a peer disconnect
+/// here — iroh/noq's connection migration (MagicSocket) causes transient
+/// failures while switching paths, and the upper layer must not tear down
+/// the session during a path switch. The `conn.closed()` branch at the top
+/// of the select detects genuine disconnection as an event, so the error
+/// branches just log a warning and keep going.
 ///
-/// Waits a short window for the connection to report closure. If the deadline
-/// expires, the connection is still alive — the error was transient.
-const PATH_RECOVERY_WINDOW: Duration = Duration::from_secs(3);
-
-async fn is_peer_gone(conn: &Connection) -> bool {
-    time::timeout(PATH_RECOVERY_WINDOW, conn.closed())
-        .await
-        .is_ok()
-}
+/// Also periodically refreshes the interface MTU upward (see choose_mtu for
+/// why the initial clamp is conservative).
 async fn run_datagram_loop(
     tun: &tun2::AsyncDevice,
     tun_name: &str,
@@ -359,18 +354,21 @@ async fn run_datagram_loop(
     let mut refresh = time::interval(Duration::from_secs(2));
     loop {
         tokio::select! {
+            biased; // closed() first — a disconnection is detected before
+                    // we waste time on stale packets.
+
+            _ = conn.closed() => {
+                info!(%peer, "{}", tr!("peer disconnected"));
+                return Ok(SessionEnd::PeerGone);
+            }
             r = tun.recv(&mut buf) => {
                 let n = r.context(tr!("reading packet from TUN device"))?;
                 let pkt = Bytes::copy_from_slice(&buf[..n]);
                 if let Err(e) = conn.send_datagram_wait(pkt).await {
-                    if is_peer_gone(conn).await {
-                        warn!(%peer, error = %e, "{}", tr!("sending datagram to peer failed"));
-                        return Ok(SessionEnd::PeerGone);
-                    }
-                    // Datagram send failed but the connection is still alive —
-                    // iroh is likely migrating to a new path. Drop this packet
-                    // (TUN mode is best-effort — the inner protocol handles loss)
-                    // and keep the session alive.
+                    // The connection is still alive (closed() above would
+                    // have fired if not) — iroh is migrating to a new path.
+                    // Drop this packet (TUN mode is best-effort) and keep
+                    // the session alive.
                     warn!(%peer, error = %e, "{}", tr!("datagram error; assuming transient path switch (iroh may be migrating the connection)"));
                 }
             }
@@ -382,12 +380,6 @@ async fn run_datagram_loop(
                             .context(tr!("writing packet to TUN device"))?;
                     }
                     Err(e) => {
-                        if is_peer_gone(conn).await {
-                            info!(%peer, error = %e, "{}", tr!("peer disconnected"));
-                            return Ok(SessionEnd::PeerGone);
-                        }
-                        // Read error while the connection is still alive —
-                        // iroh is switching paths; keep the session running.
                         warn!(%peer, error = %e, "{}", tr!("datagram error; assuming transient path switch (iroh may be migrating the connection)"));
                     }
                 }

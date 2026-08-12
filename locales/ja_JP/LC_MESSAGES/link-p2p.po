@@ -382,8 +382,6 @@ msgstr "TUN インターフェース名を読み取り中"
 msgid "reading packet from TUN device"
 msgstr "TUN デバイスからパケットを読み取り中"
 
-msgid "sending datagram to peer failed"
-msgstr "ピアへのデータグラム送信に失敗"
 
 msgid "writing packet to TUN device"
 msgstr "TUN デバイスへのパケット書き込み中"

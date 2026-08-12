@@ -387,8 +387,6 @@ msgstr "leyendo el nombre de la interfaz TUN"
 msgid "reading packet from TUN device"
 msgstr "leyendo paquete del dispositivo TUN"
 
-msgid "sending datagram to peer failed"
-msgstr "falló el envío de datagrama al peer"
 
 msgid "writing packet to TUN device"
 msgstr "escribiendo paquete en el dispositivo TUN"

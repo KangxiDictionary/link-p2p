@@ -377,8 +377,6 @@ msgstr "读取 TUN 接口名称"
 msgid "reading packet from TUN device"
 msgstr "从 TUN 设备读取数据包"
 
-msgid "sending datagram to peer failed"
-msgstr "向对端发送 datagram 失败"
 
 msgid "writing packet to TUN device"
 msgstr "向 TUN 设备写入数据包"
