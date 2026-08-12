@@ -445,3 +445,6 @@ msgstr "无法删除旧身份文件 {0}（可手动删除）"
 
 msgid "could not remove peer route"
 msgstr "无法移除对端路由"
+
+msgid "datagram error; assuming transient path switch (iroh may be migrating the connection)"
+msgstr "datagram 错误；假定为瞬时路径切换（iroh 可能正在迁移连接）"

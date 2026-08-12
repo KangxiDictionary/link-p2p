@@ -450,3 +450,6 @@ msgstr "旧 ID ファイル {0} を削除できませんでした（手動で削
 
 msgid "could not remove peer route"
 msgstr "ピアルートを削除できませんでした"
+
+msgid "datagram error; assuming transient path switch (iroh may be migrating the connection)"
+msgstr "データグラムエラー；一時的なパス切り替えと見なします（iroh が接続を移行中かもしれません）"

@@ -455,3 +455,6 @@ msgstr "no se pudo eliminar el archivo de identidad heredado {0} (puedes elimina
 
 msgid "could not remove peer route"
 msgstr "no se pudo eliminar la ruta del par"
+
+msgid "datagram error; assuming transient path switch (iroh may be migrating the connection)"
+msgstr "error de datagrama; asumiendo un cambio de ruta transitorio (iroh puede estar migrando la conexión)"
