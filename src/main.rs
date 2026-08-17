@@ -28,7 +28,7 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
 use iroh::{
-    endpoint::{presets, Connection, QuicTransportConfig, RecvStream, SendStream},
+    endpoint::{presets, Connection, QuicTransportConfig, RecvStream, SendStream, VarInt},
     protocol::{AcceptError, ProtocolHandler, Router},
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, SecretKey,
 };
@@ -49,6 +49,11 @@ const ALPN: &[u8] = b"link-p2p/tcp-forward/0";
 /// How long Ctrl+C waits for in-flight forwarded streams to flush before
 /// cutting them off (used by both `serve` and `connect`).
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Error code sent when we abort a QUIC stream mid-transfer (one direction
+/// of a pipe failed): the peer sees an immediate reset/stop instead of
+/// waiting for the idle timeout to notice the dead stream.
+const STREAM_ABORT_CODE: VarInt = VarInt::from_u32(1);
 
 #[derive(Parser)]
 #[command(
@@ -946,6 +951,10 @@ async fn pipe_streams(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream
             }
         }
     }
+    // The futures above hold `&mut` borrows of send/recv; drop them to
+    // release the borrows before the error path touches those streams.
+    drop(client_to_remote);
+    drop(remote_to_client);
     match (res_client, res_remote) {
         (Some(a), Some(b)) => {
             a?;
@@ -953,8 +962,24 @@ async fn pipe_streams(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream
             Ok(())
         }
         // One direction errored; the other was cancelled by the select! drop.
-        (Some(a), None) => a,
-        (None, Some(b)) => b,
+        // Tell the peer explicitly instead of letting the stream half just
+        // drop: a RESET/STOP propagates immediately, whereas a silently
+        // dropped stream only becomes visible to the peer once the idle
+        // timeout fires (which is the point of task 1's keepalive work —
+        // the reset makes abnormal teardown cheap). Best-effort: if the
+        // stream is already closed, there's nothing to signal.
+        (Some(a), None) => {
+            // client→remote copy failed (send side broke): stop reading
+            // from the peer so it doesn't keep pushing data into a dead pipe.
+            let _ = recv.stop(STREAM_ABORT_CODE);
+            a
+        }
+        (None, Some(b)) => {
+            // remote→client copy failed (recv side broke): reset our send
+            // half so the peer's read fails immediately instead of hanging.
+            let _ = send.reset(STREAM_ABORT_CODE);
+            b
+        }
         (None, None) => unreachable!("loop exits only when both complete or one errors"),
     }
 }
