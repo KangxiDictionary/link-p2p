@@ -238,6 +238,14 @@ without entering the TUN — the script validates process startup, connection
 and MTU negotiation, and route cleanup, but **not** the datagram data path;
 that needs a ping across two machines.
 
+`cargo test -- --ignored` runs `tests/e2e.rs`: it spawns the real
+serve/connect binaries against a local relay with `--ephemeral` identities,
+checks a 128KiB byte-identical round trip through the tunnel, sends SIGINT
+and asserts both processes exit within the drain window (and the listener
+port is released). It's `#[ignore]`d because it needs a release build and
+the `tools/iroh-relay` binary — missing prerequisites are reported and
+skipped, not failed.
+
 ## Run
 
 On machine A (the side being exposed, e.g. forwarding to a local SSH server):
