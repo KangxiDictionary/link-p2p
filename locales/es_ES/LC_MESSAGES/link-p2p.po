@@ -474,3 +474,21 @@ msgstr "identidad efímera: este EndpointId no se conservará entre reinicios"
 
 msgid "Use a temporary identity that is never written to disk: the EndpointId changes every start. Conflicts with --identity."
 msgstr "Usar una identidad temporal que nunca se escribe en disco: el EndpointId cambia en cada inicio. Entra en conflicto con --identity."
+
+msgid "Measure RTT to a remote node over the P2P network."
+msgstr "Mide el RTT a un nodo remoto a través de la red P2P."
+
+msgid "pinging {0}..."
+msgstr "haciendo ping a {0}..."
+
+msgid "pong from {0}: RTT {1}µs"
+msgstr "pong de {0}: RTT {1}µs"
+
+msgid "path: direct (UDP)"
+msgstr "ruta: directa (UDP)"
+
+msgid "path: relay (no direct UDP path yet)"
+msgstr "ruta: relay (sin ruta UDP directa todavía)"
+
+msgid "peer echoed a mismatched ping timestamp"
+msgstr "el par devolvió una marca de tiempo de ping no coincidente"

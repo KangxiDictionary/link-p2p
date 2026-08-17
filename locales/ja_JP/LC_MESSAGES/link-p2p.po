@@ -469,3 +469,21 @@ msgstr "一時的な ID：この EndpointId は再起動後も保持されませ
 
 msgid "Use a temporary identity that is never written to disk: the EndpointId changes every start. Conflicts with --identity."
 msgstr "ディスクに書き込まれない一時的な ID を使用します：起動ごとに EndpointId が変わります。--identity とは併用できません。"
+
+msgid "Measure RTT to a remote node over the P2P network."
+msgstr "P2P ネットワーク上のリモートノードへの RTT を測定します。"
+
+msgid "pinging {0}..."
+msgstr "{0} に ping を送信しています……"
+
+msgid "pong from {0}: RTT {1}µs"
+msgstr "{0} からの pong：RTT {1}µs"
+
+msgid "path: direct (UDP)"
+msgstr "経路：直接（UDP）"
+
+msgid "path: relay (no direct UDP path yet)"
+msgstr "経路：リレー（直接 UDP 経路はまだありません）"
+
+msgid "peer echoed a mismatched ping timestamp"
+msgstr "ピアが返した ping タイムスタンプが一致しません"

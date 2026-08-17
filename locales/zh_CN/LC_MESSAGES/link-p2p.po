@@ -464,3 +464,21 @@ msgstr "临时身份：此 EndpointId 不会在重启后保持不变"
 
 msgid "Use a temporary identity that is never written to disk: the EndpointId changes every start. Conflicts with --identity."
 msgstr "使用从不写入磁盘的临时身份：每次启动 EndpointId 都会变化。与 --identity 互斥。"
+
+msgid "Measure RTT to a remote node over the P2P network."
+msgstr "测量到 P2P 网络中远端节点的 RTT。"
+
+msgid "pinging {0}..."
+msgstr "正在 ping {0}……"
+
+msgid "pong from {0}: RTT {1}µs"
+msgstr "来自 {0} 的 pong：RTT {1}µs"
+
+msgid "path: direct (UDP)"
+msgstr "路径：直连（UDP）"
+
+msgid "path: relay (no direct UDP path yet)"
+msgstr "路径：relay（尚无直连 UDP 路径）"
+
+msgid "peer echoed a mismatched ping timestamp"
+msgstr "对端回显的 ping 时间戳不匹配"

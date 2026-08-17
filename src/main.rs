@@ -24,7 +24,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
 use iroh::{
@@ -45,6 +45,11 @@ use crate::style::{ColorMode, Styler};
 /// ALPN identifies this application protocol during the QUIC/TLS handshake.
 /// Bump the version suffix if you make a breaking change to the framing.
 const ALPN: &[u8] = b"link-p2p/tcp-forward/0";
+
+/// ALPN for the `ping` probe (echoes a timestamp, reports RTT and path).
+/// Separate from the forwarding ALPN so a ping can target a node that is
+/// also serving streams — the Router accepts both.
+const PING_ALPN: &[u8] = b"link-p2p/ping/0";
 
 /// How long Ctrl+C waits for in-flight forwarded streams to flush before
 /// cutting them off (used by both `serve` and `connect`).
@@ -161,6 +166,12 @@ enum Command {
     Tun {
         #[command(subcommand)]
         command: TunCommand,
+    },
+    /// Measure RTT to a remote node over the P2P network.
+    Ping {
+        /// The remote node's EndpointId (printed by `serve` on startup)
+        #[arg(long)]
+        to: String,
     },
     /// Print a shell completion script to stdout.
     ///
@@ -303,6 +314,13 @@ fn localized_command() -> clap::Command {
                         )
                 })
         })
+        .mut_subcommand("ping", |s| {
+            s.about(tr!("Measure RTT to a remote node over the P2P network."))
+                .mut_arg(
+                    "to",
+                    |a| a.help(tr!("The remote node's EndpointId (printed by `serve` on startup)")),
+                )
+        })
         .mut_subcommand("completions", |s| {
             s.about(tr!("Print a shell completion script to stdout."))
                 .long_about(tr!(
@@ -440,6 +458,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                     .await
             }
         },
+        Command::Ping { to } => run_ping(secret_key, &to, cli.relay.as_deref(), styler).await,
         Command::Completions { .. } => unreachable!("handled above"),
     }
 }
@@ -675,7 +694,7 @@ async fn run_serve(
     styler: Styler,
 ) -> Result<()> {
     let endpoint = build_endpoint(secret_key, relay)?
-        .alpns(vec![ALPN.to_vec()])
+        .alpns(vec![ALPN.to_vec(), PING_ALPN.to_vec()])
         .bind()
         .await
         .context(tr!("binding endpoint"))?;
@@ -721,6 +740,7 @@ async fn run_serve(
     };
     let router = Router::builder(endpoint.clone())
         .accept(ALPN, handler)
+        .accept(PING_ALPN, PingHandler)
         .spawn();
 
     tokio::signal::ctrl_c().await?;
@@ -797,6 +817,31 @@ impl ProtocolHandler for ForwardHandler {
 
         connection.closed().await;
         info!(%peer, "{}", tr!("connection closed"));
+        Ok(())
+    }
+}
+
+/// Handle `link-p2p ping` probes: echo the 8-byte timestamp back over a
+/// one-shot bidi stream so the caller can measure RTT.
+#[derive(Debug)]
+struct PingHandler;
+
+impl ProtocolHandler for PingHandler {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        loop {
+            let (mut send, mut recv) = match connection.accept_bi().await {
+                Ok(pair) => pair,
+                Err(_) => break, // connection ended
+            };
+            let mut ts = [0u8; 8];
+            if recv.read_exact(&mut ts).await.is_err() {
+                continue;
+            }
+            if send.write_all(&ts).await.is_err() {
+                continue;
+            }
+            let _ = send.finish();
+        }
         Ok(())
     }
 }
@@ -1052,6 +1097,85 @@ async fn run_connect(
             _ = &mut drain_deadline => break,
         }
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ping: measure RTT to a remote node and report the path (direct or relay).
+// ---------------------------------------------------------------------------
+
+/// `link-p2p ping`: dial with the ping ALPN, exchange an 8-byte timestamp over
+/// a one-shot stream, and report RTT plus the connection's current path.
+async fn run_ping(
+    secret_key: SecretKey,
+    to: &str,
+    relay: Option<&str>,
+    styler: Styler,
+) -> Result<()> {
+    let endpoint = build_endpoint(secret_key, relay)?
+        .bind()
+        .await
+        .context(tr!("binding endpoint"))?;
+    wait_online(&endpoint).await?;
+
+    let remote_id: EndpointId = to
+        .parse()
+        .with_context(|| tr_fmt!("'{0}' is not a valid EndpointId", to))?;
+
+    let dial_addr = match relay {
+        Some(relay_url) => {
+            let relay_url = relay_url
+                .parse()
+                .with_context(|| tr_fmt!("'{0}' is not a valid RelayUrl", relay_url))?;
+            EndpointAddr::new(remote_id).with_relay_url(relay_url)
+        }
+        None => EndpointAddr::from(remote_id),
+    };
+
+    println!("{}", styler.info(&tr_fmt!("pinging {0}...", remote_id)));
+    let connection = endpoint
+        .connect(dial_addr, PING_ALPN)
+        .await
+        .context(tr!("connecting to remote endpoint"))?;
+
+    let start = std::time::Instant::now();
+    let (mut send, mut recv) = connection.open_bi().await?;
+    let ts_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    send.write_all(&ts_ms.to_be_bytes()).await?;
+    send.finish()?;
+    let mut echo = [0u8; 8];
+    recv.read_exact(&mut echo).await?;
+    let rtt_us = start.elapsed().as_micros() as u64;
+    if i64::from_be_bytes(echo) != ts_ms {
+        bail!(tr!("peer echoed a mismatched ping timestamp"));
+    }
+
+    println!(
+        "{}",
+        styler.ok(&tr_fmt!(
+            "pong from {0}: RTT {1}µs",
+            remote_id.fmt_short(),
+            rtt_us
+        ))
+    );
+    // iroh 1.0.3 exposes no "current path" query on an established
+    // Connection, so classify via the stats: a direct path carries UDP, a
+    // relay-only path carries everything over the relay's TCP/WebSocket.
+    let stats = connection.stats();
+    if stats.udp_tx.datagrams + stats.udp_rx.datagrams > 0 {
+        println!("  {}", styler.dim(&tr!("path: direct (UDP)")));
+    } else {
+        println!(
+            "  {}",
+            styler.dim(&tr!("path: relay (no direct UDP path yet)"))
+        );
+    }
+    // Close gracefully instead of dropping the socket (avoids iroh's
+    // ungraceful-drop error and lets the peer's session end immediately).
+    endpoint.close().await;
     Ok(())
 }
 
