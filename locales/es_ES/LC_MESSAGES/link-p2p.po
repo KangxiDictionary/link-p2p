@@ -468,3 +468,9 @@ msgstr "falló la reconexión; reintentando en {0}"
 
 msgid "Log output format: text (human-readable) or json (structured, for jq/CI pipelines)."
 msgstr "Formato de salida de registros: text (legible para humanos) o json (estructurado, para pipelines jq/CI)."
+
+msgid "ephemeral identity: this EndpointId will not persist across restarts"
+msgstr "identidad efímera: este EndpointId no se conservará entre reinicios"
+
+msgid "Use a temporary identity that is never written to disk: the EndpointId changes every start. Conflicts with --identity."
+msgstr "Usar una identidad temporal que nunca se escribe en disco: el EndpointId cambia en cada inicio. Entra en conflicto con --identity."

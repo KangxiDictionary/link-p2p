@@ -458,3 +458,9 @@ msgstr "重连失败；将在 {0} 后重试"
 
 msgid "Log output format: text (human-readable) or json (structured, for jq/CI pipelines)."
 msgstr "日志输出格式：text（人类可读）或 json（结构化，供 jq/CI 流水线使用）。"
+
+msgid "ephemeral identity: this EndpointId will not persist across restarts"
+msgstr "临时身份：此 EndpointId 不会在重启后保持不变"
+
+msgid "Use a temporary identity that is never written to disk: the EndpointId changes every start. Conflicts with --identity."
+msgstr "使用从不写入磁盘的临时身份：每次启动 EndpointId 都会变化。与 --identity 互斥。"

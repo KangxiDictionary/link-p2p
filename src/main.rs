@@ -86,8 +86,13 @@ struct Cli {
     /// `~/.config/link-p2p/identity.key`); a legacy `./identity.key` in the
     /// working directory is migrated there once. Keep this stable if you
     /// want your EndpointId to stay the same across restarts.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, conflicts_with = "ephemeral")]
     identity: Option<PathBuf>,
+
+    /// Use a temporary identity that is never written to disk: the EndpointId
+    /// changes every start. Conflicts with --identity.
+    #[arg(long, short = 'e', global = true, conflicts_with = "identity")]
+    ephemeral: bool,
 
     /// Use a custom relay server instead of n0's public one, e.g.
     /// http://127.0.0.1:3340 (run `iroh-relay --dev` locally). With this set,
@@ -216,6 +221,10 @@ fn localized_command() -> clap::Command {
         .mut_arg(
             "identity",
             |a| a.help(tr!("Path to store/load this node's persistent secret key. If it doesn't exist yet, a new one is generated and saved there. Default: the XDG config dir, $XDG_CONFIG_HOME/link-p2p/identity.key (usually ~/.config/link-p2p/identity.key); a legacy ./identity.key in the working directory is migrated there once. Keep this stable if you want your EndpointId to stay the same across restarts.")),
+        )
+        .mut_arg(
+            "ephemeral",
+            |a| a.help(tr!("Use a temporary identity that is never written to disk: the EndpointId changes every start. Conflicts with --identity.")),
         )
         .mut_arg(
             "relay",
@@ -373,9 +382,19 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
     }
 
     let styler = style::apply_color_mode(color_mode);
-    let identity = resolve_identity_path(cli.identity)?;
-    let secret_key = load_or_create_secret_key(&identity)
-        .context(tr!("loading/creating persistent identity"))?;
+    // --ephemeral: an in-memory identity, nothing touches the filesystem.
+    let secret_key = if cli.ephemeral {
+        println!(
+            "{}",
+            styler.warn(&tr!(
+                "ephemeral identity: this EndpointId will not persist across restarts"
+            ))
+        );
+        SecretKey::generate()
+    } else {
+        let identity = resolve_identity_path(cli.identity)?;
+        load_or_create_secret_key(&identity).context(tr!("loading/creating persistent identity"))?
+    };
 
     match cli.command {
         Command::Serve { forward, proxy } => {

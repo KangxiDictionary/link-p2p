@@ -463,3 +463,9 @@ msgstr "再接続に失敗しました。{0} 後に再試行します"
 
 msgid "Log output format: text (human-readable) or json (structured, for jq/CI pipelines)."
 msgstr "ログ出力形式：text（人間が読みやすい）または json（構造化、jq/CI パイプライン用）。"
+
+msgid "ephemeral identity: this EndpointId will not persist across restarts"
+msgstr "一時的な ID：この EndpointId は再起動後も保持されません"
+
+msgid "Use a temporary identity that is never written to disk: the EndpointId changes every start. Conflicts with --identity."
+msgstr "ディスクに書き込まれない一時的な ID を使用します：起動ごとに EndpointId が変わります。--identity とは併用できません。"
