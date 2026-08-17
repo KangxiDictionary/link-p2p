@@ -14,7 +14,7 @@ clap = { version = "4", features = ["derive"] }
 # Version must track clap's major version.
 clap_complete = "4"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # i18n. `gettext-system` links glibc's built-in libintl on Linux (zero extra
 # deps); other platforms fall back to gettext-sys's vendored build.
 gettext-rs = { version = "0.8", features = ["gettext-system"] }

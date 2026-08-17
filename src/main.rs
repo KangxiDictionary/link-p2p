@@ -37,7 +37,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{RwLock, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
-use tracing::{info, warn};
+use tracing::{info, warn, Instrument};
 
 use crate::i18n::{tr, tr_fmt};
 use crate::style::{ColorMode, Styler};
@@ -105,6 +105,18 @@ struct Cli {
     /// Prevents resource exhaustion on endpoints exposed to the network.
     #[arg(long, global = true, default_value_t = 1024)]
     max_conns: usize,
+
+    /// Log output format: text (human-readable) or json (structured, for
+    /// jq/CI pipelines).
+    #[arg(long, global = true, value_enum, default_value_t = LogFormat::Text)]
+    log_format: LogFormat,
+}
+
+/// Log output format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum LogFormat {
+    Text,
+    Json,
 }
 
 #[derive(Subcommand)]
@@ -217,6 +229,10 @@ fn localized_command() -> clap::Command {
             "max_conns",
             |a| a.help(tr!("Maximum number of concurrent forwarded connections. 0 means unlimited. Prevents resource exhaustion on endpoints exposed to the network.")),
         )
+        .mut_arg(
+            "log_format",
+            |a| a.help(tr!("Log output format: text (human-readable) or json (structured, for jq/CI pipelines).")),
+        )
         .mut_subcommand("serve", |s| {
             s.about(tr!("Expose a local TCP service to the P2P network."))
                 .mut_arg(
@@ -327,6 +343,8 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
         return Ok(());
     }
 
+    let log_format = cli.log_format;
+
     // Enable iroh's internal logging (RUST_LOG=iroh=debug etc). Without this
     // iroh's tracing events go nowhere, so RUST_LOG would be a no-op.
     //
@@ -335,17 +353,24 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
     // which would drown out our own connection-lifecycle logs. Explicit
     // RUST_LOG always wins, e.g. `RUST_LOG=iroh=trace` for the path-selection
     // debugging described in README.md.
-    tracing_subscriber::fmt()
+    let fmt = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("link_p2p=info,iroh=warn")),
         )
         .with_target(true)
+        // Emit span close events so timing/byte-count spans (dial, pipe) are
+        // visible in the output; the default (FmtSpan::NONE) records their
+        // fields but never prints them.
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         // Skip ANSI color codes when stdout isn't a real terminal (piped to
         // a file, `| tee`, log aggregator, etc) — otherwise every line gets
         // littered with raw escape sequences.
-        .with_ansi(std::io::stdout().is_terminal())
-        .init();
+        .with_ansi(std::io::stdout().is_terminal());
+    match log_format {
+        LogFormat::Json => fmt.json().init(),
+        LogFormat::Text => fmt.init(),
+    }
 
     let styler = style::apply_color_mode(color_mode);
     let identity = resolve_identity_path(cli.identity)?;
@@ -909,10 +934,20 @@ async fn run_connect(
     };
 
     println!("{}", styler.info(&tr_fmt!("dialing {0}...", remote_id)));
+    // Time the handshake. Deliberately a structured event, not a span:
+    // iroh spawns long-lived internal tasks during connect() that inherit
+    // the current span (tokio::spawn captures it), which would keep the span
+    // open for the whole connection lifetime and never emit a close event.
+    let start = std::time::Instant::now();
     let connection = endpoint
         .connect(dial_addr.clone(), ALPN)
         .await
         .context(tr!("connecting to remote endpoint"))?;
+    tracing::debug!(
+        peer = %remote_id,
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "dial completed"
+    );
     println!(
         "{}",
         styler.ok(&tr_fmt!(
@@ -1006,78 +1041,88 @@ async fn run_connect(
 // ---------------------------------------------------------------------------
 
 async fn pipe_streams(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
-    let (mut tcp_read, mut tcp_write) = tcp.into_split();
+    let span = tracing::debug_span!(
+        "pipe",
+        sent_bytes = tracing::field::Empty,
+        recv_bytes = tracing::field::Empty
+    );
+    let record_span = span.clone();
+    let fut = async move {
+        let (mut tcp_read, mut tcp_write) = tcp.into_split();
 
-    let client_to_remote = async {
-        copy(&mut tcp_read, &mut send).await?;
-        // Signal "no more data" on the QUIC send side so the peer's
-        // tokio::io::copy on its end returns instead of hanging forever.
-        send.finish().context(tr!("finishing send stream"))?;
-        Ok::<_, anyhow::Error>(())
-    };
-    let remote_to_client = async {
-        let r = copy(&mut recv, &mut tcp_write).await;
-        // The stream side is done (EOF or error): signal EOF to the local TCP
-        // peer explicitly. Relying on the write half being dropped at function
-        // exit would delay the FIN until *both* directions finish, which
-        // never happens when the peer keeps the connection open.
-        let _ = tcp_write.shutdown().await;
-        r?;
-        Ok::<_, anyhow::Error>(())
-    };
+        let client_to_remote = async {
+            let n = copy(&mut tcp_read, &mut send).await?;
+            // Signal "no more data" on the QUIC send side so the peer's
+            // tokio::io::copy on its end returns instead of hanging forever.
+            send.finish().context(tr!("finishing send stream"))?;
+            Ok::<_, anyhow::Error>(n)
+        };
+        let remote_to_client = async {
+            let r = copy(&mut recv, &mut tcp_write).await;
+            // The stream side is done (EOF or error): signal EOF to the local TCP
+            // peer explicitly. Relying on the write half being dropped at function
+            // exit would delay the FIN until *both* directions finish, which
+            // never happens when the peer keeps the connection open.
+            let _ = tcp_write.shutdown().await;
+            r
+        };
 
-    // Run both directions concurrently. A half-closed TCP connection (client
-    // stops writing but still reads, or vice versa) is common and shouldn't be
-    // treated as an error on its own, so a *clean* completion of one direction
-    // must not cancel the other. An *error* in either direction, however,
-    // should abort the whole pipe promptly rather than waiting for the other
-    // side to give up on its own.
-    let mut client_to_remote = Box::pin(client_to_remote);
-    let mut remote_to_client = Box::pin(remote_to_client);
-    let (mut res_client, mut res_remote) = (None, None);
-    while res_client.is_none() || res_remote.is_none() {
-        tokio::select! {
-            r = &mut client_to_remote, if res_client.is_none() => {
-                res_client = Some(r);
-                if res_client.as_ref().unwrap().is_err() { break; }
+        // Run both directions concurrently. A half-closed TCP connection (client
+        // stops writing but still reads, or vice versa) is common and shouldn't be
+        // treated as an error on its own, so a *clean* completion of one direction
+        // must not cancel the other. An *error* in either direction, however,
+        // should abort the whole pipe promptly rather than waiting for the other
+        // side to give up on its own.
+        let mut client_to_remote = Box::pin(client_to_remote);
+        let mut remote_to_client = Box::pin(remote_to_client);
+        let (mut res_client, mut res_remote) = (None, None);
+        while res_client.is_none() || res_remote.is_none() {
+            tokio::select! {
+                r = &mut client_to_remote, if res_client.is_none() => {
+                    res_client = Some(r);
+                    if res_client.as_ref().unwrap().is_err() { break; }
+                }
+                r = &mut remote_to_client, if res_remote.is_none() => {
+                    res_remote = Some(r);
+                    if res_remote.as_ref().unwrap().is_err() { break; }
+                }
             }
-            r = &mut remote_to_client, if res_remote.is_none() => {
-                res_remote = Some(r);
-                if res_remote.as_ref().unwrap().is_err() { break; }
+        }
+        // The futures above hold `&mut` borrows of send/recv; drop them to
+        // release the borrows before the error path touches those streams.
+        drop(client_to_remote);
+        drop(remote_to_client);
+        match (res_client, res_remote) {
+            (Some(a), Some(b)) => {
+                let sent = a?;
+                let recvd = b?;
+                record_span.record("sent_bytes", sent);
+                record_span.record("recv_bytes", recvd);
+                Ok(())
             }
+            // One direction errored; the other was cancelled by the select! drop.
+            // Tell the peer explicitly instead of letting the stream half just
+            // drop: a RESET/STOP propagates immediately, whereas a silently
+            // dropped stream only becomes visible to the peer once the idle
+            // timeout fires (which is the point of task 1's keepalive work —
+            // the reset makes abnormal teardown cheap). Best-effort: if the
+            // stream is already closed, there's nothing to signal.
+            (Some(a), None) => {
+                // client→remote copy failed (send side broke): stop reading
+                // from the peer so it doesn't keep pushing data into a dead pipe.
+                let _ = recv.stop(STREAM_ABORT_CODE);
+                a.map(|_| ())
+            }
+            (None, Some(b)) => {
+                // remote→client copy failed (recv side broke): reset our send
+                // half so the peer's read fails immediately instead of hanging.
+                let _ = send.reset(STREAM_ABORT_CODE);
+                b.map(|_| ())
+            }
+            (None, None) => unreachable!("loop exits only when both complete or one errors"),
         }
-    }
-    // The futures above hold `&mut` borrows of send/recv; drop them to
-    // release the borrows before the error path touches those streams.
-    drop(client_to_remote);
-    drop(remote_to_client);
-    match (res_client, res_remote) {
-        (Some(a), Some(b)) => {
-            a?;
-            b?;
-            Ok(())
-        }
-        // One direction errored; the other was cancelled by the select! drop.
-        // Tell the peer explicitly instead of letting the stream half just
-        // drop: a RESET/STOP propagates immediately, whereas a silently
-        // dropped stream only becomes visible to the peer once the idle
-        // timeout fires (which is the point of task 1's keepalive work —
-        // the reset makes abnormal teardown cheap). Best-effort: if the
-        // stream is already closed, there's nothing to signal.
-        (Some(a), None) => {
-            // client→remote copy failed (send side broke): stop reading
-            // from the peer so it doesn't keep pushing data into a dead pipe.
-            let _ = recv.stop(STREAM_ABORT_CODE);
-            a
-        }
-        (None, Some(b)) => {
-            // remote→client copy failed (recv side broke): reset our send
-            // half so the peer's read fails immediately instead of hanging.
-            let _ = send.reset(STREAM_ABORT_CODE);
-            b
-        }
-        (None, None) => unreachable!("loop exits only when both complete or one errors"),
-    }
+    };
+    fut.instrument(span).await
 }
 
 async fn copy<R, W>(reader: &mut R, writer: &mut W) -> Result<u64>

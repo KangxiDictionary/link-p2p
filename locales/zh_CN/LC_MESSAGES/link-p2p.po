@@ -455,3 +455,6 @@ msgstr "已重新连接到对端"
 
 msgid "reconnect failed; retrying in {0}"
 msgstr "重连失败；将在 {0} 后重试"
+
+msgid "Log output format: text (human-readable) or json (structured, for jq/CI pipelines)."
+msgstr "日志输出格式：text（人类可读）或 json（结构化，供 jq/CI 流水线使用）。"

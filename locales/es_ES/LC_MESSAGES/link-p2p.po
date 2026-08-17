@@ -465,3 +465,6 @@ msgstr "reconectado al par"
 
 msgid "reconnect failed; retrying in {0}"
 msgstr "falló la reconexión; reintentando en {0}"
+
+msgid "Log output format: text (human-readable) or json (structured, for jq/CI pipelines)."
+msgstr "Formato de salida de registros: text (legible para humanos) o json (estructurado, para pipelines jq/CI)."

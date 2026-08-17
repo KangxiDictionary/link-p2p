@@ -460,3 +460,6 @@ msgstr "ピアに再接続しました"
 
 msgid "reconnect failed; retrying in {0}"
 msgstr "再接続に失敗しました。{0} 後に再試行します"
+
+msgid "Log output format: text (human-readable) or json (structured, for jq/CI pipelines)."
+msgstr "ログ出力形式：text（人間が読みやすい）または json（構造化、jq/CI パイプライン用）。"
