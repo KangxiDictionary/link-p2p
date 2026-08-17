@@ -28,7 +28,7 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
 use iroh::{
-    endpoint::{presets, Connection, RecvStream, SendStream},
+    endpoint::{presets, Connection, QuicTransportConfig, RecvStream, SendStream},
     protocol::{AcceptError, ProtocolHandler, Router},
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, SecretKey,
 };
@@ -577,6 +577,7 @@ async fn wait_online(endpoint: &Endpoint) -> Result<()> {
 /// plus DNS/pkarr address discovery. With `relay: Some(url)` it uses only
 /// that relay (self-hosted), skipping n0's discovery entirely.
 fn build_endpoint(secret_key: SecretKey, relay: Option<&str>) -> Result<iroh::endpoint::Builder> {
+    let transport = transport_config()?;
     match relay {
         Some(relay_url) => {
             // Minimal sets only the mandatory crypto provider; we configure
@@ -585,10 +586,31 @@ fn build_endpoint(secret_key: SecretKey, relay: Option<&str>) -> Result<iroh::en
                 .with_context(|| tr_fmt!("'{0}' is not a valid --relay URL", relay_url))?;
             Ok(Endpoint::builder(presets::Minimal)
                 .secret_key(secret_key)
+                .transport_config(transport)
                 .relay_mode(RelayMode::Custom(relay_map)))
         }
-        None => Ok(Endpoint::builder(presets::N0).secret_key(secret_key)),
+        None => Ok(Endpoint::builder(presets::N0)
+            .secret_key(secret_key)
+            .transport_config(transport)),
     }
+}
+
+/// QUIC transport parameters shared by every mode.
+///
+/// The keepalive interval keeps NAT UDP mappings alive: they typically
+/// expire after 20-30s, so a tunnel idle for longer than that would be
+/// silently dropped by intermediate devices. 5s is also iroh's own default;
+/// it's set here explicitly so the contract is self-documenting.
+///
+/// The idle timeout is relaxed from iroh's 15s default to 30s: a longer
+/// window lets the peer survive brief path switches (iroh connection
+/// migration) and relay hiccups without being declared dead, while still
+/// detecting a genuinely gone peer within a reasonable time.
+fn transport_config() -> Result<QuicTransportConfig> {
+    Ok(QuicTransportConfig::builder()
+        .keep_alive_interval(Duration::from_secs(5))
+        .max_idle_timeout(Some(Duration::from_secs(30).try_into()?))
+        .build())
 }
 
 // ---------------------------------------------------------------------------

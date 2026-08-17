@@ -128,6 +128,16 @@ connection open/close events but not iroh's internal relay/discovery
 chatter. Colors are automatically disabled when stdout isn't a terminal
 (piped to a file, etc).
 
+### Transport defaults
+
+All endpoints share one QUIC transport config (see `transport_config` in
+`src/main.rs`): a keepalive every 5s and a 30s idle timeout. The keepalive
+keeps NAT UDP mappings alive on idle tunnels (they typically expire after
+20-30s, silently dropping the connection); 5s also happens to be iroh's own
+default, stated here so the contract is explicit. The 30s idle window is
+relaxed from iroh's 15s default so brief path switches (connection
+migration) don't kill an otherwise-healthy connection.
+
 ### Shell completions
 
 ```bash
