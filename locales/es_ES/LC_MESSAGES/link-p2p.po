@@ -456,3 +456,12 @@ msgstr "no se pudo eliminar la ruta del par"
 
 msgid "datagram error; assuming transient path switch (iroh may be migrating the connection)"
 msgstr "error de datagrama; asumiendo un cambio de ruta transitorio (iroh puede estar migrando la conexión)"
+
+msgid "connection lost; waiting for reconnect"
+msgstr "conexión perdida; esperando reconexión"
+
+msgid "reconnected to peer"
+msgstr "reconectado al par"
+
+msgid "reconnect failed; retrying in {0}"
+msgstr "falló la reconexión; reintentando en {0}"

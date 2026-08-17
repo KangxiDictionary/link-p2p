@@ -446,3 +446,12 @@ msgstr "无法移除对端路由"
 
 msgid "datagram error; assuming transient path switch (iroh may be migrating the connection)"
 msgstr "datagram 错误；假定为瞬时路径切换（iroh 可能正在迁移连接）"
+
+msgid "connection lost; waiting for reconnect"
+msgstr "连接已断开；等待重连"
+
+msgid "reconnected to peer"
+msgstr "已重新连接到对端"
+
+msgid "reconnect failed; retrying in {0}"
+msgstr "重连失败；将在 {0} 后重试"

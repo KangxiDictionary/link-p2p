@@ -34,7 +34,7 @@ use iroh::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{RwLock, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
 use tracing::{info, warn};
@@ -783,6 +783,95 @@ async fn handle_forward_stream(
 // a fresh QUIC stream on that same connection and pipe.
 // ---------------------------------------------------------------------------
 
+/// Reconnect backoff bounds: 1s, 2s, 4s, ... capped at 30s.
+const RECONNECT_BASE: Duration = Duration::from_secs(1);
+const RECONNECT_MAX: Duration = Duration::from_secs(30);
+
+/// How often a stream waiting for a reconnect re-checks the connection slot.
+/// Polling beats notify-waiting here: a notification racing past the wait
+/// registration would hang the waiter, a poll cannot miss. 200ms is a
+/// negligible price next to the >=1s reconnect backoff.
+const RECONNECT_POLL: Duration = Duration::from_millis(200);
+
+/// The live QUIC connection slot shared between the reconnect watcher (the
+/// only writer) and the per-stream forwarders (readers). `None` means "the
+/// connection is down and we're reconnecting — new streams wait".
+#[derive(Clone)]
+struct ConnSlot(Arc<RwLock<Option<Connection>>>);
+
+/// Open a bidi stream on the current connection, waiting through reconnect
+/// windows instead of failing the local client.
+///
+/// - Slot empty (reconnecting): poll until the watcher replaces it.
+/// - `open_bi` fails and the connection is closed: the watcher will redial;
+///   wait rather than fail the stream.
+/// - `open_bi` fails on a still-alive connection (e.g. stream limit): give
+///   up this stream only.
+async fn open_stream_wait(slot: &ConnSlot) -> Result<(SendStream, RecvStream)> {
+    loop {
+        let conn = slot.0.read().await.as_ref().cloned();
+        let Some(conn) = conn else {
+            tokio::time::sleep(RECONNECT_POLL).await;
+            continue;
+        };
+        match conn.open_bi().await {
+            Ok(pair) => return Ok(pair),
+            Err(e) if conn.close_reason().is_some() => {
+                warn!(error = %e, "{}", tr!("connection lost; waiting for reconnect"));
+                tokio::time::sleep(RECONNECT_POLL).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+/// Reconnect watcher: waits for the current connection to die, then re-dials
+/// with exponential backoff, swapping the slot on success.
+///
+/// Runs for the lifetime of the process. Deliberately NOT tracked in the
+/// shutdown drain (`tasks`): it never finishes on its own, and the process
+/// exits right after the drain anyway.
+///
+/// Scope note: this reconnects the QUIC *connection*; process-level restarts
+/// are the systemd unit's job (contrib/systemd), they don't mix.
+fn spawn_reconnect_watcher(
+    slot: &ConnSlot,
+    endpoint: &Endpoint,
+    dial_addr: EndpointAddr,
+    peer: EndpointId,
+) {
+    let slot = slot.clone();
+    let endpoint = endpoint.clone();
+    tokio::spawn(async move {
+        loop {
+            // Wait for the current connection to die (none yet = dial now).
+            let current = slot.0.read().await.as_ref().cloned();
+            if let Some(conn) = current {
+                conn.closed().await;
+            }
+            // Re-dial until success, backing off exponentially.
+            let mut delay = RECONNECT_BASE;
+            loop {
+                match endpoint.connect(dial_addr.clone(), ALPN).await {
+                    Ok(conn) => {
+                        *slot.0.write().await = Some(conn);
+                        info!(%peer, "{}", tr!("reconnected to peer"));
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(%peer, error = %e, "{}", tr_fmt!(
+                            "reconnect failed; retrying in {0}",
+                            format!("{delay:?}")
+                        ));
+                        tokio::time::sleep(delay).await;
+                        delay = std::cmp::min(delay * 2, RECONNECT_MAX);
+                    }
+                }
+            }
+        }
+    });
+}
+
 async fn run_connect(
     secret_key: SecretKey,
     to: &str,
@@ -821,7 +910,7 @@ async fn run_connect(
 
     println!("{}", styler.info(&tr_fmt!("dialing {0}...", remote_id)));
     let connection = endpoint
-        .connect(dial_addr, ALPN)
+        .connect(dial_addr.clone(), ALPN)
         .await
         .context(tr!("connecting to remote endpoint"))?;
     println!(
@@ -831,6 +920,13 @@ async fn run_connect(
             local_addr
         ))
     );
+
+    // Seed the connection slot and start the reconnect watcher: when the
+    // QUIC connection dies, it re-dials with backoff and swaps the slot.
+    // The local TCP listener keeps accepting throughout — clients that
+    // arrive during a reconnect wait in open_stream_wait.
+    let slot = ConnSlot(Arc::new(RwLock::new(Some(connection))));
+    spawn_reconnect_watcher(&slot, &endpoint, dial_addr, remote_id);
 
     let tcp_listener = TcpListener::bind(local_addr)
         .await
@@ -854,7 +950,7 @@ async fn run_connect(
         tokio::select! {
             accepted = tcp_listener.accept() => {
                 let (mut tcp_stream, client_addr) = accepted?;
-                let connection = connection.clone();
+                let slot = slot.clone();
                 let semaphore = semaphore.clone();
                 tasks.push(tokio::spawn(async move {
                     let result = async {
@@ -866,14 +962,14 @@ async fn run_connect(
                             // that never completes it doesn't hold a slot.
                             let target = socks5::accept_handshake(&mut tcp_stream).await?;
                             let _permit = semaphore.acquire_owned().await?;
-                            let (mut send, recv) = connection.open_bi().await?;
+                            let (mut send, recv) = open_stream_wait(&slot).await?;
                             socks5::write_target(&mut send, &target).await?;
                             pipe_streams(tcp_stream, send, recv).await
                         } else {
                             // Plain mode: forward to the remote serve's
                             // fixed --forward target.
                             let _permit = semaphore.acquire_owned().await?;
-                            let (send, recv) = connection.open_bi().await?;
+                            let (send, recv) = open_stream_wait(&slot).await?;
                             pipe_streams(tcp_stream, send, recv).await
                         }
                     }

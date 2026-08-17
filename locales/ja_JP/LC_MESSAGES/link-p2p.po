@@ -451,3 +451,12 @@ msgstr "ピアルートを削除できませんでした"
 
 msgid "datagram error; assuming transient path switch (iroh may be migrating the connection)"
 msgstr "データグラムエラー；一時的なパス切り替えと見なします（iroh が接続を移行中かもしれません）"
+
+msgid "connection lost; waiting for reconnect"
+msgstr "接続が切断されました。再接続を待機しています"
+
+msgid "reconnected to peer"
+msgstr "ピアに再接続しました"
+
+msgid "reconnect failed; retrying in {0}"
+msgstr "再接続に失敗しました。{0} 後に再試行します"
