@@ -285,6 +285,31 @@ instead of being dropped.
 TUN mode is a single point-to-point QUIC connection and is not affected by
 `--max-conns`.
 
+### Running as a service (systemd)
+
+`contrib/systemd/link-p2p@.service` is a template unit: one instance per
+tunnel, the instance name selects the config. Create
+`/etc/link-p2p/<name>.conf` with the arguments on one line, e.g.:
+
+```
+serve --forward 127.0.0.1:22 --relay http://relay.example.com:3340
+```
+
+```
+sudo systemctl enable --now link-p2p@<name>
+```
+
+The unit restarts on failure (5s backoff), keeps state in a private
+`/var/lib/link-p2p` (the identity key lands in
+`/var/lib/link-p2p/.config/link-p2p/identity.key`), and grants
+`CAP_NET_ADMIN` for TUN mode (harmless for the stream modes). Pin the
+identity per instance with `--identity /etc/link-p2p/<name>.key` in the
+config line.
+
+This complements — does not replace — the in-process reconnect: systemd
+restarts a crashed process; the binary itself re-dials a lost QUIC
+connection with exponential backoff without restarting.
+
 ## Benchmarking against WireGuard/Tailscale (the actual point of this MVP)
 
 This is the part that matters more than the code: get real numbers before

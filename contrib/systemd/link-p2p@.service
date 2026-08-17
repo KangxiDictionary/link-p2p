@@ -1,0 +1,42 @@
+# systemd template unit for link-p2p.
+#
+# One instance per tunnel; the instance name selects a config file holding
+# the arguments, so serve/connect and multiple tunnels can coexist:
+#
+#   /etc/link-p2p/server.conf      -> serve --forward 127.0.0.1:22
+#   /etc/link-p2p/laptop.conf      -> connect --to <id> --listen 127.0.0.1:2222
+#
+#   sudo systemctl enable --now link-p2p@server.service
+#
+# The identity key lands in $HOME/.config/link-p2p/identity.key under the
+# service HOME (/var/lib/link-p2p, created via StateDirectory); pin it per
+# instance with `--identity /etc/link-p2p/<name>.key` in the config line.
+#
+# systemd restarts the whole process on failure; the binary itself also
+# re-dials a lost QUIC connection (exponential backoff) without a restart —
+# the two layers are complementary.
+
+[Unit]
+Description=link-p2p tunnel (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Per-instance arguments come from /etc/link-p2p/%i.conf (one line).
+# systemd's ExecStart has no shell, so expand the file via sh.
+ExecStart=/bin/sh -c 'exec /usr/bin/link-p2p $(cat /etc/link-p2p/%i.conf)'
+Restart=on-failure
+RestartSec=5
+# TUN mode (tun serve/connect) needs CAP_NET_ADMIN; harmless for stream modes.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=true
+PrivateTmp=true
+# Dedicated state dir so the service identity never touches a user's
+# ~/.config.
+StateDirectory=link-p2p
+Environment=HOME=/var/lib/link-p2p
+
+[Install]
+WantedBy=multi-user.target
