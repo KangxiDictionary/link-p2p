@@ -128,6 +128,13 @@ connection open/close events but not iroh's internal relay/discovery
 chatter. Colors are automatically disabled when stdout isn't a terminal
 (piped to a file, etc).
 
+`--log-format json` switches the tracing output to structured JSON (one
+object per line, parseable with `jq`); the default `text` output is
+unchanged. `RUST_LOG=link_p2p=debug` additionally surfaces structured
+spans/events: a `pipe` span with `sent_bytes`/`recv_bytes` per forwarded
+stream, and a `dial completed` event with `elapsed_ms` for the QUIC
+handshake.
+
 ### Transport defaults
 
 All endpoints share one QUIC transport config (see `transport_config` in
@@ -273,6 +280,27 @@ first run, so existing `EndpointId`s stay stable. `EndpointId` stays stable
 across restarts because the key is persisted — don't commit that file, it's
 a private key. On Unix the key file is created with mode `0600` (owner-only)
 and existing files are tightened to `0600` on every start.
+
+### Operational flags and behaviors
+
+- `--ephemeral` / `-e`: generate an in-memory identity that is never written
+to disk. The `EndpointId` differs on every start; useful for throwaway
+nodes and tests. Conflicts with `--identity`.
+- **Reconnect**: `connect` re-dials automatically when the underlying QUIC
+connection dies, with exponential backoff (1s → 30s cap). The local listener
+stays up throughout — clients arriving during a reconnect queue and succeed
+once the peer is back. Run with `RUST_LOG=link_p2p=debug` to watch
+`reconnect failed; retrying in ...` / `reconnected to peer`.
+- `ping`: `link-p2p ping <EndpointId>` measures RTT to a running `serve`
+(the serve side answers ping probes alongside its normal forwarding) and
+reports whether the path is direct or relayed:
+
+```bash
+$ link-p2p ping <EndpointId>
+pinging 5f7d5db174a7...
+pong from 5f7d5db174a7: RTT 1912µs
+  path: direct (UDP)
+```
 
 ### Resource limits
 
