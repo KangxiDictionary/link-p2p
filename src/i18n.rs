@@ -1,4 +1,4 @@
-//! gettext-based internationalization.
+//! Internationalization.
 //!
 //! Two macros are exported at the crate root:
 //!   - [`tr!`](crate::tr)  — translate a static string: `tr!("Hello")`
@@ -8,48 +8,52 @@
 //! Translation lookup is done *before* `format!`, so the `.po`/`.mo`
 //! catalogs use Rust-style `{0}` placeholders (not printf `%`).
 //!
-//! Catalogs live at `<locale_dir>/<lang>/LC_MESSAGES/link-p2p.mo` and are
-//! searched for in this order:
+//! Language selection is ours, not gettext's: the environment variables are
+//! read directly (LANGUAGE > LC_ALL > LC_MESSAGES > LANG) and the matching
+//! catalog is loaded from the `.mo` files compiled by build.rs. This works
+//! regardless of which locales the OS has installed — `LANG=ja_JP.UTF-8`
+//! gives Japanese even on a system that only knows `zh_CN.utf8`, and
+//! `LANGUAGE=es_ES` overrides anything (GNU gettext semantics: LANGUAGE is
+//! the highest-priority override). `C`/`POSIX`/unknown languages fall back
+//! to the English msgids.
+//!
+//! Catalogs are searched for in this order:
 //!   1. `LINK_P2P_LOCALEDIR` environment variable
 //!   2. `<dir of the running binary>/locales`
 //!   3. `<cwd>/locales`
 //!   4. `$OUT_DIR/locales` (the build-time compiled catalogs, see build.rs)
 //!
-//! If no catalog is found (or the locale isn't available), every lookup
-//! falls back to the English msgid — same as `gettext` semantics.
+//! If no catalog is found (or the language isn't supported), every lookup
+//! falls back to the English msgid — same as gettext semantics.
 
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
-/// Domain name used in `textdomain`/`bindtextdomain`. Must match the .mo
-/// file names (`link-p2p.mo`).
+/// Domain name used in textdomain/bindtextdomain. Must match the .mo file
+/// names (`link-p2p.mo`).
 const DOMAIN: &str = "link-p2p";
 
-/// Initialize gettext: set the locale from the environment, point the
-/// catalog lookup at our locale directory, and force UTF-8 output.
-///
-/// Must be called from `main` before any threads are spawned — `setlocale`
-/// is not thread-safe.
-pub fn init() -> Result<(), Box<dyn std::error::Error>> {
-    // Safety: called before the runtime spawns any threads.
-    unsafe {
-        // Empty string = use LANG/LC_ALL/LC_MESSAGES from the environment.
-        gettextrs::setlocale(gettextrs::LocaleCategory::LcAll, "");
-    }
+/// Language code -> catalog directory name. The keys are what the
+/// environment variables may contain (after normalization); the values are
+/// the on-disk directory names under `locales/`.
+const SUPPORTED: &[(&str, &str)] = &[("zh_cn", "zh_CN"), ("ja_jp", "ja_JP"), ("es_es", "es_ES")];
 
-    if let Some(locale_dir) = resolve_locale_dir() {
-        gettextrs::bindtextdomain(DOMAIN, &locale_dir)?;
-    }
-    // The .mo files are UTF-8; without this gettext converts to the
-    // locale's legacy codeset (or panics on non-UTF-8 output).
-    gettextrs::bind_textdomain_codeset(DOMAIN, "UTF-8")?;
-    gettextrs::textdomain(DOMAIN)?;
-    Ok(())
+/// Loaded catalog (msgid -> msgstr) for the resolved language, or `None`
+/// when no catalog applies (English fallback).
+static CATALOG: OnceLock<Option<HashMap<String, String>>> = OnceLock::new();
+
+/// Initialize i18n: resolve the language from the environment and load its
+/// catalog. Called once from `main` before anything is printed. Never fails —
+/// a missing catalog is the English fallback.
+pub fn init() {
+    let _ = CATALOG.set(resolve_lang().and_then(load_catalog));
 }
 
 /// Translate `msgid` and return an owned `String`.
 macro_rules! tr {
     ($msgid:literal $(,)?) => {
-        gettextrs::gettext($msgid)
+        $crate::i18n::lookup($msgid)
     };
 }
 pub(crate) use tr;
@@ -63,11 +67,22 @@ macro_rules! tr_fmt {
         // mismatch inside a macro; the slice is intentional.
         #[allow(clippy::unnecessary_to_owned)]
         let _args = [$($arg.to_string()),*];
-        let _template = gettextrs::gettext($template);
+        let _template = $crate::i18n::lookup($template);
         $crate::i18n::tr_fmt_impl(&_template, &_args)
     }};
 }
 pub(crate) use tr_fmt;
+
+/// Look up `msgid` in the loaded catalog, falling back to the msgid itself
+/// (English) when there is no catalog or no entry.
+pub fn lookup(msgid: &str) -> String {
+    CATALOG
+        .get()
+        .and_then(|c| c.as_ref())
+        .and_then(|m| m.get(msgid))
+        .cloned()
+        .unwrap_or_else(|| msgid.to_string())
+}
 
 /// Replace `{0}`, `{1}`, ... in `template` with the corresponding `args`.
 ///
@@ -109,46 +124,134 @@ pub fn tr_fmt_impl(template: &str, args: &[String]) -> String {
     out
 }
 
-fn resolve_locale_dir() -> Option<PathBuf> {
-    // Explicit override wins unconditionally.
-    if let Ok(dir) = std::env::var("LINK_P2P_LOCALEDIR") {
-        return Some(PathBuf::from(dir));
-    }
-
-    // Candidates in priority order. A directory only counts if it actually
-    // contains compiled catalogs — the repo's `locales/` source dir (with
-    // .po files but no .mo) must not shadow the compiled ones.
-    let mut candidates = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            candidates.push(parent.join("locales")); // installed layout
-        }
-    }
-    candidates.push(PathBuf::from("locales")); // running from repo root
-    candidates.push(PathBuf::from(env!("OUT_DIR")).join("locales")); // build.rs output
-
-    candidates.into_iter().find(|dir| has_catalog(dir))
+/// The raw language setting from the environment, first non-empty wins, in
+/// GNU gettext's priority order (LANGUAGE overrides everything).
+fn env_lang() -> Option<String> {
+    ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"]
+        .into_iter()
+        .find_map(|var| {
+            let v = std::env::var(var).ok()?;
+            (!v.is_empty()).then_some(v)
+        })
 }
 
-/// True if `dir` contains at least one `*/LC_MESSAGES/*.mo` file.
-fn has_catalog(dir: &Path) -> bool {
-    let Ok(langs) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    langs.flatten().any(|lang| {
-        if !lang.path().is_dir() {
-            return false;
+/// Normalize one language specifier (e.g. `ja_JP.UTF-8`, `zh-CN`, `es`) to a
+/// catalog directory name, or `None` for C/POSIX/unsupported.
+fn normalize_lang(raw: &str) -> Option<&'static str> {
+    // LANGUAGE may carry a list ("ja_JP:zh_CN") — the caller splits it; here
+    // strip an encoding suffix and normalize case/separators.
+    let base = raw.split('.').next().unwrap_or(raw);
+    let norm = base.replace('-', "_").to_ascii_lowercase();
+    match norm.as_str() {
+        "c" | "posix" => None,
+        // ISO-639 language codes as well as the full language_territory form.
+        "zh" => Some("zh_CN"),
+        "ja" => Some("ja_JP"),
+        "es" => Some("es_ES"),
+        _ => SUPPORTED
+            .iter()
+            .find(|(key, _)| *key == norm)
+            .map(|(_, dir)| *dir),
+    }
+}
+
+/// Candidate locale dirs, in priority order. A dir only counts if it
+/// actually contains compiled catalogs.
+fn candidates() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(dir) = std::env::var("LINK_P2P_LOCALEDIR") {
+        dirs.push(PathBuf::from(dir));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            dirs.push(parent.join("locales")); // installed layout
         }
-        let messages = lang.path().join("LC_MESSAGES");
-        std::fs::read_dir(messages)
-            .map(|mut entries| {
-                entries.any(|e| {
-                    e.ok()
-                        .is_some_and(|e| e.path().extension() == Some("mo".as_ref()))
-                })
-            })
-            .unwrap_or(false)
-    })
+    }
+    dirs.push(PathBuf::from("locales")); // running from repo root
+    dirs.push(PathBuf::from(env!("OUT_DIR")).join("locales")); // build.rs output
+    dirs
+}
+
+/// Path to `<lang>/LC_MESSAGES/link-p2p.mo` in the first candidate dir that
+/// has one.
+fn find_mo_path(lang: &str) -> Option<PathBuf> {
+    candidates()
+        .into_iter()
+        .map(|dir| {
+            dir.join(lang)
+                .join("LC_MESSAGES")
+                .join(format!("{DOMAIN}.mo"))
+        })
+        .find(|p| p.is_file())
+}
+
+/// Resolve the language for this run: walk the environment setting (which
+/// may be a colon-separated list) and pick the first language we have a
+/// catalog for.
+fn resolve_lang() -> Option<&'static str> {
+    let raw = env_lang()?;
+    for part in raw.split(':') {
+        // Skip empty / C / POSIX / unsupported parts; keep looking.
+        if let Some(dir) = normalize_lang(part) {
+            if find_mo_path(dir).is_some() {
+                return Some(dir);
+            }
+        }
+    }
+    None
+}
+
+/// Load the msgid -> msgstr map from the compiled catalog for `lang`.
+fn load_catalog(lang: &str) -> Option<HashMap<String, String>> {
+    let path = find_mo_path(lang)?;
+    let bytes = std::fs::read(path).ok()?;
+    parse_mo(&bytes)
+}
+
+/// Parse a GNU gettext `.mo` file (version 0) into a msgid -> msgstr map.
+///
+/// Layout: 28-byte header (magic, revision, nstrings, orig_tab_offset,
+/// trans_tab_offset, hash_tab_size, hash_tab_offset), then two tables of
+/// `nstrings` (length, offset) descriptors, then the string blobs. The hash
+/// table is ignored — a linear map is fine at our catalog size. Endianness
+/// is detected from the magic.
+fn parse_mo(bytes: &[u8]) -> Option<HashMap<String, String>> {
+    if bytes.len() < 28 {
+        return None;
+    }
+    let magic = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
+    let big_endian = magic != 0x9504_12de;
+    let rd = |off: usize| -> Option<u32> {
+        let b: [u8; 4] = bytes.get(off..off + 4)?.try_into().ok()?;
+        Some(if big_endian {
+            u32::from_be_bytes(b)
+        } else {
+            u32::from_le_bytes(b)
+        })
+    };
+    let n = rd(8)? as usize;
+    let orig_tab = rd(12)? as usize;
+    let trans_tab = rd(16)? as usize;
+    let desc = |tab: usize, i: usize| -> Option<(usize, usize)> {
+        let off = tab + i * 8;
+        let len = rd(off)? as usize;
+        let str_off = rd(off + 4)? as usize;
+        Some((len, str_off))
+    };
+    let mut map = HashMap::with_capacity(n);
+    for i in 0..n {
+        let (olen, ooff) = desc(orig_tab, i)?;
+        let (tlen, toff) = desc(trans_tab, i)?;
+        let orig = bytes.get(ooff..ooff + olen)?;
+        let trans = bytes.get(toff..toff + tlen)?;
+        if !orig.is_empty() {
+            map.insert(
+                String::from_utf8_lossy(orig).into_owned(),
+                String::from_utf8_lossy(trans).into_owned(),
+            );
+        }
+    }
+    Some(map)
 }
 
 #[cfg(test)]
@@ -158,13 +261,6 @@ mod tests {
     /// Serialize the env-var-mutating tests: `cargo test` runs them in
     /// parallel and they share the process environment.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn tmp_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("lp-i18n-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
 
     #[test]
     fn args_are_not_rescanned() {
@@ -186,54 +282,130 @@ mod tests {
     }
 
     #[test]
-    fn has_catalog_sees_mo_files() {
-        let d = tmp_dir("mo");
-        std::fs::create_dir_all(d.join("zh_CN/LC_MESSAGES")).unwrap();
-        std::fs::write(d.join("zh_CN/LC_MESSAGES/link-p2p.mo"), b"x").unwrap();
-        assert!(has_catalog(&d));
-        let _ = std::fs::remove_dir_all(&d);
+    fn normalize_lang_handles_suffixes_and_casing() {
+        assert_eq!(normalize_lang("ja_JP.UTF-8"), Some("ja_JP"));
+        assert_eq!(normalize_lang("zh-CN"), Some("zh_CN"));
+        assert_eq!(normalize_lang("es_ES.utf8"), Some("es_ES"));
+        assert_eq!(normalize_lang("ja"), Some("ja_JP"));
+        assert_eq!(normalize_lang("C"), None);
+        assert_eq!(normalize_lang("POSIX"), None);
+        assert_eq!(normalize_lang("fr_FR"), None);
+    }
+
+    /// Build a minimal valid .mo with the given (msgid, msgstr) pairs.
+    fn build_mo(pairs: &[(&str, &str)]) -> Vec<u8> {
+        let n = pairs.len() as u32;
+        // String offsets in .mo are relative to the file start, so add the
+        // header + both tables.
+        let base = 28 + 2 * n as usize * 8;
+        let mut body = Vec::new();
+        let mut origs = Vec::new();
+        let mut trans = Vec::new();
+        for (o, t) in pairs {
+            origs.push((o.len(), base + body.len()));
+            body.extend_from_slice(o.as_bytes());
+            body.push(0);
+            trans.push((t.len(), base + body.len()));
+            body.extend_from_slice(t.as_bytes());
+            body.push(0);
+        }
+        let orig_tab = 28u32;
+        let trans_tab = 28 + n * 8;
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x9504_12deu32.to_le_bytes()); // magic
+        out.extend_from_slice(&0u32.to_le_bytes()); // revision
+        out.extend_from_slice(&n.to_le_bytes());
+        out.extend_from_slice(&orig_tab.to_le_bytes());
+        out.extend_from_slice(&trans_tab.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // hash size
+        out.extend_from_slice(&0u32.to_le_bytes()); // hash offset
+        for (len, off) in origs {
+            out.extend_from_slice(&(len as u32).to_le_bytes());
+            out.extend_from_slice(&(off as u32).to_le_bytes());
+        }
+        for (len, off) in trans {
+            out.extend_from_slice(&(len as u32).to_le_bytes());
+            out.extend_from_slice(&(off as u32).to_le_bytes());
+        }
+        out.extend_from_slice(&body);
+        out
     }
 
     #[test]
-    fn has_catalog_ignores_po_only_dirs() {
-        // The repo's `locales/` source dir has .po but no .mo: it must not
-        // be picked as a catalog dir (build.rs compiles .mo into OUT_DIR).
-        let d = tmp_dir("po");
-        std::fs::create_dir_all(d.join("zh_CN/LC_MESSAGES")).unwrap();
-        std::fs::write(d.join("zh_CN/LC_MESSAGES/link-p2p.po"), b"x").unwrap();
-        assert!(!has_catalog(&d));
-        let _ = std::fs::remove_dir_all(&d);
+    fn parse_mo_reads_pairs() {
+        let mo = build_mo(&[
+            ("Hello", "こんにちは"),
+            (
+                "peer {0} is reachable at {1}",
+                "ピア {0} は {1} で到達可能です",
+            ),
+        ]);
+        let map = parse_mo(&mo).expect("parse");
+        assert_eq!(map.get("Hello").map(String::as_str), Some("こんにちは"));
+        assert_eq!(
+            map.get("peer {0} is reachable at {1}").map(String::as_str),
+            Some("ピア {0} は {1} で到達可能です")
+        );
+        assert_eq!(map.len(), 2);
     }
 
     #[test]
-    fn has_catalog_missing_dir_is_false() {
-        assert!(!has_catalog(&PathBuf::from(
-            "/nonexistent/link-p2p-no-such-dir"
-        )));
+    fn parse_mo_rejects_garbage() {
+        assert!(parse_mo(&[]).is_none());
+        assert!(parse_mo(&[0u8; 10]).is_none());
     }
 
     #[test]
     fn locale_dir_override_wins_unconditionally() {
         let _guard = ENV_LOCK.lock().unwrap();
         // The override is honored even when it points at a bogus dir (the
-        // caller takes responsibility for the path).
+        // caller takes responsibility for the path) — it becomes the first
+        // candidate, and resolve_lang just won't find a catalog there.
         let bogus = "/nonexistent/link-p2p-locales";
         std::env::set_var("LINK_P2P_LOCALEDIR", bogus);
-        assert_eq!(resolve_locale_dir(), Some(PathBuf::from(bogus)));
+        assert_eq!(
+            candidates()
+                .first()
+                .map(|p| p.to_string_lossy().into_owned()),
+            Some(bogus.to_string())
+        );
         std::env::remove_var("LINK_P2P_LOCALEDIR");
     }
 
     #[test]
-    fn locale_dir_falls_back_to_a_compiled_catalog_dir() {
+    fn resolve_lang_prefers_language_and_ignores_unsupported() {
         let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("LINK_P2P_LOCALEDIR");
-        // The cwd candidate (repo `locales/`) holds only .po files, so the
-        // first candidate with a real catalog must be build.rs's OUT_DIR
-        // output. Only asserted when msgfmt actually compiled the catalogs.
-        let out = PathBuf::from(env!("OUT_DIR")).join("locales");
-        if has_catalog(&out) {
-            let dir = resolve_locale_dir().expect("compiled catalog exists, so a dir must resolve");
-            assert!(has_catalog(&dir));
+        for var in [
+            "LANGUAGE",
+            "LC_ALL",
+            "LC_MESSAGES",
+            "LANG",
+            "LINK_P2P_LOCALEDIR",
+        ] {
+            std::env::remove_var(var);
+        }
+        // LANGUAGE wins over LANG even when LANG is an uninstalled locale
+        // (the whole point of reading the environment ourselves).
+        std::env::set_var("LANG", "ja_JP.UTF-8");
+        std::env::set_var("LANGUAGE", "es_ES");
+        assert_eq!(resolve_lang(), Some("es_ES"));
+
+        // Colon lists: first supported language we actually have a catalog
+        // for (fr_FR is unsupported -> skipped).
+        std::env::set_var("LANGUAGE", "fr_FR:zh_CN");
+        assert_eq!(resolve_lang(), Some("zh_CN"));
+
+        // C locale means English.
+        std::env::set_var("LANG", "C");
+        std::env::remove_var("LANGUAGE");
+        assert_eq!(resolve_lang(), None);
+
+        // Uninstalled locale alone now resolves anyway (our own lookup).
+        std::env::set_var("LANG", "ja_JP.UTF-8");
+        assert_eq!(resolve_lang(), Some("ja_JP"));
+
+        for var in ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"] {
+            std::env::remove_var(var);
         }
     }
 }

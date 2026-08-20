@@ -15,9 +15,9 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-# i18n. `gettext-system` links glibc's built-in libintl on Linux (zero extra
-# deps); other platforms fall back to gettext-sys's vendored build.
-gettext-rs = { version = "0.8", features = ["gettext-system"] }
+# i18n: build.rs compiles locales/*.po into .mo with msgfmt; the runtime
+# parses the .mo itself (src/i18n.rs) so language selection works from the
+# environment alone, without needing the OS to have the locale installed.
 # Terminal styling (bold/color) for our own output; clap styles --help itself.
 console = "0.16"
 # TUN device support (TUN mode: whole-machine IP reachability, needs root).

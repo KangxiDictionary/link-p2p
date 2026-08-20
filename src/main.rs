@@ -403,11 +403,9 @@ fn localized_command() -> clap::Command {
 
 #[tokio::main]
 async fn main() {
-    // gettext first, before any output; falls back to English if the
-    // locale/catalogs aren't available.
-    if let Err(e) = i18n::init() {
-        eprintln!("i18n init failed, falling back to English: {e}");
-    }
+    // Language selection + catalog load first, before any output; falls
+    // back to English when the language/catalog isn't available.
+    i18n::init();
 
     // Scan argv for --color before clap parses, so help/error output is
     // styled correctly even on the first run.

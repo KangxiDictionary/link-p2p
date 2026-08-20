@@ -224,20 +224,27 @@ per logical connection) should still hold even if a method name shifted.
 
 ## Internationalization & styling
 
-Help text, runtime messages, and connection logs are localized via gettext
-(`gettext-rs`, with catalogs under `locales/`). The binary follows the
-environment locale:
+Help text, runtime messages, and connection logs are localized (catalogs
+under `locales/`, compiled to `.mo` by build.rs and read at runtime). This
+applies everywhere text reaches a user — `--help`, every subcommand help,
+status lines, logs, and **shell completions** (each entry's description
+follows the same language).
+
+The language is read from the environment directly (no dependency on which
+locales the OS has installed):
 
 ```bash
-LANG=zh_CN.utf8 link-p2p --help   # Chinese help
-LANG=ja_JP.utf8 link-p2p --help   # Japanese help
-LANG=es_ES.utf8 link-p2p --help   # Spanish help
-LANG=C link-p2p --help            # English help (fallback)
+LANG=zh_CN.utf8 link-p2p --help              # Chinese
+LANG=ja_JP.UTF-8 link-p2p completions fish    # Japanese — works even if the
+                                               # system only has zh_CN installed
+LANGUAGE=es_ES link-p2p --help                # Spanish — LANGUAGE overrides
+                                               # any locale setting
+LANG=C link-p2p --help                        # English (fallback)
 ```
 
-Catalog selection follows the environment: `LANG`/`LC_ALL` pick the locale,
-and GNU gettext's `LANGUAGE` variable (e.g. `LANGUAGE=ja_JP link-p2p`) can
-select a language without the system locale being installed.
+Priority is `LANGUAGE` > `LC_ALL` > `LC_MESSAGES` > `LANG` (GNU gettext
+semantics; `LANGUAGE` may be a colon-separated list). `C`/`POSIX` or an
+unsupported language falls back to English.
 
 To add a language, copy `locales/zh_CN/LC_MESSAGES/link-p2p.po` to your
 locale's directory, translate the `msgstr`s, and rebuild (build.rs compiles
