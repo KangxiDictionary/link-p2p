@@ -496,3 +496,12 @@ msgstr "没有可接受的 SOCKS5 认证方式"
 
 msgid "note: --max-conns is not used by TUN mode (single point-to-point session)"
 msgstr "提示：--max-conns 对 TUN 模式无效（点对点单会话）"
+
+msgid "Print this message or the help of the given subcommand(s)"
+msgstr "打印此消息或给定子命令的帮助"
+
+msgid "Print help for the subcommand(s)"
+msgstr "打印指定子命令的帮助"
+
+msgid "printing help"
+msgstr "打印帮助"

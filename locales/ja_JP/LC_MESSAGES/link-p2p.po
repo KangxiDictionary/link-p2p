@@ -499,3 +499,12 @@ msgstr "受け入れ可能なSOCKS5認証方式がありません"
 
 msgid "note: --max-conns is not used by TUN mode (single point-to-point session)"
 msgstr "注: --max-conns はTUNモードでは使用されません（ポイントツーポイントの単一セッション）"
+
+msgid "Print this message or the help of the given subcommand(s)"
+msgstr "このメッセージまたは指定されたサブコマンドのヘルプを表示します"
+
+msgid "Print help for the subcommand(s)"
+msgstr "指定されたサブコマンドのヘルプを表示します"
+
+msgid "printing help"
+msgstr "ヘルプの表示"

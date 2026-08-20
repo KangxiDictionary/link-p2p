@@ -182,6 +182,16 @@ enum Command {
         /// Which shell to generate a completion script for.
         shell: Shell,
     },
+    /// Print help for link-p2p or one of its subcommands.
+    ///
+    /// Replaces clap's built-in `help` subcommand (whose description is not
+    /// localizable) with our own, so `help` shows up translated in --help and
+    /// in shell completions. Handled in real_main like Completions.
+    Help {
+        /// The subcommand path to print help for, e.g. `tun serve`
+        #[arg(value_name = "COMMAND")]
+        sub: Vec<String>,
+    },
 }
 
 /// Subcommands of `link-p2p tun`.
@@ -223,6 +233,10 @@ enum TunCommand {
 /// so the structure comes from derive and the text is swapped here.
 fn localized_command() -> clap::Command {
     Cli::command()
+        // clap's built-in `help` subcommand hardcodes English text that
+        // cannot be localized; disable it and localize the derived Help
+        // variant instead (see the Command::Help doc).
+        .disable_help_subcommand(true)
         .about(tr!("Minimal TCP-over-QUIC forwarder on iroh"))
         .long_about(tr!(
             "link-p2p exposes a local TCP service to a P2P network (or dials one) over a direct, end-to-end encrypted QUIC connection. No TUN device, no root/admin privileges — just a persistent EndpointId and a QUIC hop."
@@ -332,6 +346,15 @@ fn localized_command() -> clap::Command {
                     |a| a.help(tr!("Which shell to generate a completion script for.")),
                 )
         })
+        .mut_subcommand("help", |s| {
+            // Our derived Help variant replaces clap's built-in one (disabled
+            // above); this is the only way to localize its description.
+            s.about(tr!("Print this message or the help of the given subcommand(s)"))
+                .mut_arg(
+                    "sub",
+                    |a| a.help(tr!("Print help for the subcommand(s)")),
+                )
+        })
 }
 
 #[tokio::main]
@@ -368,6 +391,25 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             "link-p2p",
             &mut std::io::stdout(),
         );
+        return Ok(());
+    }
+
+    // `help [subcommand...]`: navigate the (localized) command tree and print
+    // the requested help. Borrowed match so cli.command stays usable below.
+    if let Command::Help { sub } = &cli.command {
+        let mut cmd = localized_command().color(color_mode.to_clap());
+        let mut target = &mut cmd;
+        for name in sub {
+            target = match target.find_subcommand_mut(name) {
+                Some(c) => c,
+                None => {
+                    eprintln!("error: unrecognized subcommand '{name}'");
+                    std::process::exit(2);
+                }
+            };
+        }
+        target.print_help().context(tr!("printing help"))?;
+        println!();
         return Ok(());
     }
 
@@ -477,6 +519,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
         }
         Command::Ping { to } => run_ping(secret_key, &to, cli.relay.as_deref(), styler).await,
         Command::Completions { .. } => unreachable!("handled above"),
+        Command::Help { .. } => unreachable!("handled above"),
     }
 }
 

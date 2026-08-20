@@ -504,3 +504,12 @@ msgstr "no hay un método de autenticación SOCKS5 aceptable"
 
 msgid "note: --max-conns is not used by TUN mode (single point-to-point session)"
 msgstr "nota: --max-conns no se usa en el modo TUN (sesión punto a punto única)"
+
+msgid "Print this message or the help of the given subcommand(s)"
+msgstr "Muestra este mensaje o la ayuda del subcomando indicado"
+
+msgid "Print help for the subcommand(s)"
+msgstr "Muestra la ayuda del subcomando indicado"
+
+msgid "printing help"
+msgstr "mostrando la ayuda"
