@@ -508,3 +508,9 @@ msgstr "指定されたサブコマンドのヘルプを表示します"
 
 msgid "printing help"
 msgstr "ヘルプの表示"
+
+msgid "Print help"
+msgstr "ヘルプを表示"
+
+msgid "Print version"
+msgstr "バージョンを表示"

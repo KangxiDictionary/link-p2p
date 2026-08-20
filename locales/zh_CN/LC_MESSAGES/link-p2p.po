@@ -505,3 +505,9 @@ msgstr "打印指定子命令的帮助"
 
 msgid "printing help"
 msgstr "打印帮助"
+
+msgid "Print help"
+msgstr "打印帮助"
+
+msgid "Print version"
+msgstr "打印版本"

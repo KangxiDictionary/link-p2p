@@ -513,3 +513,9 @@ msgstr "Muestra la ayuda del subcomando indicado"
 
 msgid "printing help"
 msgstr "mostrando la ayuda"
+
+msgid "Print help"
+msgstr "Muestra la ayuda"
+
+msgid "Print version"
+msgstr "Muestra la versión"

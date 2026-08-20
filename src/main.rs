@@ -228,6 +228,28 @@ enum TunCommand {
     },
 }
 
+/// Localized `-h/--help` argument, replacing clap's built-in one (whose
+/// "Print help..." text is hardcoded English and can't be localized).
+/// Applied to the top command and every subcommand, alongside
+/// `disable_help_flag(true)`.
+fn help_arg() -> clap::Arg {
+    clap::Arg::new("help")
+        .short('h')
+        .long("help")
+        .action(clap::ArgAction::Help)
+        .help(tr!("Print help"))
+}
+
+/// Localized `-V/--version` argument, same story as [`help_arg`]. Top level
+/// only (subcommands don't get a version flag).
+fn version_arg() -> clap::Arg {
+    clap::Arg::new("version")
+        .short('V')
+        .long("version")
+        .action(clap::ArgAction::Version)
+        .help(tr!("Print version"))
+}
+
 /// The `Command` from derive, with all display strings overridden at runtime
 /// so `--help` output is localized. clap derive only accepts string literals,
 /// so the structure comes from derive and the text is swapped here.
@@ -235,8 +257,12 @@ fn localized_command() -> clap::Command {
     Cli::command()
         // clap's built-in `help` subcommand hardcodes English text that
         // cannot be localized; disable it and localize the derived Help
-        // variant instead (see the Command::Help doc).
+        // variant instead (see the Command::Help doc). Same for the
+        // -h/--help and -V/--version flags: replaced below with our own
+        // localized arguments.
         .disable_help_subcommand(true)
+        .disable_help_flag(true)
+        .disable_version_flag(true)
         .about(tr!("Minimal TCP-over-QUIC forwarder on iroh"))
         .long_about(tr!(
             "link-p2p exposes a local TCP service to a P2P network (or dials one) over a direct, end-to-end encrypted QUIC connection. No TUN device, no root/admin privileges — just a persistent EndpointId and a QUIC hop."
@@ -269,7 +295,9 @@ fn localized_command() -> clap::Command {
             |a| a.help(tr!("Log output format: text (human-readable) or json (structured, for jq/CI pipelines).")),
         )
         .mut_subcommand("serve", |s| {
-            s.about(tr!("Expose a local TCP service to the P2P network."))
+            s.disable_help_flag(true)
+                .arg(help_arg())
+                .about(tr!("Expose a local TCP service to the P2P network."))
                 .mut_arg(
                     "forward",
                     |a| a.help(tr!("Local address to forward incoming P2P streams to, e.g. 127.0.0.1:8080")),
@@ -280,7 +308,9 @@ fn localized_command() -> clap::Command {
                 )
         })
         .mut_subcommand("connect", |s| {
-            s.about(tr!("Dial a remote node and expose it as a local TCP listener."))
+            s.disable_help_flag(true)
+                .arg(help_arg())
+                .about(tr!("Dial a remote node and expose it as a local TCP listener."))
                 .mut_arg(
                     "to",
                     |a| a.help(tr!("The remote node's EndpointId (printed by `serve` on startup)")),
@@ -295,12 +325,16 @@ fn localized_command() -> clap::Command {
                 )
         })
         .mut_subcommand("tun", |s| {
-            s.about(tr!("Make two machines reachable at the IP layer over QUIC datagrams."))
+            s.disable_help_flag(true)
+                .arg(help_arg())
+                .about(tr!("Make two machines reachable at the IP layer over QUIC datagrams."))
                 .long_about(tr!(
                     "Make two machines reachable at the IP layer over QUIC datagrams.\n\nCreates a TUN interface (needs root / CAP_NET_ADMIN) and routes the peer's virtual IP through it. Unlike `serve`/`connect`, which forward one TCP port, this bridges the whole machine: TCP, UDP and ICMP all work on the peer's virtual IP, with no per-port setup. Point-to-point only in v1 — see docs/tun-design.md."
                 ))
                 .mut_subcommand("serve", |ss| {
-                    ss.about(tr!("Exposed side: accept a peer and bridge this machine to it at the IP layer."))
+                    ss.disable_help_flag(true)
+                        .arg(help_arg())
+                        .about(tr!("Exposed side: accept a peer and bridge this machine to it at the IP layer."))
                         .long_about(tr!(
                             "Exposed side: accept a peer and bridge this machine to it at the IP layer. Prints this node's virtual IP and EndpointId, then forwards all packets to the first peer that dials."
                         ))
@@ -314,7 +348,9 @@ fn localized_command() -> clap::Command {
                         )
                 })
                 .mut_subcommand("connect", |ss| {
-                    ss.about(tr!("Dial a peer and bridge this machine to it at the IP layer."))
+                    ss.disable_help_flag(true)
+                        .arg(help_arg())
+                        .about(tr!("Dial a peer and bridge this machine to it at the IP layer."))
                         .mut_arg(
                             "to",
                             |a| a.help(tr!("The remote node's EndpointId (printed by `tun serve` on startup)")),
@@ -330,14 +366,18 @@ fn localized_command() -> clap::Command {
                 })
         })
         .mut_subcommand("ping", |s| {
-            s.about(tr!("Measure RTT to a remote node over the P2P network."))
+            s.disable_help_flag(true)
+                .arg(help_arg())
+                .about(tr!("Measure RTT to a remote node over the P2P network."))
                 .mut_arg(
                     "to",
                     |a| a.help(tr!("The remote node's EndpointId (printed by `serve` on startup)")),
                 )
         })
         .mut_subcommand("completions", |s| {
-            s.about(tr!("Print a shell completion script to stdout."))
+            s.disable_help_flag(true)
+                .arg(help_arg())
+                .about(tr!("Print a shell completion script to stdout."))
                 .long_about(tr!(
                     "Print a shell completion script to stdout.\n\nRedirect it to wherever your shell loads completions from, e.g. `link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish`."
                 ))
@@ -349,12 +389,16 @@ fn localized_command() -> clap::Command {
         .mut_subcommand("help", |s| {
             // Our derived Help variant replaces clap's built-in one (disabled
             // above); this is the only way to localize its description.
-            s.about(tr!("Print this message or the help of the given subcommand(s)"))
+            s.disable_help_flag(true)
+                .arg(help_arg())
+                .about(tr!("Print this message or the help of the given subcommand(s)"))
                 .mut_arg(
                     "sub",
                     |a| a.help(tr!("Print help for the subcommand(s)")),
                 )
         })
+        .arg(help_arg())
+        .arg(version_arg())
 }
 
 #[tokio::main]
