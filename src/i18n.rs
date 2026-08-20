@@ -25,6 +25,23 @@
 //!
 //! If no catalog is found (or the language isn't supported), every lookup
 //! falls back to the English msgid — same as gettext semantics.
+//!
+//! ## Deliberately NOT supported
+//!
+//! - **Plural forms (ngettext)**: the catalog is a flat msgid -> msgstr map.
+//!   No message today needs a quantity-dependent plural (every `{N}`
+//!   argument is an identifier, address, duration or a fixed-plural noun),
+//!   and Chinese/Japanese have no plural morphology to choose anyway. If a
+//!   quantity-based message ever appears, the extension points are `parse_mo`
+//!   (msgid_plural entries) and `lookup` (plural-rule selection).
+//! - **Runtime language switching**: the catalog is fixed at startup
+//!   (OnceLock). A CLI run speaks one language; nothing needs to change it
+//!   mid-process. Adding a `--lang` flag later is a change before `init()`, not
+//!   a reason to make the catalog mutable.
+//! - **Zero-copy catalog**: strings are loaded into an owned HashMap once at
+//!   startup. At ~150 entries this is microseconds and tens of KB — keeping
+//!   the .mo files loadable from disk (LINK_P2P_LOCALEDIR) beats baking them
+//!   into the binary with include_bytes!.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -38,6 +55,11 @@ const DOMAIN: &str = "link-p2p";
 /// environment variables may contain (after normalization); the values are
 /// the on-disk directory names under `locales/`.
 const SUPPORTED: &[(&str, &str)] = &[("zh_cn", "zh_CN"), ("ja_jp", "ja_JP"), ("es_es", "es_ES")];
+
+/// Serializes tests that mutate the process environment (both the i18n tests
+/// and main.rs's cli_help_is_fully_localized touch LANG/LANGUAGE).
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Loaded catalog (msgid -> msgstr) for the resolved language, or `None`
 /// when no catalog applies (English fallback).
@@ -257,10 +279,6 @@ fn parse_mo(bytes: &[u8]) -> Option<HashMap<String, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Serialize the env-var-mutating tests: `cargo test` runs them in
-    /// parallel and they share the process environment.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn args_are_not_rescanned() {

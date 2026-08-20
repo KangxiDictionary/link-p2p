@@ -183,10 +183,11 @@ enum Command {
         shell: Shell,
     },
     /// Print help for link-p2p or one of its subcommands.
-    ///
-    /// Replaces clap's built-in `help` subcommand (whose description is not
-    /// localizable) with our own, so `help` shows up translated in --help and
-    /// in shell completions. Handled in real_main like Completions.
+    //
+    // (implementation detail, not user-facing: this replaces clap's built-in
+    // `help` subcommand, whose description is hardcoded English and cannot be
+    // localized. Handled in real_main like Completions. Kept as a single-line
+    // doc so no long_about is derived that would need its own translation.)
     Help {
         /// The subcommand path to print help for, e.g. `tun serve`
         #[arg(value_name = "COMMAND")]
@@ -1380,4 +1381,82 @@ where
     tokio::io::copy(reader, writer)
         .await
         .context(tr!("copying stream data"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every help/about text that clap derives must be overridden by
+    /// `localized_command()` — otherwise the affected arg/subcommand shows
+    /// untranslated English and no check catches it (the derived text is a
+    /// plain string literal, not a `tr!` msgid). This walks both command
+    /// trees (raw derive output vs the localized builder) and fails if any
+    /// text survived unchanged, so adding an arg/subcommand without a
+    /// matching mut_arg/mut_subcommand entry breaks `cargo test` instead of
+    /// silently shipping English help.
+    #[test]
+    fn cli_help_is_fully_localized() {
+        // The localized builder resolves translations via the loaded catalog,
+        // so pin the language and init it before comparing the trees. The
+        // shared lock keeps the env mutation race-free with the i18n tests.
+        let _guard = crate::i18n::ENV_LOCK.lock().unwrap();
+        std::env::set_var("LANGUAGE", "zh_CN");
+        crate::i18n::init();
+        std::env::remove_var("LANGUAGE");
+        check_cmd(&Cli::command(), &localized_command(), "<root>");
+    }
+
+    fn check_cmd(raw: &clap::Command, loc: &clap::Command, path: &str) {
+        // Command-level texts. Only texts present in the raw tree are checked
+        // (localized must not drop or fail to translate them).
+        for (tag, r, l) in [
+            ("about", raw.get_about(), loc.get_about()),
+            ("long_about", raw.get_long_about(), loc.get_long_about()),
+            ("after_help", raw.get_after_help(), loc.get_after_help()),
+        ] {
+            if let Some(r) = r {
+                let l = l.unwrap_or_else(|| panic!("{path}: {tag} missing in localized tree"));
+                assert_ne!(
+                    r.to_string(),
+                    l.to_string(),
+                    "{path}: {tag} was not localized"
+                );
+            }
+        }
+
+        // Per-argument help, matched by arg id. A pair that can't be matched
+        // (e.g. the built-in help subcommand's "subcommand" arg vs our
+        // derived "sub") is skipped — the check that matters is: same id in
+        // both trees => help must have been translated.
+        for arg in raw.get_arguments() {
+            let Some(rh) = arg.get_help() else { continue };
+            let Some(l) = loc.get_arguments().find(|a| a.get_id() == arg.get_id()) else {
+                continue;
+            };
+            let lh = l.get_help().unwrap_or_else(|| {
+                panic!(
+                    "{path}: arg {} lost its help in the localized tree",
+                    arg.get_id()
+                )
+            });
+            assert_ne!(
+                rh.to_string(),
+                lh.to_string(),
+                "{path}: arg --{} help was not localized",
+                arg.get_id()
+            );
+        }
+
+        // Recurse into subcommands, matched by name.
+        for sub in raw.get_subcommands() {
+            let Some(l) = loc
+                .get_subcommands()
+                .find(|s| s.get_name() == sub.get_name())
+            else {
+                continue;
+            };
+            check_cmd(sub, l, &format!("{path} {}", sub.get_name()));
+        }
+    }
 }
