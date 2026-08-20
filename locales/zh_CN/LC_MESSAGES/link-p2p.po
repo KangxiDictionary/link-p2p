@@ -411,9 +411,6 @@ msgstr "已连接。你的虚拟 IP：{0}"
 msgid "peer {0} is reachable at {1}"
 msgstr "对端 {0} 在 {1} 可达"
 
-msgid "peer disconnected, exiting..."
-msgstr "对端已断开，正在退出……"
-
 msgid "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}"
 msgstr "TUN datagram 协商：max_datagram_size={0}，接口 MTU={1}"
 
@@ -482,3 +479,20 @@ msgstr "路径：relay（尚无直连 UDP 路径）"
 
 msgid "peer echoed a mismatched ping timestamp"
 msgstr "对端回显的 ping 时间戳不匹配"
+
+# --- TUN 模式改进 / SOCKS5 严格化 ---
+
+msgid "choose_mtu({0}, {1}) = {2}"
+msgstr "选择MTU({0}, {1}) = {2}"
+
+msgid "reconnecting in {0}"
+msgstr "{0}后重新连接"
+
+msgid "ping probe error"
+msgstr "ping 探测出错"
+
+msgid "no acceptable SOCKS5 authentication method"
+msgstr "没有可接受的 SOCKS5 认证方式"
+
+msgid "note: --max-conns is not used by TUN mode (single point-to-point session)"
+msgstr "提示：--max-conns 对 TUN 模式无效（点对点单会话）"

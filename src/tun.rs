@@ -16,6 +16,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use iroh::endpoint::Connection;
+use iroh::protocol::ProtocolHandler;
 use iroh::{EndpointAddr, EndpointId, SecretKey};
 use tokio::time::{self, Duration};
 use tracing::{info, warn};
@@ -97,7 +98,10 @@ fn choose_mtu(user_mtu: u16, conn: &Connection) -> Result<u16> {
     // u16::MAX can't truncate into a misleadingly small MTU.
     let max_dgram = u16::try_from(max_dgram).unwrap_or(u16::MAX);
     let mtu = std::cmp::min(user_mtu, max_dgram);
-    info!("choose_mtu({user_mtu}, {max_dgram}) = {mtu}");
+    info!(
+        "{}",
+        tr_fmt!("choose_mtu({0}, {1}) = {2}", user_mtu, max_dgram, mtu)
+    );
     Ok(mtu)
 }
 
@@ -466,6 +470,19 @@ pub async fn run_tun_serve(
                 let conn = accepting
                     .await
                     .context(tr!("completing connection handshake"))?;
+
+                // `link-p2p ping` probes use their own ALPN: answer them on a
+                // dedicated task so the tunnel keeps accepting peers. Without
+                // this, ping to a TUN node fails at the ALPN handshake.
+                if conn.alpn() == crate::PING_ALPN {
+                    tokio::spawn(async move {
+                        if let Err(e) = crate::PingHandler.accept(conn).await {
+                            warn!(error = %e, "{}", tr!("ping probe error"));
+                        }
+                    });
+                    continue;
+                }
+
                 let peer = conn.remote_id();
                 info!(%peer, "{}", tr!("TUN session established"));
 
@@ -567,52 +584,108 @@ pub async fn run_tun_connect(
         None => EndpointAddr::from(peer_id),
     };
 
-    println!("{}", styler.info(&tr_fmt!("dialing {0}...", peer_id)));
-    let conn = endpoint
-        .connect(dial_addr, TUN_ALPN)
-        .await
-        .context(tr!("connecting to remote endpoint"))?;
-    // The peer's actual VIP (derived default or `--tun-ip` override) comes
-    // from the handshake — never re-derived from its EndpointId.
-    let peer_vip = exchange_peer_vip(&conn, own_vip, true).await?;
-
-    // Fail closed on datagram support before creating any interface.
-    let mtu = choose_mtu(mtu, &conn)?;
+    // The TUN device lives for the whole process: sessions come and go, the
+    // interface (and its /32 address) survives across reconnects. MTU is
+    // clamped per session (choose_mtu) and the interface follows via
+    // set_tun_mtu, so start with the user's --mtu bound.
     let (tun, tun_name) = create_tun_device(own_vip, mtu)?;
-    add_peer_route(&tun_name, peer_vip)?;
-    // Same observability line as `tun serve`: compare this across both machines
-    // to check the MTU-symmetry assumption (see the comment in run_tun_serve).
-    info!(%peer_id, "{}", tr_fmt!(
-        "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}",
-        conn.max_datagram_size().unwrap_or_default(),
-        mtu
-    ));
 
-    println!(
-        "{}",
-        styler.ok(&tr_fmt!("connected. your virtual IP: {0}", own_vip))
-    );
-    println!(
-        "{}",
-        styler.dim(&tr_fmt!(
-            "peer {0} is reachable at {1}",
-            peer_id.fmt_short(),
-            peer_vip
-        ))
-    );
-    println!("{}", styler.dim(&tr!("Press Ctrl+C to stop.")));
+    // Reconnect loop: unlike stream-mode `connect`, which re-dials per QUIC
+    // connection in the background, a TUN session *is* the whole data path —
+    // when the peer goes away the datagram loop ends, so re-establish the
+    // session (dial + VIP exchange + route) with the same exponential backoff
+    // stream mode uses. Ctrl+C is handled both inside the datagram loop and
+    // during the backoff wait.
+    let mut connected_once = false;
+    let mut delay: Option<Duration> = None;
+    loop {
+        // Backoff between sessions (None = first attempt, dial immediately).
+        if let Some(d) = delay {
+            tokio::select! {
+                _ = time::sleep(d) => {}
+                _ = tokio::signal::ctrl_c() => {
+                    println!("{}", styler.warn(&tr!("shutting down...")));
+                    endpoint.close().await;
+                    return Ok(());
+                }
+            }
+        }
 
-    let mut mtu = mtu;
-    let result = run_datagram_loop(&tun, &tun_name, &conn, mtu, &mut mtu, peer_id, styler).await;
+        println!("{}", styler.info(&tr_fmt!("dialing {0}...", peer_id)));
+        let session = async {
+            let conn = endpoint
+                .connect(dial_addr.clone(), TUN_ALPN)
+                .await
+                .context(tr!("connecting to remote endpoint"))?;
+            // The peer's actual VIP (derived default or `--tun-ip` override)
+            // comes from the handshake — never re-derived from its EndpointId.
+            let peer_vip = exchange_peer_vip(&conn, own_vip, true).await?;
+
+            // Fail closed on datagram support before bridging anything.
+            let mut mtu = choose_mtu(mtu, &conn)?;
+            set_tun_mtu(&tun_name, mtu)?;
+            add_peer_route(&tun_name, peer_vip)?;
+            // Same observability line as `tun serve`: compare this across both
+            // machines to check the MTU-symmetry assumption.
+            info!(%peer_id, "{}", tr_fmt!(
+                "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}",
+                conn.max_datagram_size().unwrap_or_default(),
+                mtu
+            ));
+
+            if !connected_once {
+                connected_once = true;
+                println!(
+                    "{}",
+                    styler.ok(&tr_fmt!("connected. your virtual IP: {0}", own_vip))
+                );
+                println!(
+                    "{}",
+                    styler.dim(&tr_fmt!(
+                        "peer {0} is reachable at {1}",
+                        peer_id.fmt_short(),
+                        peer_vip
+                    ))
+                );
+                println!("{}", styler.dim(&tr!("Press Ctrl+C to stop.")));
+            }
+
+            let end =
+                run_datagram_loop(&tun, &tun_name, &conn, mtu, &mut mtu, peer_id, styler).await?;
+            Ok::<_, anyhow::Error>((end, Some(peer_vip)))
+        }
+        .await;
+
+        let (end, peer_vip) = match session {
+            Ok(x) => x,
+            Err(e) => {
+                warn!(%peer_id, error = %e, "{}", tr!("TUN session error"));
+                (SessionEnd::PeerGone, None)
+            }
+        };
+        // Session over (peer gone, error, or Ctrl+C): drop the peer's route so
+        // a later session with a different VIP doesn't leave a stale route on
+        // the TUN interface. Best-effort, but never silent.
+        if let Some(vip) = peer_vip {
+            if let Err(e) = del_peer_route(&tun_name, vip) {
+                warn!(%peer_id, error = %e, "{}", tr!("could not remove peer route"));
+            }
+        }
+
+        match end {
+            SessionEnd::CtrlC => break,
+            SessionEnd::PeerGone => {}
+        }
+        let next = std::cmp::min(
+            delay.map_or(crate::RECONNECT_BASE, |d| d * 2),
+            crate::RECONNECT_MAX,
+        );
+        delay = Some(next);
+        info!(%peer_id, "{}", tr_fmt!("reconnecting in {0}", format!("{next:?}")));
+    }
     // Close gracefully instead of dropping the socket: the peer's datagram
     // loop then fails immediately (route cleanup on the serve side is
     // instant) and iroh doesn't log its ungraceful-drop error.
     endpoint.close().await;
-    match result? {
-        SessionEnd::CtrlC => {}
-        SessionEnd::PeerGone => {
-            println!("{}", styler.warn(&tr!("peer disconnected, exiting...")));
-        }
-    }
     Ok(())
 }

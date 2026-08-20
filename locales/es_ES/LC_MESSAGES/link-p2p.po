@@ -421,9 +421,6 @@ msgstr "conectado. tu IP virtual: {0}"
 msgid "peer {0} is reachable at {1}"
 msgstr "el peer {0} es alcanzable en {1}"
 
-msgid "peer disconnected, exiting..."
-msgstr "peer desconectado, saliendo..."
-
 msgid "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}"
 msgstr "Negociación de datagramas TUN: max_datagram_size={0}, MTU de interfaz={1}"
 
@@ -492,3 +489,18 @@ msgstr "ruta: relay (sin ruta UDP directa todavía)"
 
 msgid "peer echoed a mismatched ping timestamp"
 msgstr "el par devolvió una marca de tiempo de ping no coincidente"
+
+msgid "choose_mtu({0}, {1}) = {2}"
+msgstr "elegir MTU({0}, {1}) = {2}"
+
+msgid "reconnecting in {0}"
+msgstr "reconectando en {0}"
+
+msgid "ping probe error"
+msgstr "error en la sonda ping"
+
+msgid "no acceptable SOCKS5 authentication method"
+msgstr "no hay un método de autenticación SOCKS5 aceptable"
+
+msgid "note: --max-conns is not used by TUN mode (single point-to-point session)"
+msgstr "nota: --max-conns no se usa en el modo TUN (sesión punto a punto única)"

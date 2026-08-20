@@ -143,10 +143,12 @@ fn e2e_forward_roundtrip_and_clean_shutdown() {
     let mut guard = ProcGuard(Vec::new());
 
     // Relay on a config-file port (no --port flag on iroh-relay).
+    // `enable_metrics = false`: --dev also starts a metrics server on a fixed
+    // port, and two concurrent e2e tests would collide on it.
     let relay_cfg = tmp.join("relay.toml");
     std::fs::write(
         &relay_cfg,
-        format!("http_bind_addr = \"127.0.0.1:{relay_port}\"\n"),
+        format!("http_bind_addr = \"127.0.0.1:{relay_port}\"\nenable_metrics = false\n"),
     )
     .expect("write relay config");
     guard.0.push(
@@ -247,4 +249,181 @@ fn e2e_forward_roundtrip_and_clean_shutdown() {
     guard.0.clear();
     let _ = std::fs::remove_dir_all(&tmp);
     eprintln!("e2e: round-trip OK, both sides exited within the drain window");
+}
+
+/// Speak the no-auth SOCKS5 CONNECT protocol to `addr`, send `payload`, and
+/// return everything the target echoes back. Asserts the handshake succeeded.
+fn socks5_connect_and_echo(addr: &str, target: ([u8; 4], u16), payload: &[u8]) -> Vec<u8> {
+    let mut s = TcpStream::connect(addr).expect("connect to socks5 listener");
+    s.set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+
+    // Greeting: SOCKS5, offer no-auth.
+    s.write_all(&[0x05, 0x01, 0x00]).expect("write greeting");
+    let mut sel = [0u8; 2];
+    s.read_exact(&mut sel).expect("read method selection");
+    assert_eq!(sel, [0x05, 0x00], "server selects no-auth");
+
+    // CONNECT to the target (IPv4).
+    let (ip, port) = target;
+    let mut req = vec![0x05, 0x01, 0x00, 0x01];
+    req.extend_from_slice(&ip);
+    req.extend_from_slice(&port.to_be_bytes());
+    s.write_all(&req).expect("write connect request");
+    let mut rep = [0u8; 10];
+    s.read_exact(&mut rep).expect("read connect reply");
+    assert_eq!(&rep[0..2], &[0x05, 0x00], "socks5 CONNECT accepted");
+
+    // Echo round trip through the proxy.
+    s.write_all(payload).expect("write payload");
+    s.shutdown(Shutdown::Write).expect("half-close");
+    let mut got = Vec::new();
+    let mut buf = [0u8; 8192];
+    while let Ok(n) = s.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        got.extend_from_slice(&buf[..n]);
+    }
+    got
+}
+
+#[test]
+#[ignore]
+fn e2e_proxy_socks5_roundtrip_and_clean_shutdown() {
+    let Some(bin) = binary() else {
+        eprintln!("skipping: target/release/link-p2p not built (run: cargo build --release)");
+        return;
+    };
+    let Some(relay_bin) = relay_binary() else {
+        eprintln!("skipping: tools/iroh-relay not found (see scripts/local-test.sh)");
+        return;
+    };
+
+    let tmp = std::env::temp_dir().join(format!("lp-e2e-socks-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp dir");
+
+    let relay_port = free_port();
+    let echo_port = free_port();
+    let socks_port = free_port();
+    let relay_url = format!("http://127.0.0.1:{relay_port}");
+
+    // Echo server: the destination the SOCKS5 client asks the proxy to reach.
+    std::thread::spawn(move || {
+        let listener = TcpListener::bind(("127.0.0.1", echo_port)).expect("echo bind");
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { continue };
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match s.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if s.write_all(&buf[..n]).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    let mut guard = ProcGuard(Vec::new());
+
+    let relay_cfg = tmp.join("relay.toml");
+    std::fs::write(
+        &relay_cfg,
+        format!("http_bind_addr = \"127.0.0.1:{relay_port}\"\nenable_metrics = false\n"),
+    )
+    .expect("write relay config");
+    guard.0.push(
+        Command::new(&relay_bin)
+            .args(["--dev", "-c"])
+            .arg(&relay_cfg)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn relay"),
+    );
+
+    // serve in proxy mode: the target comes from each stream's header.
+    let serve_log = tmp.join("serve.log");
+    let serve_out = std::fs::File::create(&serve_log).expect("serve log file");
+    guard.0.push(
+        Command::new(&bin)
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .args(["--ephemeral", "serve", "--proxy", "--relay", &relay_url])
+            .stdout(Stdio::from(serve_out))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn serve"),
+    );
+
+    wait_for("serve EndpointId", Duration::from_secs(30), || {
+        std::fs::read_to_string(&serve_log)
+            .map(|c| c.contains("your EndpointId"))
+            .unwrap_or(false)
+    });
+    let ep = extract_endpoint_id(&serve_log);
+
+    // connect as a local SOCKS5 server.
+    let conn_log = tmp.join("conn.log");
+    let conn_out = std::fs::File::create(&conn_log).expect("conn log file");
+    guard.0.push(
+        Command::new(&bin)
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .args([
+                "--ephemeral",
+                "connect",
+                "--to",
+                &ep,
+                "--socks5-listen",
+                &format!("127.0.0.1:{socks_port}"),
+                "--relay",
+                &relay_url,
+            ])
+            .stdout(Stdio::from(conn_out))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn connect"),
+    );
+
+    wait_for("connect socks5 listener", Duration::from_secs(30), || {
+        TcpStream::connect(("127.0.0.1", socks_port)).is_ok()
+    });
+
+    // Round trip through the SOCKS5 proxy chain, two targets.
+    let payload: Vec<u8> = (0u8..=255).cycle().take(128 * 1024).collect();
+    let got = socks5_connect_and_echo(
+        &format!("127.0.0.1:{socks_port}"),
+        ([127, 0, 0, 1], echo_port),
+        &payload,
+    );
+    assert_eq!(got, payload, "proxy round-tripped bytes differ");
+
+    let small: Vec<u8> = b"socks5-over-quic".to_vec();
+    let got = socks5_connect_and_echo(
+        &format!("127.0.0.1:{socks_port}"),
+        ([127, 0, 0, 1], echo_port),
+        &small,
+    );
+    assert_eq!(got, small, "second (short) proxy round-trip differs");
+
+    // Graceful shutdown: SIGINT both sides, exit within the drain window,
+    // and the listener port is released.
+    send_sigint(&guard.0[2]); // connect
+    send_sigint(&guard.0[1]); // serve
+    wait_exit("connect", &mut guard.0[2]);
+    wait_exit("serve", &mut guard.0[1]);
+    TcpListener::bind(("127.0.0.1", socks_port)).expect("socks listener port released after exit");
+
+    let _ = guard.0[0].kill();
+    let _ = guard.0[0].wait();
+    guard.0.clear();
+    let _ = std::fs::remove_dir_all(&tmp);
+    eprintln!("e2e: proxy+socks5 round-trip OK, both sides exited within the drain window");
 }

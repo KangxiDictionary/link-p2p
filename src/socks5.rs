@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 
 use crate::i18n::{tr, tr_fmt};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     Addr(SocketAddr),
     Domain(String, u16),
@@ -119,6 +119,16 @@ pub async fn accept_handshake(tcp: &mut TcpStream) -> Result<Target> {
     }
     let mut methods = vec![0u8; hdr[1] as usize];
     tcp.read_exact(&mut methods).await?;
+    // RFC 1928 §3: the server must pick a method from the client's offered
+    // list. We only speak no-auth (0x00); if the client didn't offer it,
+    // reply 0xFF ("no acceptable method") and close instead of proceeding
+    // with a method the client never agreed to.
+    if !methods.contains(&0x00) {
+        tcp.write_all(&[0x05, 0xFF])
+            .await
+            .context(tr!("sending SOCKS5 method selection"))?;
+        bail!(tr!("no acceptable SOCKS5 authentication method"));
+    }
     tcp.write_all(&[0x05, 0x00])
         .await
         .context(tr!("sending SOCKS5 method selection"))?;
@@ -179,4 +189,181 @@ pub async fn accept_handshake(tcp: &mut TcpStream) -> Result<Target> {
         .await
         .context(tr!("sending SOCKS5 success reply"))?;
     Ok(target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    // --- wire header round-trips (no network) -----------------------------
+
+    #[tokio::test]
+    async fn target_round_trip_v4() {
+        let t = Target::Addr("203.0.113.7:8080".parse().unwrap());
+        let mut buf = Vec::new();
+        write_target(&mut buf, &t).await.unwrap();
+        assert_eq!(buf, [1, 203, 0, 113, 7, 0x1F, 0x90]);
+        let mut slice: &[u8] = &buf;
+        assert_eq!(read_target(&mut slice).await.unwrap(), t);
+        assert!(slice.is_empty(), "no trailing bytes");
+    }
+
+    #[tokio::test]
+    async fn target_round_trip_v6() {
+        let t = Target::Addr("[2001:db8::1]:443".parse().unwrap());
+        let mut buf = Vec::new();
+        write_target(&mut buf, &t).await.unwrap();
+        assert_eq!(buf[0], 4);
+        assert_eq!(buf.len(), 1 + 16 + 2);
+        let mut slice: &[u8] = &buf;
+        assert_eq!(read_target(&mut slice).await.unwrap(), t);
+        assert!(slice.is_empty());
+    }
+
+    #[tokio::test]
+    async fn target_round_trip_domain() {
+        let host = "internal-x.example";
+        let t = Target::Domain(host.to_string(), 80);
+        let mut buf = Vec::new();
+        write_target(&mut buf, &t).await.unwrap();
+        assert_eq!(buf[0], 3);
+        assert_eq!(buf[1], host.len() as u8);
+        let mut slice: &[u8] = &buf;
+        assert_eq!(read_target(&mut slice).await.unwrap(), t);
+        assert!(slice.is_empty());
+    }
+
+    #[tokio::test]
+    async fn domain_longer_than_255_bytes_is_rejected() {
+        let t = Target::Domain("x".repeat(300), 80);
+        let mut buf = Vec::new();
+        let err = write_target(&mut buf, &t).await.unwrap_err();
+        assert!(err.to_string().contains("domain name too long"));
+    }
+
+    #[tokio::test]
+    async fn unknown_address_type_is_rejected() {
+        let mut buf: &[u8] = &[9, 1, 2, 3, 4, 0, 80];
+        let err = read_target(&mut buf).await.unwrap_err();
+        assert!(err.to_string().contains("unknown address type"));
+    }
+
+    #[tokio::test]
+    async fn truncated_header_is_an_error() {
+        let mut buf: &[u8] = &[1, 0, 0]; // ATYP=1 but only 3 bytes of the 4-byte IP
+        assert!(read_target(&mut buf).await.is_err());
+    }
+
+    // --- RFC 1928 handshake over real localhost TCP -----------------------
+
+    /// Bind a listener, run `accept_handshake` on it in a task, return the
+    /// client socket and the server's outcome.
+    async fn handshake_pair() -> (TcpStream, tokio::task::JoinHandle<Result<Target>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            accept_handshake(&mut sock).await
+        });
+        let client = TcpStream::connect(addr).await.unwrap();
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn handshake_ok_with_no_auth_and_v4_connect() {
+        let (mut c, server) = handshake_pair().await;
+        c.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+        let mut sel = [0u8; 2];
+        c.read_exact(&mut sel).await.unwrap();
+        assert_eq!(sel, [0x05, 0x00]);
+
+        c.write_all(&[0x05, 0x01, 0x00, 0x01, 203, 0, 113, 7, 0x1F, 0x90])
+            .await
+            .unwrap();
+        let mut rep = [0u8; 10];
+        c.read_exact(&mut rep).await.unwrap();
+        assert_eq!(&rep[0..2], &[0x05, 0x00]);
+        assert_eq!(rep[3], 0x01); // ATYP echoed, BND.ADDR = 0.0.0.0
+
+        let t = server.await.unwrap().unwrap();
+        assert_eq!(t, Target::Addr("203.0.113.7:8080".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn handshake_ok_with_domain_connect() {
+        let (mut c, server) = handshake_pair().await;
+        c.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+        let mut sel = [0u8; 2];
+        c.read_exact(&mut sel).await.unwrap();
+        assert_eq!(sel, [0x05, 0x00]);
+
+        let host = b"internal-x";
+        c.write_all(&[0x05, 0x01, 0x00, 0x03, host.len() as u8])
+            .await
+            .unwrap();
+        c.write_all(host).await.unwrap();
+        c.write_all(&[0x00, 0x50]).await.unwrap();
+        let mut rep = [0u8; 10];
+        c.read_exact(&mut rep).await.unwrap();
+        assert_eq!(&rep[0..2], &[0x05, 0x00]);
+
+        let t = server.await.unwrap().unwrap();
+        assert_eq!(t, Target::Domain("internal-x".to_string(), 80));
+    }
+
+    #[tokio::test]
+    async fn no_auth_method_must_be_offered() {
+        // Client only offers username/password (0x02): the server must reply
+        // 0xFF (no acceptable method) and fail the handshake.
+        let (mut c, server) = handshake_pair().await;
+        c.write_all(&[0x05, 0x01, 0x02]).await.unwrap();
+        let mut sel = [0u8; 2];
+        c.read_exact(&mut sel).await.unwrap();
+        assert_eq!(sel, [0x05, 0xFF]);
+        assert!(server.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn non_socks5_version_is_rejected() {
+        let (mut c, server) = handshake_pair().await;
+        c.write_all(&[0x04, 0x01, 0x00]).await.unwrap();
+        assert!(server.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn non_connect_command_gets_command_not_supported() {
+        let (mut c, server) = handshake_pair().await;
+        c.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+        let mut sel = [0u8; 2];
+        c.read_exact(&mut sel).await.unwrap();
+        assert_eq!(sel, [0x05, 0x00]);
+
+        // BIND (0x02), not CONNECT.
+        c.write_all(&[0x05, 0x02, 0x00, 0x01, 1, 2, 3, 4, 0, 80])
+            .await
+            .unwrap();
+        let mut rep = [0u8; 10];
+        c.read_exact(&mut rep).await.unwrap();
+        assert_eq!(&rep[0..2], &[0x05, 0x07]); // 0x07 = command not supported
+        assert!(server.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn unsupported_address_type_gets_reply_code_0x08() {
+        let (mut c, server) = handshake_pair().await;
+        c.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+        let mut sel = [0u8; 2];
+        c.read_exact(&mut sel).await.unwrap();
+
+        // ATYP 0x02 is not defined in SOCKS5.
+        c.write_all(&[0x05, 0x01, 0x00, 0x02, 1, 2, 3, 4, 0, 80])
+            .await
+            .unwrap();
+        let mut rep = [0u8; 10];
+        c.read_exact(&mut rep).await.unwrap();
+        assert_eq!(&rep[0..2], &[0x05, 0x08]); // 0x08 = address type not supported
+        assert!(server.await.unwrap().is_err());
+    }
 }

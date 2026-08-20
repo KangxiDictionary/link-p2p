@@ -48,8 +48,9 @@ const ALPN: &[u8] = b"link-p2p/tcp-forward/0";
 
 /// ALPN for the `ping` probe (echoes a timestamp, reports RTT and path).
 /// Separate from the forwarding ALPN so a ping can target a node that is
-/// also serving streams — the Router accepts both.
-const PING_ALPN: &[u8] = b"link-p2p/ping/0";
+/// also serving streams — the Router accepts both. Also registered on TUN
+/// nodes (see tun.rs) so `ping` works against `tun serve` too.
+pub(crate) const PING_ALPN: &[u8] = b"link-p2p/ping/0";
 
 /// How long Ctrl+C waits for in-flight forwarded streams to flush before
 /// cutting them off (used by both `serve` and `connect`).
@@ -381,6 +382,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
     // RUST_LOG always wins, e.g. `RUST_LOG=iroh=trace` for the path-selection
     // debugging described in README.md.
     let fmt = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("link_p2p=info,iroh=warn")),
@@ -390,10 +392,12 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
         // visible in the output; the default (FmtSpan::NONE) records their
         // fields but never prints them.
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-        // Skip ANSI color codes when stdout isn't a real terminal (piped to
-        // a file, `| tee`, log aggregator, etc) — otherwise every line gets
-        // littered with raw escape sequences.
-        .with_ansi(std::io::stdout().is_terminal());
+        // Logs go to stderr (the Unix convention: stdout carries the
+        // user-facing status lines only), so `--log-format json` output is
+        // clean, jq-parseable JSON when stderr is redirected — see README.
+        // Skip ANSI color codes when stderr isn't a real terminal (piped to
+        // a file, `| tee`, log aggregator, etc).
+        .with_ansi(std::io::stderr().is_terminal());
     match log_format {
         LogFormat::Json => fmt.json().init(),
         LogFormat::Text => fmt.init(),
@@ -447,17 +451,30 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             )
             .await
         }
-        Command::Tun { command } => match command {
-            TunCommand::Serve { tun_ip, mtu } => {
-                tun::validate_mtu(mtu)?;
-                tun::run_tun_serve(secret_key, tun_ip, mtu, cli.relay.as_deref(), styler).await
+        Command::Tun { command } => {
+            // TUN mode is a single point-to-point session; the stream-mode
+            // concurrency cap doesn't apply. Surface that instead of letting
+            // the flag silently do nothing.
+            if cli.max_conns != 1024 {
+                println!(
+                    "{}",
+                    styler.warn(&tr!(
+                        "note: --max-conns is not used by TUN mode (single point-to-point session)"
+                    ))
+                );
             }
-            TunCommand::Connect { to, tun_ip, mtu } => {
-                tun::validate_mtu(mtu)?;
-                tun::run_tun_connect(secret_key, &to, tun_ip, mtu, cli.relay.as_deref(), styler)
-                    .await
+            match command {
+                TunCommand::Serve { tun_ip, mtu } => {
+                    tun::validate_mtu(mtu)?;
+                    tun::run_tun_serve(secret_key, tun_ip, mtu, cli.relay.as_deref(), styler).await
+                }
+                TunCommand::Connect { to, tun_ip, mtu } => {
+                    tun::validate_mtu(mtu)?;
+                    tun::run_tun_connect(secret_key, &to, tun_ip, mtu, cli.relay.as_deref(), styler)
+                        .await
+                }
             }
-        },
+        }
         Command::Ping { to } => run_ping(secret_key, &to, cli.relay.as_deref(), styler).await,
         Command::Completions { .. } => unreachable!("handled above"),
     }
@@ -822,9 +839,10 @@ impl ProtocolHandler for ForwardHandler {
 }
 
 /// Handle `link-p2p ping` probes: echo the 8-byte timestamp back over a
-/// one-shot bidi stream so the caller can measure RTT.
+/// one-shot bidi stream so the caller can measure RTT. `pub(crate)` so TUN
+/// nodes (tun.rs) can answer probes too.
 #[derive(Debug)]
-struct PingHandler;
+pub(crate) struct PingHandler;
 
 impl ProtocolHandler for PingHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
@@ -872,9 +890,10 @@ async fn handle_forward_stream(
 // a fresh QUIC stream on that same connection and pipe.
 // ---------------------------------------------------------------------------
 
-/// Reconnect backoff bounds: 1s, 2s, 4s, ... capped at 30s.
-const RECONNECT_BASE: Duration = Duration::from_secs(1);
-const RECONNECT_MAX: Duration = Duration::from_secs(30);
+/// Reconnect backoff bounds: 1s, 2s, 4s, ... capped at 30s. Shared with the
+/// TUN reconnect loop (tun.rs).
+pub(crate) const RECONNECT_BASE: Duration = Duration::from_secs(1);
+pub(crate) const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
 /// How often a stream waiting for a reconnect re-checks the connection slot.
 /// Polling beats notify-waiting here: a notification racing past the wait

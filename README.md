@@ -65,6 +65,21 @@ root, `sudo setcap cap_net_admin+ep $(which link-p2p)` covers the network
 bits. Full design rationale and the real-hardware acceptance checklist live
 in `docs/tun-design.md`.
 
+Two operational behaviors worth knowing:
+
+- **`tun connect` reconnects automatically.** When the session ends (peer
+  went away, network blip, or the serve side restarted), it re-dials with the
+  same exponential backoff the stream mode uses (1s → 30s cap) instead of
+  exiting — the TUN interface and the peer route survive across sessions, so
+  once the peer is back the tunnel resumes without restarting the process.
+  Ctrl+C during a backoff wait exits cleanly.
+- **`ping` works against TUN nodes too.** `tun serve` answers `link-p2p ping`
+  probes alongside its tunnel duty, so you can measure RTT/path to a TUN
+  node without needing a separate `serve`.
+- **`--max-conns` does not apply to TUN mode** — a tunnel is a single
+  point-to-point session, not a stream fan-out; the flag is ignored there
+  (with a notice on startup if you set it).
+
 ### SOCKS5 proxy (`serve --proxy` + `connect --socks5-listen`)
 
 Instead of pinning a single destination, the `serve` side can act as a
@@ -125,15 +140,23 @@ RUST_LOG=iroh=trace ./target/release/link-p2p connect --relay http://127.0.0.1:3
 
 Default (no `RUST_LOG` set) is `link_p2p=info,iroh=warn` — you'll see
 connection open/close events but not iroh's internal relay/discovery
-chatter. Colors are automatically disabled when stdout isn't a terminal
-(piped to a file, etc).
+chatter.
 
-`--log-format json` switches the tracing output to structured JSON (one
-object per line, parseable with `jq`); the default `text` output is
-unchanged. `RUST_LOG=link_p2p=debug` additionally surfaces structured
-spans/events: a `pipe` span with `sent_bytes`/`recv_bytes` per forwarded
-stream, and a `dial completed` event with `elapsed_ms` for the QUIC
-handshake.
+Logs (both `text` and `json` formats) go to **stderr**; stdout carries only
+the user-facing status lines (banner, "connected.", ping results). Colors are
+automatically disabled when stderr isn't a terminal (piped to a file, etc).
+
+`--log-format json` switches the tracing output to structured JSON, one
+object per line. Redirect stderr to get a clean, `jq`-parseable stream:
+
+```bash
+./target/release/link-p2p serve --forward 127.0.0.1:22 --log-format json 2>serve.jsonl
+jq -r 'select(.message == "connection opened") | .peer' serve.jsonl
+```
+
+`RUST_LOG=link_p2p=debug` additionally surfaces structured spans/events: a
+`pipe` span with `sent_bytes`/`recv_bytes` per forwarded stream, and a
+`dial completed` event with `elapsed_ms` for the QUIC handshake.
 
 ### Transport defaults
 
@@ -341,11 +364,13 @@ nodes and tests. Conflicts with `--identity`.
 - **Reconnect**: `connect` re-dials automatically when the underlying QUIC
 connection dies, with exponential backoff (1s → 30s cap). The local listener
 stays up throughout — clients arriving during a reconnect queue and succeed
-once the peer is back. Run with `RUST_LOG=link_p2p=debug` to watch
-`reconnect failed; retrying in ...` / `reconnected to peer`.
+once the peer is back. `tun connect` reconnects the same way (the whole
+session re-establishes: dial, VIP exchange, route). Run with
+`RUST_LOG=link_p2p=debug` to watch `reconnect failed; retrying in ...` /
+`reconnected to peer` (stream mode) or `reconnecting in ...` (TUN mode).
 - `ping`: `link-p2p ping <EndpointId>` measures RTT to a running `serve`
-(the serve side answers ping probes alongside its normal forwarding) and
-reports whether the path is direct or relayed:
+  (the serve side answers ping probes alongside its normal forwarding) or
+  `tun serve` node, and reports whether the path is direct or relayed:
 
 ```bash
 $ link-p2p ping <EndpointId>

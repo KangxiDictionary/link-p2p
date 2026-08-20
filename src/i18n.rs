@@ -109,30 +109,6 @@ pub fn tr_fmt_impl(template: &str, args: &[String]) -> String {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn args_are_not_rescanned() {
-        // The {0} argument itself contains "{1}": it must be inserted
-        // verbatim, not substituted again by a later pass.
-        let args = ["{1}".to_string(), "X".to_string()];
-        assert_eq!(tr_fmt_impl("{0} and {1}", &args), "{1} and X");
-    }
-
-    #[test]
-    fn literal_fallback_cases() {
-        // Out-of-range index, stray brace, and plain text stay untouched.
-        let args = ["a".to_string()];
-        assert_eq!(tr_fmt_impl("{0} {1} {", &args), "a {1} {");
-        assert_eq!(tr_fmt_impl("plain", &args), "plain");
-        // Multi-digit indexes work.
-        let args2 = ["a".to_string(), "b".to_string(), "c".to_string()];
-        assert_eq!(tr_fmt_impl("{2}{0}{1}", &args2), "cab");
-    }
-}
-
 fn resolve_locale_dir() -> Option<PathBuf> {
     // Explicit override wins unconditionally.
     if let Ok(dir) = std::env::var("LINK_P2P_LOCALEDIR") {
@@ -173,4 +149,91 @@ fn has_catalog(dir: &Path) -> bool {
             })
             .unwrap_or(false)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serialize the env-var-mutating tests: `cargo test` runs them in
+    /// parallel and they share the process environment.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("lp-i18n-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn args_are_not_rescanned() {
+        // The {0} argument itself contains "{1}": it must be inserted
+        // verbatim, not substituted again by a later pass.
+        let args = ["{1}".to_string(), "X".to_string()];
+        assert_eq!(tr_fmt_impl("{0} and {1}", &args), "{1} and X");
+    }
+
+    #[test]
+    fn literal_fallback_cases() {
+        // Out-of-range index, stray brace, and plain text stay untouched.
+        let args = ["a".to_string()];
+        assert_eq!(tr_fmt_impl("{0} {1} {", &args), "a {1} {");
+        assert_eq!(tr_fmt_impl("plain", &args), "plain");
+        // Multi-digit indexes work.
+        let args2 = ["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(tr_fmt_impl("{2}{0}{1}", &args2), "cab");
+    }
+
+    #[test]
+    fn has_catalog_sees_mo_files() {
+        let d = tmp_dir("mo");
+        std::fs::create_dir_all(d.join("zh_CN/LC_MESSAGES")).unwrap();
+        std::fs::write(d.join("zh_CN/LC_MESSAGES/link-p2p.mo"), b"x").unwrap();
+        assert!(has_catalog(&d));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn has_catalog_ignores_po_only_dirs() {
+        // The repo's `locales/` source dir has .po but no .mo: it must not
+        // be picked as a catalog dir (build.rs compiles .mo into OUT_DIR).
+        let d = tmp_dir("po");
+        std::fs::create_dir_all(d.join("zh_CN/LC_MESSAGES")).unwrap();
+        std::fs::write(d.join("zh_CN/LC_MESSAGES/link-p2p.po"), b"x").unwrap();
+        assert!(!has_catalog(&d));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn has_catalog_missing_dir_is_false() {
+        assert!(!has_catalog(&PathBuf::from(
+            "/nonexistent/link-p2p-no-such-dir"
+        )));
+    }
+
+    #[test]
+    fn locale_dir_override_wins_unconditionally() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // The override is honored even when it points at a bogus dir (the
+        // caller takes responsibility for the path).
+        let bogus = "/nonexistent/link-p2p-locales";
+        std::env::set_var("LINK_P2P_LOCALEDIR", bogus);
+        assert_eq!(resolve_locale_dir(), Some(PathBuf::from(bogus)));
+        std::env::remove_var("LINK_P2P_LOCALEDIR");
+    }
+
+    #[test]
+    fn locale_dir_falls_back_to_a_compiled_catalog_dir() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINK_P2P_LOCALEDIR");
+        // The cwd candidate (repo `locales/`) holds only .po files, so the
+        // first candidate with a real catalog must be build.rs's OUT_DIR
+        // output. Only asserted when msgfmt actually compiled the catalogs.
+        let out = PathBuf::from(env!("OUT_DIR")).join("locales");
+        if has_catalog(&out) {
+            let dir = resolve_locale_dir().expect("compiled catalog exists, so a dir must resolve");
+            assert!(has_catalog(&dir));
+        }
+    }
 }

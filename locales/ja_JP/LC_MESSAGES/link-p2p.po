@@ -416,9 +416,6 @@ msgstr "接続しました。あなたの仮想 IP：{0}"
 msgid "peer {0} is reachable at {1}"
 msgstr "ピア {0} は {1} で到達可能です"
 
-msgid "peer disconnected, exiting..."
-msgstr "ピアが切断されました。終了します……"
-
 msgid "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}"
 msgstr "TUN データグラム交渉：max_datagram_size={0}、インターフェース MTU={1}"
 
@@ -487,3 +484,18 @@ msgstr "経路：リレー（直接 UDP 経路はまだありません）"
 
 msgid "peer echoed a mismatched ping timestamp"
 msgstr "ピアが返した ping タイムスタンプが一致しません"
+
+msgid "choose_mtu({0}, {1}) = {2}"
+msgstr "MTU選択({0}, {1}) = {2}"
+
+msgid "reconnecting in {0}"
+msgstr "{0}後に再接続します"
+
+msgid "ping probe error"
+msgstr "pingプローブエラー"
+
+msgid "no acceptable SOCKS5 authentication method"
+msgstr "受け入れ可能なSOCKS5認証方式がありません"
+
+msgid "note: --max-conns is not used by TUN mode (single point-to-point session)"
+msgstr "注: --max-conns はTUNモードでは使用されません（ポイントツーポイントの単一セッション）"
