@@ -1117,13 +1117,6 @@ async fn run_connect(
         elapsed_ms = start.elapsed().as_millis() as u64,
         "dial completed"
     );
-    println!(
-        "{}",
-        styler.ok(&tr_fmt!(
-            "connected. local TCP listener on {0} now forwards to the remote peer.",
-            local_addr
-        ))
-    );
 
     // Seed the connection slot and start the reconnect watcher: when the
     // QUIC connection dies, it re-dials with backoff and swaps the slot.
@@ -1135,6 +1128,15 @@ async fn run_connect(
     let tcp_listener = TcpListener::bind(local_addr)
         .await
         .with_context(|| tr_fmt!("binding local listener on {0}", local_addr))?;
+    // The "connected" banner comes only after the listener is actually up —
+    // printing it before bind would claim success for a port that's taken.
+    println!(
+        "{}",
+        styler.ok(&tr_fmt!(
+            "connected. local TCP listener on {0} now forwards to the remote peer.",
+            local_addr
+        ))
+    );
 
     // Same concurrency bound as serve. Here the permit is acquired *inside*
     // the spawned task so the accept loop stays responsive: excess local
