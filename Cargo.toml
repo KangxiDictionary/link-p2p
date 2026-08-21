@@ -2,6 +2,12 @@
 name = "link-p2p"
 version = "0.1.0"
 edition = "2021"
+description = "Minimal TCP-over-QUIC forwarder on iroh, with a point-to-point TUN mode for whole-machine IP reachability"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/KangxiDictionary/link-p2p"
+readme = "README.md"
+keywords = ["p2p", "tunnel", "quic", "iroh", "vpn"]
+categories = ["network-programming", "command-line-utilities"]
 
 [dependencies]
 # Pin to the 1.x line; iroh's API moved a lot before 1.0 landed, so avoid

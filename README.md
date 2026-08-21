@@ -205,6 +205,25 @@ Also supports `powershell` and `elvish`. Re-run after upgrading if flags change.
   you make *in response to* a CPU/latency number from `docs/benchmarks.md` —
   not something to guess at ahead of time.
 
+## Install
+
+**Prebuilt binary (no Rust toolchain needed)** — download
+`link-p2p-x86_64-unknown-linux-gnu.tar.gz` from the GitHub Releases page
+(any `v*` tag builds it automatically via GitHub Actions), then:
+
+```bash
+tar -xzf link-p2p-x86_64-unknown-linux-gnu.tar.gz
+sudo install -m 0755 link-p2p-x86_64-unknown-linux-gnu/link-p2p /usr/local/bin/
+# keep the catalogs next to the binary so every language works:
+sudo cp -r link-p2p-x86_64-unknown-linux-gnu/locales /usr/local/bin/
+```
+
+Verify with `link-p2p --version`. For running tunnels as services,
+`contrib/systemd/link-p2p@.service` (see "Running as a service" below).
+
+**From source**: `cargo build --release` (see Build) or
+`cargo install --path .` to put it on your PATH via cargo.
+
 ## Build
 
 Requires network access to crates.io (iroh, tokio, etc. pull in a fair number

@@ -1,0 +1,46 @@
+name: release
+
+# Building a prebuilt binary for the GitHub Release page:
+#   git tag v0.1.0 && git push origin v0.1.0
+# produces link-p2p-x86_64-unknown-linux-gnu.tar.gz + SHA256SUMS as release
+# assets. The tarball carries the binary AND the compiled .mo catalogs under
+# locales/ (the runtime finds them next to the binary), so a downloaded
+# install works in any language without a Rust toolchain or msgfmt.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install gettext (msgfmt compiles the .po catalogs)
+        run: sudo apt-get update && sudo apt-get install -y gettext
+      - name: Build release
+        run: cargo build --release
+      - name: Package binary + catalogs
+        run: |
+          set -euo pipefail
+          pkg="link-p2p-x86_64-unknown-linux-gnu"
+          mkdir -p "$pkg/locales"
+          cp target/release/link-p2p "$pkg/"
+          # Compiled catalogs from the build output ($OUT_DIR/locales); the
+          # i18n candidates include <dir of the binary>/locales.
+          out_locales="$(ls -dt target/release/build/link-p2p-*/out/locales | head -1)"
+          cp -r "$out_locales"/. "$pkg/locales/"
+          tar -czf "$pkg.tar.gz" "$pkg"
+          sha256sum "$pkg.tar.gz" > SHA256SUMS
+          ls -la "$pkg.tar.gz" SHA256SUMS
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            link-p2p-*.tar.gz
+            SHA256SUMS
+          generate_release_notes: true
