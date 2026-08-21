@@ -981,6 +981,36 @@ async fn handle_forward_stream(
 pub(crate) const RECONNECT_BASE: Duration = Duration::from_secs(1);
 pub(crate) const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
+/// Exponential backoff with a cap, shared by the stream-mode reconnect
+/// watcher and the TUN reconnect loop. `next()` returns the delay for the
+/// *next* attempt and then advances (1s, 2s, 4s, ... capped); `reset()`
+/// restarts after a successful connect.
+pub(crate) struct Backoff {
+    next_delay: Duration,
+    base: Duration,
+    max: Duration,
+}
+
+impl Backoff {
+    pub(crate) fn new(base: Duration, max: Duration) -> Self {
+        Self {
+            next_delay: base,
+            base,
+            max,
+        }
+    }
+
+    pub(crate) fn next(&mut self) -> Duration {
+        let d = self.next_delay;
+        self.next_delay = std::cmp::min(self.next_delay * 2, self.max);
+        d
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.next_delay = self.base;
+    }
+}
+
 /// How often a stream waiting for a reconnect re-checks the connection slot.
 /// Polling beats notify-waiting here: a notification racing past the wait
 /// registration would hang the waiter, a poll cannot miss. 200ms is a
@@ -1037,6 +1067,7 @@ fn spawn_reconnect_watcher(
     let slot = slot.clone();
     let endpoint = endpoint.clone();
     tokio::spawn(async move {
+        let mut backoff = Backoff::new(RECONNECT_BASE, RECONNECT_MAX);
         loop {
             // Wait for the current connection to die (none yet = dial now).
             let current = slot.0.read().await.as_ref().cloned();
@@ -1044,21 +1075,21 @@ fn spawn_reconnect_watcher(
                 conn.closed().await;
             }
             // Re-dial until success, backing off exponentially.
-            let mut delay = RECONNECT_BASE;
             loop {
                 match endpoint.connect(dial_addr.clone(), ALPN).await {
                     Ok(conn) => {
                         *slot.0.write().await = Some(conn);
                         info!(%peer, "{}", tr!("reconnected to peer"));
+                        backoff.reset();
                         break;
                     }
                     Err(e) => {
+                        let delay = backoff.next();
                         warn!(%peer, error = %e, "{}", tr_fmt!(
                             "reconnect failed; retrying in {0}",
                             format!("{delay:?}")
                         ));
                         tokio::time::sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, RECONNECT_MAX);
                     }
                 }
             }
@@ -1397,6 +1428,22 @@ mod tests {
     /// text survived unchanged, so adding an arg/subcommand without a
     /// matching mut_arg/mut_subcommand entry breaks `cargo test` instead of
     /// silently shipping English help.
+    #[test]
+    fn backoff_doubles_then_caps() {
+        let mut b = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
+        assert_eq!(b.next(), Duration::from_secs(1));
+        assert_eq!(b.next(), Duration::from_secs(2));
+        assert_eq!(b.next(), Duration::from_secs(4));
+        assert_eq!(b.next(), Duration::from_secs(8));
+        assert_eq!(b.next(), Duration::from_secs(16));
+        // Next would be 32 -> capped at 30, and stays there.
+        assert_eq!(b.next(), Duration::from_secs(30));
+        assert_eq!(b.next(), Duration::from_secs(30));
+        // reset() restarts from the base.
+        b.reset();
+        assert_eq!(b.next(), Duration::from_secs(1));
+    }
+
     #[test]
     fn cli_help_is_fully_localized() {
         // The localized builder resolves translations via the loaded catalog,

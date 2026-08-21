@@ -518,5 +518,5 @@ msgstr "バージョンを表示"
 msgid "path datagram ceiling dropped to {0}; lowered TUN interface MTU and dropped one packet"
 msgstr "パスのデータグラム上限が {0} に低下しました。TUNインターフェースのMTUを下げ、1パケットを破棄しました"
 
-msgid "dropping packet larger than the path datagram ceiling"
-msgstr "パスのデータグラム上限より大きいパケットを破棄します"
+msgid "dropped {0} oversized packets in the last 2s (interface MTU is {1})"
+msgstr "直近2秒で {0} 個の超過パケットを破棄しました（インターフェースMTU: {1}）"

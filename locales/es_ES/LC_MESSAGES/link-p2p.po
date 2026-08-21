@@ -523,5 +523,5 @@ msgstr "Muestra la versión"
 msgid "path datagram ceiling dropped to {0}; lowered TUN interface MTU and dropped one packet"
 msgstr "el límite de datagramas de la ruta bajó a {0}; se redujo el MTU de la interfaz TUN y se descartó un paquete"
 
-msgid "dropping packet larger than the path datagram ceiling"
-msgstr "descartando un paquete mayor que el límite de datagramas de la ruta"
+msgid "dropped {0} oversized packets in the last 2s (interface MTU is {1})"
+msgstr "se descartaron {0} paquetes sobredimensionados en los últimos 2s (MTU de la interfaz: {1})"

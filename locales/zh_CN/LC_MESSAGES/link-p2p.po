@@ -515,5 +515,5 @@ msgstr "打印版本"
 msgid "path datagram ceiling dropped to {0}; lowered TUN interface MTU and dropped one packet"
 msgstr "路径数据报上限降至 {0}，已下调 TUN 接口 MTU 并丢弃一个数据包"
 
-msgid "dropping packet larger than the path datagram ceiling"
-msgstr "丢弃大于路径数据报上限的数据包"
+msgid "dropped {0} oversized packets in the last 2s (interface MTU is {1})"
+msgstr "最近 2 秒内丢弃了 {0} 个超限数据包（接口 MTU 为 {1}）"

@@ -263,23 +263,22 @@ fn refresh_tun_mtu(tun_name: &str, user_mtu: u16, conn: &Connection, mtu: &mut u
 /// packet a "datagram too large" refusal at the QUIC layer. Event-driven:
 /// only called when an actual oversize packet shows up on the send path, so
 /// it cannot oscillate on its own — the timer raises it back once the path
-/// really supports more. Returns whether the MTU was lowered.
+/// really supports more. Takes the already-fetched ceiling (the caller
+/// queried `max_datagram_size()` for its own check) instead of querying it
+/// again. Returns whether the MTU was lowered.
 #[cfg(target_os = "linux")]
-fn shrink_tun_mtu(tun_name: &str, conn: &Connection, mtu: &mut u16) -> Result<bool> {
-    let Some(max_dgram) = conn.max_datagram_size() else {
-        return Ok(false);
-    };
-    let max_dgram = u16::try_from(max_dgram).unwrap_or(u16::MAX);
-    if max_dgram < *mtu {
-        *mtu = max_dgram;
-        set_tun_mtu(tun_name, max_dgram)?;
+fn shrink_tun_mtu(tun_name: &str, ceiling: usize, mtu: &mut u16) -> Result<bool> {
+    let ceiling = u16::try_from(ceiling).unwrap_or(u16::MAX);
+    if ceiling < *mtu {
+        *mtu = ceiling;
+        set_tun_mtu(tun_name, ceiling)?;
         return Ok(true);
     }
     Ok(false)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn shrink_tun_mtu(_tun_name: &str, _conn: &Connection, _mtu: &mut u16) -> Result<bool> {
+fn shrink_tun_mtu(_tun_name: &str, _ceiling: usize, _mtu: &mut u16) -> Result<bool> {
     Ok(false)
 }
 
@@ -391,6 +390,7 @@ async fn run_datagram_loop(
 ) -> Result<SessionEnd> {
     let mut buf = vec![0u8; *mtu as usize + 64];
     let mut refresh = time::interval(Duration::from_secs(2));
+    let mut dropped_oversized: u64 = 0;
     loop {
         tokio::select! {
             biased; // closed() first — a disconnection is detected before
@@ -408,16 +408,19 @@ async fn run_datagram_loop(
                 // sending so an oversize packet *lowers* the MTU instead of
                 // being refused by the QUIC layer as "datagram too large" on
                 // every send. The packet itself is dropped — TUN mode is
-                // best-effort, the inner protocol retransmits.
+                // best-effort, the inner protocol retransmits. Once the MTU
+                // has been lowered, a sender that keeps pushing old-size
+                // packets is just counted (see the refresh tick summary)
+                // rather than logging one line per packet.
                 let ceiling = conn.max_datagram_size().unwrap_or(usize::MAX);
                 if n > ceiling {
-                    if shrink_tun_mtu(tun_name, conn, mtu)? {
+                    if shrink_tun_mtu(tun_name, ceiling, mtu)? {
                         warn!(%peer, "{}", tr_fmt!(
                             "path datagram ceiling dropped to {0}; lowered TUN interface MTU and dropped one packet",
                             *mtu
                         ));
                     } else {
-                        warn!(%peer, "{}", tr!("dropping packet larger than the path datagram ceiling"));
+                        dropped_oversized += 1;
                     }
                     continue;
                 }
@@ -452,6 +455,17 @@ async fn run_datagram_loop(
                     ));
                     buf.resize(*mtu as usize + 64, 0);
                 }
+                // Flush the drop counter once per tick instead of logging
+                // every dropped oversize packet individually (a long-lived
+                // local sender can keep pushing old-size packets for a while
+                // after the MTU drops — TUN has no ICMP feedback to tell it).
+                if dropped_oversized > 0 {
+                    warn!(%peer, "{}", tr_fmt!(
+                        "dropped {0} oversized packets in the last 2s (interface MTU is {1})",
+                        dropped_oversized, *mtu
+                    ));
+                    dropped_oversized = 0;
+                }
             }
             _ = tokio::signal::ctrl_c() => {
                 println!("{}", styler.warn(&tr!("shutting down...")));
@@ -465,6 +479,16 @@ async fn run_datagram_loop(
 // Entry points.
 // ---------------------------------------------------------------------------
 
+/// Answer `link-p2p ping` probes (PING_ALPN connections) on a dedicated task
+/// so the tunnel's accept loop keeps serving peers while a probe is open.
+fn handle_ping_probe(conn: Connection) {
+    tokio::spawn(async move {
+        if let Err(e) = crate::PingHandler.accept(conn).await {
+            warn!(error = %e, "{}", tr!("ping probe error"));
+        }
+    });
+}
+
 /// Exposed side (`tun serve`): accept one peer at a time and bridge this
 /// machine to it. The collision check and device creation happen before we
 /// accept anything, so a startup problem is reported immediately rather than
@@ -477,7 +501,10 @@ pub async fn run_tun_serve(
     styler: Styler,
 ) -> Result<()> {
     let endpoint = crate::build_endpoint(secret_key, relay)?
-        .alpns(vec![TUN_ALPN.to_vec()])
+        // PING_ALPN must be registered here or the probe never gets past the
+        // TLS ALPN negotiation: iroh only accepts connections whose ALPN is
+        // in this list, so the conn.alpn() dispatch below would be dead code.
+        .alpns(vec![TUN_ALPN.to_vec(), crate::PING_ALPN.to_vec()])
         .bind()
         .await
         .context(tr!("binding endpoint"))?;
@@ -525,15 +552,11 @@ pub async fn run_tun_serve(
                     .await
                     .context(tr!("completing connection handshake"))?;
 
-                // `link-p2p ping` probes use their own ALPN: answer them on a
-                // dedicated task so the tunnel keeps accepting peers. Without
-                // this, ping to a TUN node fails at the ALPN handshake.
+                // `link-p2p ping` probes arrive on their own ALPN; answer
+                // them on a dedicated task so the tunnel keeps accepting
+                // peers. (PING_ALPN is registered on the endpoint above.)
                 if conn.alpn() == crate::PING_ALPN {
-                    tokio::spawn(async move {
-                        if let Err(e) = crate::PingHandler.accept(conn).await {
-                            warn!(error = %e, "{}", tr!("ping probe error"));
-                        }
-                    });
+                    handle_ping_probe(conn);
                     continue;
                 }
 
@@ -648,9 +671,10 @@ pub async fn run_tun_connect(
     // connection in the background, a TUN session *is* the whole data path —
     // when the peer goes away the datagram loop ends, so re-establish the
     // session (dial + VIP exchange + route) with the same exponential backoff
-    // stream mode uses. Ctrl+C is handled both inside the datagram loop and
-    // during the backoff wait.
+    // stream mode uses (Backoff, shared with spawn_reconnect_watcher). Ctrl+C
+    // is handled both inside the datagram loop and during the backoff wait.
     let mut connected_once = false;
+    let mut backoff = crate::Backoff::new(crate::RECONNECT_BASE, crate::RECONNECT_MAX);
     let mut delay: Option<Duration> = None;
     loop {
         // Backoff between sessions (None = first attempt, dial immediately).
@@ -728,14 +752,12 @@ pub async fn run_tun_connect(
 
         match end {
             SessionEnd::CtrlC => break,
-            SessionEnd::PeerGone => {}
+            SessionEnd::PeerGone => {
+                let next = backoff.next();
+                delay = Some(next);
+                info!(%peer_id, "{}", tr_fmt!("reconnecting in {0}", format!("{next:?}")));
+            }
         }
-        let next = std::cmp::min(
-            delay.map_or(crate::RECONNECT_BASE, |d| d * 2),
-            crate::RECONNECT_MAX,
-        );
-        delay = Some(next);
-        info!(%peer_id, "{}", tr_fmt!("reconnecting in {0}", format!("{next:?}")));
     }
     // Close gracefully instead of dropping the socket: the peer's datagram
     // loop then fails immediately (route cleanup on the serve side is
