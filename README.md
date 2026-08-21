@@ -122,7 +122,7 @@ and exchange candidate addresses before upgrading to a direct path. Run with
 `RUST_LOG=iroh=trace` and look for `Established` / `path_remote=Ip` in the
 logs to confirm whether a given session actually went direct or stayed on
 the relay — that distinction matters when you're reading throughput numbers
-off it (see benchmarking section below).
+off it (see `docs/benchmarks.md`).
 
 One real caveat: skipping pkarr/DNS also skips one source of direct-address
 candidates, so on especially hostile NATs (symmetric NAT on both ends) a
@@ -202,7 +202,7 @@ Also supports `powershell` and `elvish`. Re-run after upgrading if flags change.
   per stream. That's the right default for an I/O-bound forwarder and there's
   no profiling data yet suggesting otherwise. Tuning worker thread count,
   switching to a current-thread runtime, or anything like that is a change
-  you make *in response to* a CPU/latency number from the benchmarks below —
+  you make *in response to* a CPU/latency number from `docs/benchmarks.md` —
   not something to guess at ahead of time.
 
 ## Build
@@ -256,84 +256,20 @@ Output is styled (bold/color) when stdout is a terminal; `--color always|never`
 forces it on/off for scripts and pipes (`auto` is the default and respects
 `NO_COLOR`).
 
-## Local smoke test
+## Testing
 
-`scripts/local-test.sh` runs the full pipeline on localhost against a
-self-hosted relay: relay → serve → connect → a python HTTP/echo target,
-checking an HTTP get through the tunnel and a 100KB byte-identical echo
-round-trip. It expects a release build and an `iroh-relay` server binary
-(default `tools/iroh-relay`, build one with
-`cargo install iroh-relay --features server` and copy it there, or pass the
-path as an argument).
+- `scripts/local-test.sh` — full stream-mode pipeline on localhost against a
+  self-hosted relay (HTTP get + 100KB byte-identical echo).
+- `sudo scripts/tun-loopback-test.sh` — TUN startup, MTU negotiation and
+  route lifecycle on one machine (does **not** exercise the datagram data
+  path; that needs two machines).
+- `cargo test -- --ignored` — e2e tests against a local relay (byte-identical
+  round trip, SIGINT drain, listener port release).
+- `scripts/phase*-{server,client}.sh` — the two-machine real-network harness
+  for NAT traversal, relay throughput, and WiFi↔4G migration (the tables and
+  the force-relay instructions live in the testing doc).
 
-For TUN mode, `sudo scripts/tun-loopback-test.sh` starts a local relay plus
-`tun serve`/`tun connect` on one machine and checks MTU negotiation plus the
-peer-exit route lifecycle (route removed on disconnect, no stale route after
-reconnecting with a different identity). Caveat: both virtual IPs live on
-the same machine, so the kernel's local routing table answers the pings
-without entering the TUN — the script validates process startup, connection
-and MTU negotiation, and route cleanup, but **not** the datagram data path;
-that needs a ping across two machines.
-
-`cargo test -- --ignored` runs `tests/e2e.rs`: it spawns the real
-serve/connect binaries against a local relay with `--ephemeral` identities,
-checks a 128KiB byte-identical round trip through the tunnel, sends SIGINT
-and asserts both processes exit within the drain window (and the listener
-port is released). It's `#[ignore]`d because it needs a release build and
-the `tools/iroh-relay` binary — missing prerequisites are reported and
-skipped, not failed.
-
-## Real-machine phase tests (two machines)
-
-`scripts/phase*-{server,client}.sh` are the harness for the real-network
-tests in `docs/roadmap.md` — NAT traversal (Phase 0), relay throughput
-(Phase 0), and WiFi↔4G migration (Phase 1). Each pair replaces the manual
-"start, sleep, grep, copy the ID" dance that kept breaking on slow n0
-online times and non-English locales:
-
-- the **server** side polls the log until the banner appears (n0 online can
-take up to ~30s — a poll, not a fixed sleep), prints a share box with the
-EndpointId + virtual IP, and stays up until Ctrl+C;
-- the **client** side connects, runs the measurement, and prints a verdict;
-- both sides run with `RUST_LOG=iroh=debug` and `LANG=C` (the app output is
-localized, so banner parsing is locale-independent).
-
-Build a release binary first and run everything with `sudo` (TUN mode):
-
-| test | machine A (serve) | machine B (connect) |
-|---|---|---|
-| NAT matrix — direct or relayed? | `sudo ./scripts/phase0-nat-matrix-server.sh` | `sudo ./scripts/phase0-nat-matrix-client.sh <EndpointId>` |
-| Relay throughput (iperf3) | `sudo ./scripts/phase0-relay-bench-server.sh` | `sudo ./scripts/phase0-relay-bench-client.sh <EndpointId> [serve-public-IP] [--force-relay <peer-ip>]` |
-| WiFi↔4G migration | `sudo ./scripts/phase1-migration-server.sh` | `sudo ./scripts/phase1-migration-client.sh <EndpointId>` |
-
-The bench server auto-starts the two iperf3 servers the client needs (port
-5201 bound to the serve VIP for the tunnel test, port 5202 bound to the
-STUN-detected public IP for the direct control test) and prints the public
-IP it detected so you can pass it to the client.
-
-To force the relay path (e.g. the NAT matrix said "direct" but you want the
-relay numbers), DROP inbound UDP from the peer on both machines — the relay
-connection is TCP, so only the direct hole-punched path dies:
-
-```bash
-# on both machines, with the other machine's public IP
-sudo ./scripts/phase-relay-ctl.sh force-relay <peer-public-ip>
-# ... after the test ...
-sudo ./scripts/phase-relay-ctl.sh clear-relay <peer-public-ip>
-```
-
-The bench client also accepts `--force-relay <peer-public-ip>`, which applies
-its own DROP automatically (and clears it on exit) while printing the exact
-command to run on the serve machine. Caveat: the direct path must die and the
-relay take over *while the session is up* — if iroh tears the session down
-instead of failing over ("peer disconnected" in the logs), apply the DROP on
-both sides *before* connecting for a clean relay-path measurement.
-
-The migration client pings the serve VIP continuously for 40s while you
-switch the connect machine's network (WiFi off/on or hotspot), then reports
-the drop count, iroh's path events, and whether the session survived — a
-handful of dropped pings is the expected migration cost; 100% loss means the
-session was rebuilt, not migrated.
+Prerequisites, caveats and full instructions: `docs/testing.md`.
 
 ## Run
 
@@ -422,83 +358,10 @@ This complements — does not replace — the in-process reconnect: systemd
 restarts a crashed process; the binary itself re-dials a lost QUIC
 connection with exponential backoff without restarting.
 
-## Benchmarking against WireGuard/Tailscale (the actual point of this MVP)
+## Performance
 
-This is the part that matters more than the code: get real numbers before
-building anything else.
-
-1. **Throughput**: run `iperf3 -s` behind `serve --forward 127.0.0.1:5201`,
-   then `iperf3 -c 127.0.0.1 -p <listen port>` through `connect`. Compare
-   against the same two machines connected via Tailscale/WireGuard directly.
-2. **Latency**: `ping` doesn't work through this (it's TCP-only, not IP-layer),
-   so use something like `nc`-based round-trip timing, or a tiny echo
-   client/server, and compare against `ping` over the Tailscale interface as
-   a rough proxy for base latency.
-3. **CPU**: `top`/`htop` on both ends during the iperf3 run — this is where
-   you'll actually see whether the "no TUN, no context switch" theory holds
-   up, or whether QUIC's own userspace crypto overhead eats the savings.
-4. **NAT traversal**: test with both machines on the same LAN (should hole-punch
-   direct) and with one behind CGNAT / symmetric NAT (will likely fall back
-   to n0's relay) — note which one you're actually measuring, since relayed
-   throughput is a different number than direct.
-
-### Loopback baseline (architecture ceiling)
-
-`scripts/bench.sh` measures the stream-forwarding path on a single machine
-(`serve --forward` + `connect --listen`, no SOCKS5 layer) against raw
-loopback TCP, with CPU sampling of both processes. Baseline on this machine
-(kernel 7.1.6, iroh 1.0.3):
-
-| measurement | result |
-|---|---|
-| raw loopback TCP (1 stream) | ~3.9 GB/s |
-| tunnel, 1 stream | ~340-380 MB/s |
-| tunnel, 4 streams (`-P 4`) | ~330 MB/s, but CPU climbs ~1.9 → ~2.9 cores |
-| CPU at 4 streams | serve ~155%, connect ~135% |
-
-Readings: throughput is roughly flat from 1 → 4 streams while CPU keeps
-climbing, which points at a shared per-connection bottleneck (QUIC crypto /
-flow control on one connection) rather than a parallelism problem. In other
-words, on this stack the tunnel sustains ~2.6-3 Gbps per QUIC connection at
-the cost of roughly 2-3 cores of user-space CPU — fine behind a 1 Gbps link,
-the bottleneck on 10 Gbps+. This is exactly the number to re-measure after
-any architecture change (TUN/datagram, io_uring) and on real hardware
-across a real network.
-
-### Multi-connection scaling (does sharding help?)
-
-`scripts/bench-multi.sh` runs N fully independent serve+connect pairs (own
-identity, own UDP socket, own QUIC connection, all confirmed on direct
-paths) to test whether aggregate throughput scales with the number of
-*connections* rather than streams. Same machine, with a raw-TCP control on
-the same interface:
-
-| k connections | tunnel aggregate | per-connection | CPU | raw TCP (same path) |
-|---|---|---|---|---|
-| 1 | 346 MB/s | 346 | ~2 cores | 3.4 GB/s |
-| 2 | 538 MB/s | 269 | ~4.4 cores | — |
-| 4 | 619 MB/s | 155 | ~7.9 cores | 3.7 GB/s |
-| 8 | 647 MB/s | 81 | ~10.2 cores | 3.4 GB/s |
-
-Raw TCP on the same interface scales fine with parallel connections (3.4+
-GB/s at k=1, 4, 8), so the interface, the relay, and the kernel are not the
-shared limit. The QUIC stack aggregate plateaus at ~650 MB/s while CPU keeps
-climbing — a shared resource inside the data path (crypto/memory bandwidth)
-that independent connections all compete for. Consequence: connection
-sharding (MPTCP-style splitting into N QUIC connections) does **not** lift
-this ceiling; only a data-plane change (e.g. WireGuard-style, or accepting
-~5 Gbps) would. Numbers are machine-specific; re-run on real hardware.
-
-Is the ~650 MB/s wall crypto? No — AEAD is cheap on this CPU
-(`openssl speed`): AES-128-GCM ~2.3 GB/s/core and ChaCha20-Poly1305 ~1.5
-GB/s/core at 1300-byte packets (realistic QUIC packet size). The wall is
-QUIC protocol processing (ACK/congestion/stream state machines, userspace
-I/O), not encryption. A WireGuard-style data plane (one AEAD per packet,
-minimal protocol overhead) would almost certainly exceed it — but the ~5
-Gbps ceiling already exceeds typical real links, so that rewrite was
-shelved on ROI grounds, not feasibility. (boringtun could not be run in
-this sandbox: TUN device creation needs CAP_NET_ADMIN.)
-
-Whatever you find, that's the real basis for deciding whether GSO/io_uring/
-LD_PRELOAD work is worth doing next, rather than assuming it from an
-architecture diagram.
+Loopback baseline and multi-connection scaling numbers (throughput, CPU, and
+the "is the ~650 MB/s wall crypto?" analysis) live in `docs/benchmarks.md`.
+Short version: ~2.6-3 Gbps per QUIC connection at the cost of ~2-3
+user-space cores, and connection sharding does **not** lift that ceiling.
+Re-measure after any data-plane change and on real hardware.
