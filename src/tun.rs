@@ -230,24 +230,57 @@ fn set_tun_mtu(tun_name: &str, mtu: u16) -> Result<()> {
     run_ip(&["link", "set", "dev", tun_name, "mtu", &mtu.to_string()])
 }
 
-/// Update the TUN interface MTU if the connection's datagram ceiling has
+/// Raise the TUN interface MTU when the connection's datagram ceiling has
 /// risen since the last check. The initial clamp runs right after the
 /// handshake, when QUIC PMTUD is still at its 1200-byte starting value; as
 /// the path probe converges, `max_datagram_size()` climbs (e.g. 1162 →
 /// 1414), and the interface MTU should follow it up to the user's --mtu
-/// bound. Never lowers the MTU: a drop would mean the path shrank, which
-/// the sender must not exploit after we've already told the peer our limit.
+/// bound.
+///
+/// Deliberately only raises: lowering is driven by the *event* of an actual
+/// oversize packet reaching the send path (see shrink_tun_mtu), never by
+/// this timer. That split gives natural hysteresis — the MTU tracks the
+/// real path ceiling instead of oscillating with every transient PMTUD
+/// wiggle. `max_datagram_size()` is the max payload `send_datagram` will
+/// accept (QUIC framing already subtracted), so the interface MTU can be
+/// set to it directly; no margin constant needed.
 #[cfg(target_os = "linux")]
 fn refresh_tun_mtu(tun_name: &str, user_mtu: u16, conn: &Connection, mtu: &mut u16) -> Result<()> {
     let Some(max_dgram) = conn.max_datagram_size() else {
         return Ok(()); // datagrams gone (shouldn't happen); keep current MTU
     };
-    let candidate = std::cmp::min(user_mtu, max_dgram as u16);
+    let candidate = std::cmp::min(user_mtu, u16::try_from(max_dgram).unwrap_or(u16::MAX));
     if candidate > *mtu {
         *mtu = candidate;
         set_tun_mtu(tun_name, candidate)?;
     }
     Ok(())
+}
+
+/// Lower the TUN interface MTU because the path's datagram ceiling shrank
+/// below it. Real-hardware logs showed a migrated-to path whose PMTUD
+/// converged at 1230 while the interface sat at 1280, making every big
+/// packet a "datagram too large" refusal at the QUIC layer. Event-driven:
+/// only called when an actual oversize packet shows up on the send path, so
+/// it cannot oscillate on its own — the timer raises it back once the path
+/// really supports more. Returns whether the MTU was lowered.
+#[cfg(target_os = "linux")]
+fn shrink_tun_mtu(tun_name: &str, conn: &Connection, mtu: &mut u16) -> Result<bool> {
+    let Some(max_dgram) = conn.max_datagram_size() else {
+        return Ok(false);
+    };
+    let max_dgram = u16::try_from(max_dgram).unwrap_or(u16::MAX);
+    if max_dgram < *mtu {
+        *mtu = max_dgram;
+        set_tun_mtu(tun_name, max_dgram)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn shrink_tun_mtu(_tun_name: &str, _conn: &Connection, _mtu: &mut u16) -> Result<bool> {
+    Ok(false)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -343,8 +376,10 @@ enum SessionEnd {
 /// of the select detects genuine disconnection as an event, so the error
 /// branches just log a warning and keep going.
 ///
-/// Also periodically refreshes the interface MTU upward (see choose_mtu for
-/// why the initial clamp is conservative).
+/// The interface MTU is adjusted in both directions: the timer raises it as
+/// the path's PMTUD converges upward, and the send path lowers it (via
+/// shrink_tun_mtu) when an actual oversize packet shows up after a switch
+/// to a worse path.
 async fn run_datagram_loop(
     tun: &tun2::AsyncDevice,
     tun_name: &str,
@@ -367,6 +402,25 @@ async fn run_datagram_loop(
             }
             r = tun.recv(&mut buf) => {
                 let n = r.context(tr!("reading packet from TUN device"))?;
+                // The interface MTU can lag behind the path's current
+                // datagram ceiling after a path switch (PMTUD re-converges
+                // smaller, e.g. 1280 interface vs 1230 ceiling). Check before
+                // sending so an oversize packet *lowers* the MTU instead of
+                // being refused by the QUIC layer as "datagram too large" on
+                // every send. The packet itself is dropped — TUN mode is
+                // best-effort, the inner protocol retransmits.
+                let ceiling = conn.max_datagram_size().unwrap_or(usize::MAX);
+                if n > ceiling {
+                    if shrink_tun_mtu(tun_name, conn, mtu)? {
+                        warn!(%peer, "{}", tr_fmt!(
+                            "path datagram ceiling dropped to {0}; lowered TUN interface MTU and dropped one packet",
+                            *mtu
+                        ));
+                    } else {
+                        warn!(%peer, "{}", tr!("dropping packet larger than the path datagram ceiling"));
+                    }
+                    continue;
+                }
                 let pkt = Bytes::copy_from_slice(&buf[..n]);
                 if let Err(e) = conn.send_datagram_wait(pkt).await {
                     // The connection is still alive (closed() above would

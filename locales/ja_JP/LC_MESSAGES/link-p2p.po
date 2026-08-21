@@ -514,3 +514,9 @@ msgstr "ヘルプを表示"
 
 msgid "Print version"
 msgstr "バージョンを表示"
+
+msgid "path datagram ceiling dropped to {0}; lowered TUN interface MTU and dropped one packet"
+msgstr "パスのデータグラム上限が {0} に低下しました。TUNインターフェースのMTUを下げ、1パケットを破棄しました"
+
+msgid "dropping packet larger than the path datagram ceiling"
+msgstr "パスのデータグラム上限より大きいパケットを破棄します"
