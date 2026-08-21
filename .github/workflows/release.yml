@@ -37,10 +37,26 @@ jobs:
           tar -czf "$pkg.tar.gz" "$pkg"
           sha256sum "$pkg.tar.gz" > SHA256SUMS
           ls -la "$pkg.tar.gz" SHA256SUMS
+      - name: Extract changelog for this release
+        id: changelog
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          # Everything between "## [<version>]" and the next "## [" heading.
+          body="$(awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" { flag=1; next }
+            flag && $0 ~ "^## \\[" { exit }
+            flag { print }
+          ' CHANGELOG.md)"
+          if [ -n "$body" ]; then
+            printf '%s\n' "$body" > /tmp/release-body.md
+          else
+            printf 'No CHANGELOG entry for %s — see CHANGELOG.md.\n' "$version" > /tmp/release-body.md
+          fi
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             link-p2p-*.tar.gz
             SHA256SUMS
-          generate_release_notes: true
+          body_path: /tmp/release-body.md
