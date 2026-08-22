@@ -1,0 +1,35 @@
+# systemd unit for an iroh relay server.
+#
+# A self-hosted relay replaces n0's public relay, which keeps spamming
+# "Lost connection to relay server: Ping timeout / TLS close_notify" when
+# the local network to n0's free nodes is flaky. Run your own relay on a
+# machine with a stable connection (the same box that runs `tun serve` is
+# fine), and point both link-p2p ends at it with --relay.
+#
+# Setup (one-time):
+#   cargo install iroh-relay --features server      # or build from source
+#   sudo install -m 0755 ~/.cargo/bin/iroh-relay /usr/local/bin/
+#   sudo cp contrib/systemd/iroh-relay.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now iroh-relay
+#
+# It listens on :3340 over plain HTTP (dev mode). The `server` feature also
+# starts a Prometheus metrics endpoint on :9090 (harmless; disable it via a
+# config file if that port collides). Plain HTTP is fine for a relay you and
+# your peers reach directly; for anything exposed to the public internet,
+# configure TLS instead (https_bind_addr + cert in a config file — see the
+# iroh-relay docs), the default dev mode is intentionally not for that.
+
+[Unit]
+Description=iroh relay server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/iroh-relay --dev
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

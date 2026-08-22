@@ -129,6 +129,16 @@ candidates, so on especially hostile NATs (symmetric NAT on both ends) a
 custom relay may hole-punch less reliably than the default n0 path. Not a
 concern for same-LAN or typical home-NAT testing.
 
+**Why self-host?** n0's public relay is a free shared service; on a flaky
+link the relay WebSocket is the first thing to drop, and iroh logs it as
+`Lost connection to relay server: Ping timeout` / `peer closed connection
+without sending TLS close_notify`. Those `WARN` lines are iroh's internals,
+not a bug in this tool, and they stop only when the relay link itself is
+stable. Pointing both ends at your own relay (a box with a steady uplink)
+is the real fix — see `contrib/systemd/iroh-relay.service` for a one-liner
+way to run one as a service. `--relay http://<that-box>:3340` then replaces
+n0 entirely.
+
 ### Logging
 
 `RUST_LOG` controls both this tool's own logs and iroh's internal ones, e.g.:
@@ -376,6 +386,12 @@ config line.
 This complements — does not replace — the in-process reconnect: systemd
 restarts a crashed process; the binary itself re-dials a lost QUIC
 connection with exponential backoff without restarting.
+
+To also self-host the relay (so the `--relay` URLs above point at a machine
+*you* control instead of n0's public relay), use the sibling unit
+`contrib/systemd/iroh-relay.service` — `cargo install iroh-relay --features
+server`, copy the unit in, `systemctl enable --now iroh-relay`, then put
+`--relay http://<relay-host>:3340` in your `link-p2p@<name>.conf` lines.
 
 ## Performance
 
