@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `contrib/systemd/iroh-relay.service` template unit to run a self-hosted
+  relay as a service. Pointing both ends at `--relay http://<your-relay>:3340`
+  replaces n0's public relay — the source of the recurring
+  `Lost connection to relay server: Ping timeout` / `TLS close_notify`
+  warnings (iroh internals, not this tool's bug), which only stop when the
+  relay link itself is stable.
+
+### Fixed
+
+- `ping` to a `tun serve` node now works: `run_tun_serve` only registered
+  `TUN_ALPN` on its endpoint, and iroh rejects connections whose ALPN is not
+  in `Builder::alpns` at TLS negotiation — so the ping dispatch was dead
+  code. `PING_ALPN` is now registered alongside `TUN_ALPN`.
+- TUN mode no longer spams a per-packet `warn!` for oversized datagrams
+  after an MTU drop (a local sender keeps pushing old-size packets until it
+  notices; TUN has no ICMP feedback to shrink it). Drops are now counted
+  and flushed as one summary line on the existing 2s refresh tick.
+
 ## [0.1.0] - 2026-08-21
 
 First release. A minimal TCP-over-QUIC forwarder on iroh 1.0 with a
