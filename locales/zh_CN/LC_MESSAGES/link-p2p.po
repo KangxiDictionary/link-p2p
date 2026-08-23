@@ -517,3 +517,42 @@ msgstr "路径数据报上限降至 {0}，已下调 TUN 接口 MTU 并丢弃一�
 
 msgid "dropped {0} oversized packets in the last 2s (interface MTU is {1})"
 msgstr "最近 2 秒内丢弃了 {0} 个超限数据包（接口 MTU 为 {1}）"
+
+msgid "QUIC keepalive interval in seconds (default 5). Keeps NAT UDP mappings alive; the typical home-router mapping expires after 20-30s of idle. Raise it on high-latency links, lower it where NAT timeouts are aggressive."
+msgstr "QUIC 保活间隔（秒，默认 5）。用于维持 NAT 的 UDP 映射；家庭路由器的映射通常在空闲 20-30 秒后过期。高延迟链路上可调大，NAT 超时激进的网络可调小。"
+
+msgid "QUIC max idle timeout in seconds (default 30). After this long without traffic the peer is declared dead and the connection re-dialed. Raise it for lossy / high-latency links so a brief outage doesn't tear the connection down."
+msgstr "QUIC 最大空闲超时（秒，默认 30）。超过此时间没有流量即判定对端已断开并重新拨号。在丢包/高延迟链路上调大，避免短暂中断就拆掉连接。"
+
+msgid "Only accept P2P connections from these EndpointIds (repeatable). Default: accept anyone who knows this node's EndpointId. Strongly recommended when the node is reachable from untrusted networks."
+msgstr "只接受来自这些 EndpointId 的 P2P 连接（可重复指定）。默认接受任何知道本节点 EndpointId 的对端。当节点暴露在不可信网络时强烈建议设置。"
+
+msgid "In proxy mode, allow forwarding to private/loopback/link-local addresses (blocked by default to prevent SSRF — a malicious peer could otherwise make this node reach into your LAN or cloud metadata endpoints such as 169.254.169.254)."
+msgstr "在代理模式下，允许转发到私网/回环/链路本地地址（默认阻止，以防 SSRF——恶意对端可能借此让本节点访问你的内网或云元数据端点，如 169.254.169.254）。"
+
+msgid "Direct address hint(s) for the peer (repeatable), e.g. its public ip:port or a LAN address. Dialed directly, skipping discovery — use it when you exchanged addresses out-of-band and want no DNS/pkarr lookup (also faster reconnects). May be combined with --relay, which then stays as the fallback path."
+msgstr "对端的直连地址提示（可重复指定），例如其公网 ip:port 或局域网地址。直接拨号、跳过发现——适用于双方线下交换地址、不想走 DNS/pkarr 查询的场景（重连也更快）。可与 --relay 组合，此时 relay 作为后备路径。"
+
+msgid "Direct address hint(s) for the peer (repeatable) — see `connect --to-addr`. Dialed directly, skipping discovery."
+msgstr "对端的直连地址提示（可重复指定）——参见 `connect --to-addr`。直接拨号、跳过发现。"
+
+msgid "'{0}' is not a valid EndpointId in --allow"
+msgstr "'{0}' 不是合法的 EndpointId（--allow）"
+
+msgid "only accepting connections from {0} allowed peer(s)"
+msgstr "只接受来自 {0} 个已授权对端的连接"
+
+msgid "proxy targets in private/loopback ranges are blocked (use --allow-private to permit)"
+msgstr "代理目标在私网/回环范围内被阻止（可用 --allow-private 放行）"
+
+msgid "rejecting connection: peer is not in the --allow list"
+msgstr "拒绝连接：对端不在 --allow 列表中"
+
+msgid "target {0} is in a private/loopback/link-local range; blocked in proxy mode (use --allow-private to permit)"
+msgstr "目标 {0} 属于私网/回环/链路本地范围；代理模式下已阻止（可用 --allow-private 放行）"
+
+msgid "connection slot closed"
+msgstr "连接槽已关闭"
+
+msgid "dialing the peer's direct address hint(s): {0}"
+msgstr "正在拨号对端的直连地址提示：{0}"

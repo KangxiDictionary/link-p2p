@@ -19,8 +19,9 @@ mod socks5;
 mod style;
 mod tun;
 
+use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -34,10 +35,11 @@ use iroh::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
 use tracing::{info, warn, Instrument};
+use zeroize::Zeroize;
 
 use crate::i18n::{tr, tr_fmt};
 use crate::style::{ColorMode, Styler};
@@ -121,6 +123,20 @@ struct Cli {
     /// jq/CI pipelines).
     #[arg(long, global = true, value_enum, default_value_t = LogFormat::Text)]
     log_format: LogFormat,
+
+    /// QUIC keepalive interval in seconds (default 5). Keeps NAT UDP
+    /// mappings alive; the typical home-router mapping expires after
+    /// 20-30s of idle. Raise it on high-latency links, lower it where
+    /// NAT timeouts are aggressive.
+    #[arg(long, global = true, default_value_t = 5)]
+    keepalive: u64,
+
+    /// QUIC max idle timeout in seconds (default 30). After this long
+    /// without traffic the peer is declared dead and the connection
+    /// re-dialed. Raise it for lossy / high-latency links so a brief
+    /// outage doesn't tear the connection down.
+    #[arg(long, global = true, default_value_t = 30)]
+    idle_timeout: u64,
 }
 
 /// Log output format.
@@ -142,6 +158,17 @@ enum Command {
         /// --socks5-listen`. Conflicts with --forward.
         #[arg(long, conflicts_with = "forward")]
         proxy: bool,
+        /// Only accept P2P connections from these EndpointIds (repeatable).
+        /// Default: accept anyone who knows this node's EndpointId. Strongly
+        /// recommended when the node is reachable from untrusted networks.
+        #[arg(long)]
+        allow: Vec<String>,
+        /// In proxy mode, allow forwarding to private/loopback/link-local
+        /// addresses (blocked by default to prevent SSRF — a malicious peer
+        /// could otherwise make this node reach into your LAN or cloud
+        /// metadata endpoints such as 169.254.169.254).
+        #[arg(long)]
+        allow_private: bool,
     },
     /// Dial a remote node and expose it as a local TCP listener.
     Connect {
@@ -156,6 +183,13 @@ enum Command {
         /// `serve --proxy`. Conflicts with --listen.
         #[arg(long, conflicts_with = "listen")]
         socks5_listen: Option<SocketAddr>,
+        /// Direct address hint(s) for the peer (repeatable), e.g. its public
+        /// ip:port or a LAN address. Dialed directly, skipping discovery —
+        /// use it when you exchanged addresses out-of-band and want no
+        /// DNS/pkarr lookup (also faster reconnects). May be combined with
+        /// --relay, which then stays as the fallback path.
+        #[arg(long = "to-addr")]
+        to_addr: Vec<SocketAddr>,
     },
     /// Make two machines reachable at the IP layer over QUIC datagrams.
     ///
@@ -173,6 +207,10 @@ enum Command {
         /// The remote node's EndpointId (printed by `serve` on startup)
         #[arg(long)]
         to: String,
+        /// Direct address hint(s) for the peer (repeatable) — see `connect
+        /// --to-addr`. Dialed directly, skipping discovery.
+        #[arg(long = "to-addr")]
+        to_addr: Vec<SocketAddr>,
     },
     /// Print a shell completion script to stdout.
     ///
@@ -226,6 +264,10 @@ enum TunCommand {
         /// 1280 are refused.
         #[arg(long, default_value_t = 1280)]
         mtu: u16,
+        /// Direct address hint(s) for the peer (repeatable) — see `connect
+        /// --to-addr`. Dialed directly, skipping discovery.
+        #[arg(long = "to-addr")]
+        to_addr: Vec<SocketAddr>,
     },
 }
 
@@ -295,6 +337,14 @@ fn localized_command() -> clap::Command {
             "log_format",
             |a| a.help(tr!("Log output format: text (human-readable) or json (structured, for jq/CI pipelines).")),
         )
+        .mut_arg(
+            "keepalive",
+            |a| a.help(tr!("QUIC keepalive interval in seconds (default 5). Keeps NAT UDP mappings alive; the typical home-router mapping expires after 20-30s of idle. Raise it on high-latency links, lower it where NAT timeouts are aggressive.")),
+        )
+        .mut_arg(
+            "idle_timeout",
+            |a| a.help(tr!("QUIC max idle timeout in seconds (default 30). After this long without traffic the peer is declared dead and the connection re-dialed. Raise it for lossy / high-latency links so a brief outage doesn't tear the connection down.")),
+        )
         .mut_subcommand("serve", |s| {
             s.disable_help_flag(true)
                 .arg(help_arg())
@@ -306,6 +356,14 @@ fn localized_command() -> clap::Command {
                 .mut_arg(
                     "proxy",
                     |a| a.help(tr!("Generic proxy mode: dial the address from each stream's header instead of a fixed --forward target. Pairs with `connect --socks5-listen`.")),
+                )
+                .mut_arg(
+                    "allow",
+                    |a| a.help(tr!("Only accept P2P connections from these EndpointIds (repeatable). Default: accept anyone who knows this node's EndpointId. Strongly recommended when the node is reachable from untrusted networks.")),
+                )
+                .mut_arg(
+                    "allow_private",
+                    |a| a.help(tr!("In proxy mode, allow forwarding to private/loopback/link-local addresses (blocked by default to prevent SSRF — a malicious peer could otherwise make this node reach into your LAN or cloud metadata endpoints such as 169.254.169.254).")),
                 )
         })
         .mut_subcommand("connect", |s| {
@@ -323,6 +381,10 @@ fn localized_command() -> clap::Command {
                 .mut_arg(
                     "socks5_listen",
                     |a| a.help(tr!("Speak SOCKS5 (no-auth, CONNECT only) on this local address; local clients can then reach any destination through the remote `serve --proxy`.")),
+                )
+                .mut_arg(
+                    "to_addr",
+                    |a| a.help(tr!("Direct address hint(s) for the peer (repeatable), e.g. its public ip:port or a LAN address. Dialed directly, skipping discovery — use it when you exchanged addresses out-of-band and want no DNS/pkarr lookup (also faster reconnects). May be combined with --relay, which then stays as the fallback path.")),
                 )
         })
         .mut_subcommand("tun", |s| {
@@ -364,6 +426,10 @@ fn localized_command() -> clap::Command {
                             "mtu",
                             |a| a.help(tr!("Upper bound for the TUN interface MTU (default 1280). The final MTU is min(this, the negotiated QUIC datagram max); values above 1280 are refused.")),
                         )
+                        .mut_arg(
+                            "to_addr",
+                            |a| a.help(tr!("Direct address hint(s) for the peer (repeatable) — see `connect --to-addr`. Dialed directly, skipping discovery.")),
+                        )
                 })
         })
         .mut_subcommand("ping", |s| {
@@ -373,6 +439,10 @@ fn localized_command() -> clap::Command {
                 .mut_arg(
                     "to",
                     |a| a.help(tr!("The remote node's EndpointId (printed by `serve` on startup)")),
+                )
+                .mut_arg(
+                    "to_addr",
+                    |a| a.help(tr!("Direct address hint(s) for the peer (repeatable) — see `connect --to-addr`. Dialed directly, skipping discovery.")),
                 )
         })
         .mut_subcommand("completions", |s| {
@@ -504,15 +574,34 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
     };
 
     match cli.command {
-        Command::Serve { forward, proxy } => {
+        Command::Serve {
+            forward,
+            proxy,
+            allow,
+            allow_private,
+        } => {
             if !proxy && forward.is_none() {
                 anyhow::bail!(tr!("serve requires either --forward or --proxy"));
             }
+            // Parse the --allow whitelist up front so a typo'd EndpointId
+            // fails before we bind and wait for the network.
+            let allowed = allow
+                .iter()
+                .map(|s| {
+                    s.parse()
+                        .with_context(|| tr_fmt!("'{0}' is not a valid EndpointId in --allow", s))
+                })
+                .collect::<Result<Vec<_>>>()?;
             run_serve(
                 secret_key,
                 forward,
+                proxy,
+                allowed,
+                allow_private,
                 cli.relay.as_deref(),
                 cli.max_conns,
+                Duration::from_secs(cli.keepalive),
+                Duration::from_secs(cli.idle_timeout),
                 styler,
             )
             .await
@@ -521,6 +610,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             to,
             listen,
             socks5_listen,
+            to_addr,
         } => {
             if listen.is_none() && socks5_listen.is_none() {
                 anyhow::bail!(tr!("connect requires either --listen or --socks5-listen"));
@@ -531,7 +621,10 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                 listen,
                 socks5_listen,
                 cli.relay.as_deref(),
+                to_addr,
                 cli.max_conns,
+                Duration::from_secs(cli.keepalive),
+                Duration::from_secs(cli.idle_timeout),
                 styler,
             )
             .await
@@ -551,16 +644,51 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             match command {
                 TunCommand::Serve { tun_ip, mtu } => {
                     tun::validate_mtu(mtu)?;
-                    tun::run_tun_serve(secret_key, tun_ip, mtu, cli.relay.as_deref(), styler).await
+                    tun::run_tun_serve(
+                        secret_key,
+                        tun_ip,
+                        mtu,
+                        cli.relay.as_deref(),
+                        Duration::from_secs(cli.keepalive),
+                        Duration::from_secs(cli.idle_timeout),
+                        styler,
+                    )
+                    .await
                 }
-                TunCommand::Connect { to, tun_ip, mtu } => {
+                TunCommand::Connect {
+                    to,
+                    tun_ip,
+                    mtu,
+                    to_addr,
+                } => {
                     tun::validate_mtu(mtu)?;
-                    tun::run_tun_connect(secret_key, &to, tun_ip, mtu, cli.relay.as_deref(), styler)
-                        .await
+                    tun::run_tun_connect(
+                        secret_key,
+                        &to,
+                        tun_ip,
+                        mtu,
+                        cli.relay.as_deref(),
+                        to_addr,
+                        Duration::from_secs(cli.keepalive),
+                        Duration::from_secs(cli.idle_timeout),
+                        styler,
+                    )
+                    .await
                 }
             }
         }
-        Command::Ping { to } => run_ping(secret_key, &to, cli.relay.as_deref(), styler).await,
+        Command::Ping { to, to_addr } => {
+            run_ping(
+                secret_key,
+                &to,
+                cli.relay.as_deref(),
+                to_addr,
+                Duration::from_secs(cli.keepalive),
+                Duration::from_secs(cli.idle_timeout),
+                styler,
+            )
+            .await
+        }
         Command::Completions { .. } => unreachable!("handled above"),
         Command::Help { .. } => unreachable!("handled above"),
     }
@@ -656,26 +784,37 @@ fn migrate_identity(from: &Path, to: &Path) -> Result<()> {
 /// a private key, and `std::fs::write` would otherwise create it with the
 /// default umask-derived permissions (usually 0644, world-readable).
 fn load_or_create_secret_key(path: &Path) -> Result<SecretKey> {
-    if let Ok(hex) = std::fs::read_to_string(path) {
-        let hex = hex.trim();
-        if hex.len() != 64 {
-            anyhow::bail!(tr_fmt!(
-                "identity file exists but has unexpected length {0} (expected 64 hex chars)",
-                hex.len()
-            ));
-        }
-        let mut bytes = [0u8; 32];
-        for i in 0..32 {
-            bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-                .context(tr!("identity file exists but contains non-hex characters"))?;
-        }
-        // Also harden pre-existing files (older versions wrote them 0644).
-        harden_key_permissions(path)?;
-        return Ok(SecretKey::from_bytes(&bytes));
+    if let Ok(mut hex) = std::fs::read_to_string(path) {
+        // hex and bytes hold the raw key material; wipe them on every exit
+        // path. The trim() below borrows, so there's exactly one mutable
+        // copy to zeroize, not a second heap allocation.
+        let result = (|| -> Result<SecretKey> {
+            let hex = hex.trim();
+            if hex.len() != 64 {
+                anyhow::bail!(tr_fmt!(
+                    "identity file exists but has unexpected length {0} (expected 64 hex chars)",
+                    hex.len()
+                ));
+            }
+            let mut bytes = [0u8; 32];
+            for i in 0..32 {
+                bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+                    .context(tr!("identity file exists but contains non-hex characters"))?;
+            }
+            // Also harden pre-existing files (older versions wrote them 0644).
+            harden_key_permissions(path)?;
+            let key = SecretKey::from_bytes(&bytes);
+            bytes.zeroize();
+            Ok(key)
+        })();
+        hex.zeroize();
+        return result;
     }
     let key = SecretKey::generate();
-    let hex: String = key.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
-    write_key_file(path, &hex)?;
+    let mut hex: String = key.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    let written = write_key_file(path, &hex);
+    hex.zeroize();
+    written?;
     Ok(key)
 }
 
@@ -746,9 +885,15 @@ async fn wait_online(endpoint: &Endpoint) -> Result<()> {
 ///
 /// With `relay: None` this uses [`presets::N0`]: n0's public relay servers
 /// plus DNS/pkarr address discovery. With `relay: Some(url)` it uses only
-/// that relay (self-hosted), skipping n0's discovery entirely.
-fn build_endpoint(secret_key: SecretKey, relay: Option<&str>) -> Result<iroh::endpoint::Builder> {
-    let transport = transport_config()?;
+/// that relay (self-hosted), skipping n0's discovery entirely — which also
+/// means nothing about this node is published to iroh.link.
+fn build_endpoint(
+    secret_key: SecretKey,
+    relay: Option<&str>,
+    keepalive: Duration,
+    idle_timeout: Duration,
+) -> Result<iroh::endpoint::Builder> {
+    let transport = transport_config(keepalive, idle_timeout)?;
     match relay {
         Some(relay_url) => {
             // Minimal sets only the mandatory crypto provider; we configure
@@ -766,6 +911,37 @@ fn build_endpoint(secret_key: SecretKey, relay: Option<&str>) -> Result<iroh::en
     }
 }
 
+/// Build the [`EndpointAddr`] used to dial a peer: the peer's EndpointId,
+/// optionally pinned down by a custom relay URL and/or out-of-band direct
+/// address hints (`--to-addr`).
+///
+/// Order of preference is up to iroh: the direct IP hints are tried first
+/// when reachable; the relay (if given) and discovery (if no relay is given)
+/// act as fallbacks for NAT traversal. Passing only direct hints and no
+/// relay means no DNS/pkarr lookup happens at all — the peer is dialed
+/// straight through the given addresses.
+fn build_dial_addr(
+    peer_id: EndpointId,
+    relay: Option<&str>,
+    to_addr: &[SocketAddr],
+) -> Result<EndpointAddr> {
+    let mut addr = match relay {
+        Some(relay_url) => {
+            let relay_url = relay_url
+                .parse()
+                .with_context(|| tr_fmt!("'{0}' is not a valid RelayUrl", relay_url))?;
+            EndpointAddr::new(peer_id).with_relay_url(relay_url)
+        }
+        // Default path: rely on n0's address discovery (DNS/pkarr) to find
+        // where the peer is — unless direct hints below already say where.
+        None => EndpointAddr::from(peer_id),
+    };
+    for a in to_addr {
+        addr = addr.with_ip_addr(*a);
+    }
+    Ok(addr)
+}
+
 /// QUIC transport parameters shared by every mode.
 ///
 /// The keepalive interval keeps NAT UDP mappings alive: they typically
@@ -777,10 +953,14 @@ fn build_endpoint(secret_key: SecretKey, relay: Option<&str>) -> Result<iroh::en
 /// window lets the peer survive brief path switches (iroh connection
 /// migration) and relay hiccups without being declared dead, while still
 /// detecting a genuinely gone peer within a reasonable time.
-fn transport_config() -> Result<QuicTransportConfig> {
+///
+/// Both are CLI-tunable (`--keepalive`, `--idle-timeout`) because the right
+/// value depends on the network: aggressive home-router NATs want a shorter
+/// keepalive, high-latency or lossy links want a longer idle timeout.
+fn transport_config(keepalive: Duration, idle_timeout: Duration) -> Result<QuicTransportConfig> {
     Ok(QuicTransportConfig::builder()
-        .keep_alive_interval(Duration::from_secs(5))
-        .max_idle_timeout(Some(Duration::from_secs(30).try_into()?))
+        .keep_alive_interval(keepalive)
+        .max_idle_timeout(Some(idle_timeout.try_into()?))
         .build())
 }
 
@@ -789,14 +969,20 @@ fn transport_config() -> Result<QuicTransportConfig> {
 // fixed local TCP target.
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)] // CLI entry point; explicit config beats a grab-bag struct
 async fn run_serve(
     secret_key: SecretKey,
     forward: Option<SocketAddr>,
+    proxy: bool,
+    allowed: Vec<EndpointId>,
+    allow_private: bool,
     relay: Option<&str>,
     max_conns: usize,
+    keepalive: Duration,
+    idle_timeout: Duration,
     styler: Styler,
 ) -> Result<()> {
-    let endpoint = build_endpoint(secret_key, relay)?
+    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout)?
         .alpns(vec![ALPN.to_vec(), PING_ALPN.to_vec()])
         .bind()
         .await
@@ -817,6 +1003,25 @@ async fn run_serve(
             ))
         ),
     }
+    // The whitelist is an important security property; surface it in the
+    // banner instead of hiding it in --help.
+    if !allowed.is_empty() {
+        println!(
+            "  {}",
+            styler.info(&tr_fmt!(
+                "only accepting connections from {0} allowed peer(s)",
+                allowed.len()
+            ))
+        );
+    }
+    if proxy && !allow_private {
+        println!(
+            "  {}",
+            styler.warn(&tr!(
+                "proxy targets in private/loopback ranges are blocked (use --allow-private to permit)"
+            ))
+        );
+    }
     println!(
         "  {}",
         styler.dim(&tr!(
@@ -833,8 +1038,23 @@ async fn run_serve(
     let tasks: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
     let handler = ForwardHandler {
         target: forward,
+        proxy,
+        allow_private,
+        allowed: if allowed.is_empty() {
+            None
+        } else {
+            Some(Arc::new(allowed.into_iter().collect()))
+        },
         // 0 = unlimited. usize::MAX keeps the acquire() call shape uniform.
         semaphore: Arc::new(Semaphore::new(if max_conns == 0 {
+            usize::MAX
+        } else {
+            max_conns
+        })),
+        // A second, independent cap on *connections* (not streams): an idle
+        // connection costs memory + an accept task even without any stream,
+        // so bound how many such connections a flood of dials can open.
+        conn_semaphore: Arc::new(Semaphore::new(if max_conns == 0 {
             usize::MAX
         } else {
             max_conns
@@ -864,13 +1084,32 @@ async fn run_serve(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+/// Reject a connection with a QUIC close frame instead of silently dropping
+/// it, so the peer sees a decisive error rather than a timeout. Best-effort:
+/// if the connection is already dead, there's nothing to close.
+fn reject_connection(connection: &Connection, peer: EndpointId) {
+    warn!(%peer, "{}", tr!("rejecting connection: peer is not in the --allow list"));
+    connection.close(VarInt::from_u32(0), b"peer not allowed");
+}
+
+#[derive(Debug)]
 struct ForwardHandler {
     /// Fixed `--forward` target; `None` means `--proxy` mode where the
     /// destination comes from each stream's header.
     target: Option<SocketAddr>,
+    /// True when running in `--proxy` mode (target comes from the header).
+    proxy: bool,
+    /// In proxy mode, allow targets in private/loopback/link-local ranges
+    /// (blocked by default — SSRF guard, see check_proxy_target).
+    allow_private: bool,
+    /// Peer whitelist: `None` accepts anyone (`serve` without `--allow`),
+    /// `Some(set)` rejects every connection whose EndpointId is not in it.
+    allowed: Option<Arc<HashSet<EndpointId>>>,
     /// Bounds the number of concurrently forwarded streams.
     semaphore: Arc<Semaphore>,
+    /// Bounds the number of concurrently *open connections* (idle ones
+    /// included), independent of the stream cap.
+    conn_semaphore: Arc<Semaphore>,
     /// Every spawned per-stream forwarder, so Ctrl+C can drain them
     /// (bounded, see DRAIN_TIMEOUT) instead of cutting them off mid-flush.
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
@@ -881,10 +1120,31 @@ impl ProtocolHandler for ForwardHandler {
         let peer = connection.remote_id();
         info!(%peer, "{}", tr!("connection opened"));
 
+        // Authorization: with `--allow`, only whitelisted peers get past this
+        // point. iroh's QUIC handshake already authenticated the peer's key
+        // (remote_id is its public identity), so this is a real check, not a
+        // claim. Close the connection so the peer learns immediately.
+        if let Some(allowed) = &self.allowed {
+            if !allowed.contains(&peer) {
+                reject_connection(&connection, peer);
+                return Ok(());
+            }
+        }
+
+        // Bound concurrent *connections* (not just streams): a flood of idle
+        // dials would otherwise each hold an accept task + connection state
+        // forever. Acquired before the accept loop; released when the whole
+        // connection ends.
+        let _conn_permit = match self.conn_semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => return Ok(()), // semaphore closed; shouldn't happen
+        };
+
         // One QUIC connection can carry many independent streams. Each stream
         // here corresponds to one TCP connection on the far side (see
         // run_connect below), so we keep accepting streams until the peer
         // closes the whole connection.
+        spawn_path_stats_logger(connection.clone(), peer);
         loop {
             // Bound the number of concurrently forwarded streams. We acquire
             // the permit *before* accept_bi so a hostile peer flooding streams
@@ -907,11 +1167,15 @@ impl ProtocolHandler for ForwardHandler {
                 }
             };
             let target = self.target;
+            let proxy = self.proxy;
+            let allow_private = self.allow_private;
             let task = tokio::spawn(async move {
                 // The permit lives as long as this stream does; dropping it
                 // after handle_forward_stream frees the slot.
                 let _permit = permit;
-                if let Err(e) = handle_forward_stream(target, send, recv).await {
+                if let Err(e) =
+                    handle_forward_stream(target, proxy, allow_private, send, recv).await
+                {
                     warn!(%peer, error = %e, "{}", tr!("stream error"));
                 }
             });
@@ -953,22 +1217,98 @@ impl ProtocolHandler for PingHandler {
 /// Dial the target and pipe bytes between it and the given QUIC stream.
 ///
 /// With a fixed `--forward` target, dial it directly (backwards compatible
-/// with plain `connect --listen`). In `--proxy` mode (`forward: None`) read
+/// with plain `connect --listen`). In `--proxy` mode (`proxy: true`) read
 /// the target header off the stream first — the header was written by the
 /// peer's `connect --socks5-listen`.
 async fn handle_forward_stream(
     forward: Option<SocketAddr>,
+    proxy: bool,
+    allow_private: bool,
     send: SendStream,
     mut recv: RecvStream,
 ) -> Result<()> {
     let target = match forward {
         Some(addr) => addr,
-        None => socks5::read_target(&mut recv).await?.resolve().await?,
+        None => {
+            if !proxy {
+                unreachable!("called without a target and not in proxy mode");
+            }
+            let target = socks5::read_target(&mut recv).await?.resolve().await?;
+            check_proxy_target(target, allow_private)?;
+            target
+        }
     };
     let tcp = TcpStream::connect(target)
         .await
         .with_context(|| tr_fmt!("connecting to {0}", target))?;
     pipe_streams(tcp, send, recv).await
+}
+
+/// SSRF guard for `--proxy` mode: a remote peer must not be able to make
+/// this node reach into private networks (the whole point of the guard —
+/// 169.254.169.254 cloud metadata, LAN services, loopback). The check runs
+/// on the *resolved* address so domain names can't smuggle a private IP in.
+/// `--allow-private` lifts it for trusted setups.
+fn check_proxy_target(target: SocketAddr, allow_private: bool) -> Result<()> {
+    if !allow_private && is_blocked_target(target) {
+        bail!(tr_fmt!(
+            "target {0} is in a private/loopback/link-local range; blocked in proxy mode (use --allow-private to permit)",
+            target
+        ));
+    }
+    Ok(())
+}
+
+/// Whether an address is in a range a proxy must not dial by default:
+/// loopback, private (RFC 1918), link-local, unspecified, multicast and
+/// broadcast for IPv4; loopback, unspecified, multicast, ULA and link-local
+/// for IPv6.
+fn is_blocked_target(addr: SocketAddr) -> bool {
+    match addr.ip() {
+        IpAddr::V4(ip) => {
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || ip.is_broadcast()
+        }
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || (ip.segments()[0] & 0xfe00) == 0xfc00 // ULA fc00::/7
+                || (ip.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+        }
+    }
+}
+
+/// Log the connection's path quality every 30s until it closes, so a
+/// long-running tunnel is diagnosable without waiting for a failure: UDP
+/// datagram counters that grow mean a direct path is carrying traffic;
+/// flat UDP + growing relay means everything is going through the relay;
+/// lost_packets/bytes is the connection-level loss. Debug level — this is
+/// an observability aid, not something to spam by default.
+fn spawn_path_stats_logger(connection: Connection, peer: EndpointId) {
+    tokio::spawn(async move {
+        let mut tick = time::interval(Duration::from_secs(30));
+        tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    let s = connection.stats();
+                    tracing::debug!(%peer,
+                        udp_tx = s.udp_tx.datagrams,
+                        udp_rx = s.udp_rx.datagrams,
+                        lost_packets = s.lost_packets,
+                        lost_bytes = s.lost_bytes,
+                        "path stats (growing udp_tx/rx means the direct path is in use)"
+                    );
+                }
+                _ = connection.closed() => break,
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1011,38 +1351,64 @@ impl Backoff {
     }
 }
 
-/// How often a stream waiting for a reconnect re-checks the connection slot.
-/// Polling beats notify-waiting here: a notification racing past the wait
-/// registration would hang the waiter, a poll cannot miss. 200ms is a
-/// negligible price next to the >=1s reconnect backoff.
-const RECONNECT_POLL: Duration = Duration::from_millis(200);
-
 /// The live QUIC connection slot shared between the reconnect watcher (the
 /// only writer) and the per-stream forwarders (readers). `None` means "the
 /// connection is down and we're reconnecting — new streams wait".
+///
+/// A `watch` channel (not a lock + poll): waiters are woken the moment the
+/// watcher swaps in the new connection, so a client that arrives during a
+/// reconnect window is served with zero polling delay instead of up to
+/// RECONNECT_POLL of stale sleep. `watch::Sender::send` requires the value
+/// to be cloneable; `Connection` is cheap to clone (an Arc inside).
 #[derive(Clone)]
-struct ConnSlot(Arc<RwLock<Option<Connection>>>);
+struct ConnSlot(Arc<watch::Sender<Option<Connection>>>);
+
+impl ConnSlot {
+    fn new(initial: Option<Connection>) -> Self {
+        let (tx, _rx) = watch::channel(initial);
+        Self(Arc::new(tx))
+    }
+
+    fn replace(&self, conn: Option<Connection>) {
+        // send() returns Err only when all receivers are dropped — at that
+        // point nobody is waiting for a reconnect anyway.
+        let _ = self.0.send(conn);
+    }
+}
 
 /// Open a bidi stream on the current connection, waiting through reconnect
 /// windows instead of failing the local client.
 ///
-/// - Slot empty (reconnecting): poll until the watcher replaces it.
-/// - `open_bi` fails and the connection is closed: the watcher will redial;
-///   wait rather than fail the stream.
+/// - Slot empty (reconnecting): wait on the watch channel — the watcher's
+///   `replace(Some(..))` wakes us the instant the new connection lands.
+/// - `open_bi` fails and the connection is closed: same wait — the watcher
+///   will redial and swap the slot.
 /// - `open_bi` fails on a still-alive connection (e.g. stream limit): give
 ///   up this stream only.
 async fn open_stream_wait(slot: &ConnSlot) -> Result<(SendStream, RecvStream)> {
     loop {
-        let conn = slot.0.read().await.as_ref().cloned();
+        // A fresh receiver per attempt: starts at the current value, so if
+        // a connection is already present we never wait at all.
+        let mut rx = slot.0.subscribe();
+        let conn = (*rx.borrow_and_update()).clone();
         let Some(conn) = conn else {
-            tokio::time::sleep(RECONNECT_POLL).await;
+            // Reconnecting: wait for the watcher to swap in a connection.
+            // Err means the sender was dropped (process shutting down) — bail.
+            rx.changed()
+                .await
+                .map_err(|_| anyhow::anyhow!(tr!("connection slot closed")))?;
             continue;
         };
         match conn.open_bi().await {
             Ok(pair) => return Ok(pair),
             Err(e) if conn.close_reason().is_some() => {
                 warn!(error = %e, "{}", tr!("connection lost; waiting for reconnect"));
-                tokio::time::sleep(RECONNECT_POLL).await;
+                // The current value is a dead connection; wait until the
+                // watcher replaces it (changed() fires only on a write, so
+                // this can't spin).
+                rx.changed()
+                    .await
+                    .map_err(|_| anyhow::anyhow!(tr!("connection slot closed")))?;
             }
             Err(e) => return Err(e.into()),
         }
@@ -1070,7 +1436,7 @@ fn spawn_reconnect_watcher(
         let mut backoff = Backoff::new(RECONNECT_BASE, RECONNECT_MAX);
         loop {
             // Wait for the current connection to die (none yet = dial now).
-            let current = slot.0.read().await.as_ref().cloned();
+            let current = (*slot.0.subscribe().borrow_and_update()).clone();
             if let Some(conn) = current {
                 conn.closed().await;
             }
@@ -1078,7 +1444,7 @@ fn spawn_reconnect_watcher(
             loop {
                 match endpoint.connect(dial_addr.clone(), ALPN).await {
                     Ok(conn) => {
-                        *slot.0.write().await = Some(conn);
+                        slot.replace(Some(conn));
                         info!(%peer, "{}", tr!("reconnected to peer"));
                         backoff.reset();
                         break;
@@ -1097,19 +1463,23 @@ fn spawn_reconnect_watcher(
     });
 }
 
+#[allow(clippy::too_many_arguments)] // CLI entry point; explicit config beats a grab-bag struct
 async fn run_connect(
     secret_key: SecretKey,
     to: &str,
     listen: Option<SocketAddr>,
     socks5_listen: Option<SocketAddr>,
     relay: Option<&str>,
+    to_addr: Vec<SocketAddr>,
     max_conns: usize,
+    keepalive: Duration,
+    idle_timeout: Duration,
     styler: Styler,
 ) -> Result<()> {
     // Exactly one of --listen / --socks5-listen was validated by the caller.
     let local_addr = socks5_listen.or(listen).expect("validated");
     let is_socks5 = socks5_listen.is_some();
-    let endpoint = build_endpoint(secret_key, relay)?
+    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout)?
         .bind()
         .await
         .context(tr!("binding endpoint"))?;
@@ -1119,19 +1489,20 @@ async fn run_connect(
         .parse()
         .with_context(|| tr_fmt!("'{0}' is not a valid EndpointId", to))?;
 
-    let dial_addr = match relay {
-        // With a custom relay we know exactly where the peer is: dial it
-        // through this relay, no DNS/pkarr lookup needed.
-        Some(relay_url) => {
-            let relay_url = relay_url
-                .parse()
-                .with_context(|| tr_fmt!("'{0}' is not a valid RelayUrl", relay_url))?;
-            EndpointAddr::new(remote_id).with_relay_url(relay_url)
-        }
-        // Default path: rely on n0's address discovery (DNS/pkarr) to find
-        // where the peer is.
-        None => EndpointAddr::from(remote_id),
-    };
+    let dial_addr = build_dial_addr(remote_id, relay, &to_addr)?;
+    if !to_addr.is_empty() {
+        println!(
+            "  {}",
+            styler.dim(&tr_fmt!(
+                "dialing the peer's direct address hint(s): {0}",
+                to_addr
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        );
+    }
 
     println!("{}", styler.info(&tr_fmt!("dialing {0}...", remote_id)));
     // Time the handshake. Deliberately a structured event, not a span:
@@ -1153,8 +1524,10 @@ async fn run_connect(
     // QUIC connection dies, it re-dials with backoff and swaps the slot.
     // The local TCP listener keeps accepting throughout — clients that
     // arrive during a reconnect wait in open_stream_wait.
-    let slot = ConnSlot(Arc::new(RwLock::new(Some(connection))));
+    let slot = ConnSlot::new(Some(connection.clone()));
     spawn_reconnect_watcher(&slot, &endpoint, dial_addr, remote_id);
+    // Same path-quality observability as the serve side.
+    spawn_path_stats_logger(connection, remote_id);
 
     let tcp_listener = TcpListener::bind(local_addr)
         .await
@@ -1248,9 +1621,12 @@ async fn run_ping(
     secret_key: SecretKey,
     to: &str,
     relay: Option<&str>,
+    to_addr: Vec<SocketAddr>,
+    keepalive: Duration,
+    idle_timeout: Duration,
     styler: Styler,
 ) -> Result<()> {
-    let endpoint = build_endpoint(secret_key, relay)?
+    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout)?
         .bind()
         .await
         .context(tr!("binding endpoint"))?;
@@ -1260,15 +1636,7 @@ async fn run_ping(
         .parse()
         .with_context(|| tr_fmt!("'{0}' is not a valid EndpointId", to))?;
 
-    let dial_addr = match relay {
-        Some(relay_url) => {
-            let relay_url = relay_url
-                .parse()
-                .with_context(|| tr_fmt!("'{0}' is not a valid RelayUrl", relay_url))?;
-            EndpointAddr::new(remote_id).with_relay_url(relay_url)
-        }
-        None => EndpointAddr::from(remote_id),
-    };
+    let dial_addr = build_dial_addr(remote_id, relay, &to_addr)?;
 
     println!("{}", styler.info(&tr_fmt!("pinging {0}...", remote_id)));
     let connection = endpoint
@@ -1442,6 +1810,53 @@ mod tests {
         // reset() restarts from the base.
         b.reset();
         assert_eq!(b.next(), Duration::from_secs(1));
+    }
+
+    /// SSRF guard: private, loopback and link-local targets are blocked;
+    /// public addresses pass.
+    #[test]
+    fn proxy_target_ssrf_guard() {
+        use std::net::Ipv6Addr;
+        // Blocked: loopback, RFC 1918, link-local, unspecified, multicast.
+        for ip in [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V4("10.1.2.3".parse().unwrap()),
+            IpAddr::V4("172.16.0.1".parse().unwrap()),
+            IpAddr::V4("172.31.255.255".parse().unwrap()),
+            IpAddr::V4("192.168.1.1".parse().unwrap()),
+            IpAddr::V4("169.254.169.254".parse().unwrap()),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V4("224.0.0.1".parse().unwrap()),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            IpAddr::V6("fc00::1".parse().unwrap()),
+            IpAddr::V6("fd12:3456::1".parse().unwrap()),
+            IpAddr::V6("fe80::1".parse().unwrap()),
+            IpAddr::V6("ff02::1".parse().unwrap()),
+        ] {
+            assert!(
+                is_blocked_target(SocketAddr::new(ip, 80)),
+                "{ip} should be blocked"
+            );
+        }
+        // Allowed: public addresses.
+        for ip in [
+            IpAddr::V4("8.8.8.8".parse().unwrap()),
+            IpAddr::V4("203.0.113.7".parse().unwrap()),
+            IpAddr::V6("2606:4700:4700::1111".parse().unwrap()),
+            IpAddr::V6("2001:db8::1".parse().unwrap()),
+        ] {
+            assert!(
+                !is_blocked_target(SocketAddr::new(ip, 80)),
+                "{ip} should pass"
+            );
+        }
+        // The guard itself: a blocked target errors, a public one doesn't.
+        assert!(check_proxy_target("127.0.0.1:80".parse().unwrap(), false).is_err());
+        assert!(check_proxy_target("10.0.0.1:80".parse().unwrap(), false).is_err());
+        assert!(check_proxy_target("8.8.8.8:80".parse().unwrap(), false).is_ok());
+        // --allow-private lifts the block.
+        assert!(check_proxy_target("127.0.0.1:80".parse().unwrap(), true).is_ok());
     }
 
     #[test]

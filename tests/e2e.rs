@@ -349,13 +349,22 @@ fn e2e_proxy_socks5_roundtrip_and_clean_shutdown() {
     );
 
     // serve in proxy mode: the target comes from each stream's header.
+    // --allow-private: the test's targets are loopback, which the SSRF
+    // guard blocks by default (unit tests cover the guard itself).
     let serve_log = tmp.join("serve.log");
     let serve_out = std::fs::File::create(&serve_log).expect("serve log file");
     guard.0.push(
         Command::new(&bin)
             .env("LANG", "C")
             .env("LC_ALL", "C")
-            .args(["--ephemeral", "serve", "--proxy", "--relay", &relay_url])
+            .args([
+                "--ephemeral",
+                "serve",
+                "--proxy",
+                "--allow-private",
+                "--relay",
+                &relay_url,
+            ])
             .stdout(Stdio::from(serve_out))
             .stderr(Stdio::null())
             .spawn()

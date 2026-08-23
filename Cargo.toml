@@ -33,6 +33,8 @@ tun2 = { version = "4", features = ["async"] }
 blake3 = "1"
 # QUIC datagram payload type for TUN mode.
 bytes = "1"
+# Wipe key material (hex/bytes) from memory when loading identities.
+zeroize = "1"
 
 [[bin]]
 name = "link-p2p"

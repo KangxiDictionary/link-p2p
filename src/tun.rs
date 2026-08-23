@@ -9,7 +9,7 @@
 //! no mesh/ACL/discovery, `serve`/`connect` untouched. Requires root /
 //! CAP_NET_ADMIN (unlike the stream modes).
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 #[cfg(target_os = "linux")]
 use std::process::Command;
 
@@ -17,7 +17,7 @@ use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use iroh::endpoint::Connection;
 use iroh::protocol::ProtocolHandler;
-use iroh::{EndpointAddr, EndpointId, SecretKey};
+use iroh::{EndpointId, SecretKey};
 use tokio::time::{self, Duration};
 use tracing::{info, warn};
 #[cfg(target_os = "linux")]
@@ -390,6 +390,10 @@ async fn run_datagram_loop(
 ) -> Result<SessionEnd> {
     let mut buf = vec![0u8; *mtu as usize + 64];
     let mut refresh = time::interval(Duration::from_secs(2));
+    // Path-quality observability: every 15 refresh ticks (= 30s), log the
+    // connection's cumulative datagram/loss counters so a running tunnel is
+    // diagnosable without waiting for a failure (debug level only).
+    let mut stats_log_ticks = 0u8;
     let mut dropped_oversized: u64 = 0;
     loop {
         tokio::select! {
@@ -466,6 +470,19 @@ async fn run_datagram_loop(
                     ));
                     dropped_oversized = 0;
                 }
+                if stats_log_ticks == 0 {
+                    let s = conn.stats();
+                    tracing::debug!(%peer,
+                        udp_tx = s.udp_tx.datagrams,
+                        udp_rx = s.udp_rx.datagrams,
+                        lost_packets = s.lost_packets,
+                        lost_bytes = s.lost_bytes,
+                        "path stats (growing udp_tx/rx means the direct path is in use)"
+                    );
+                    stats_log_ticks = 15;
+                } else {
+                    stats_log_ticks -= 1;
+                }
             }
             _ = tokio::signal::ctrl_c() => {
                 println!("{}", styler.warn(&tr!("shutting down...")));
@@ -498,9 +515,11 @@ pub async fn run_tun_serve(
     tun_ip: Option<Ipv4Addr>,
     mtu: u16,
     relay: Option<&str>,
+    keepalive: Duration,
+    idle_timeout: Duration,
     styler: Styler,
 ) -> Result<()> {
-    let endpoint = crate::build_endpoint(secret_key, relay)?
+    let endpoint = crate::build_endpoint(secret_key, relay, keepalive, idle_timeout)?
         // PING_ALPN must be registered here or the probe never gets past the
         // TLS ALPN negotiation: iroh only accepts connections whose ALPN is
         // in this list, so the conn.alpn() dispatch below would be dead code.
@@ -625,15 +644,19 @@ pub async fn run_tun_serve(
 
 /// Connecting side (`tun connect`): dial the peer, then bridge this machine
 /// to it at the IP layer.
+#[allow(clippy::too_many_arguments)] // CLI entry point; explicit config beats a grab-bag struct
 pub async fn run_tun_connect(
     secret_key: SecretKey,
     to: &str,
     tun_ip: Option<Ipv4Addr>,
     mtu: u16,
     relay: Option<&str>,
+    to_addr: Vec<SocketAddr>,
+    keepalive: Duration,
+    idle_timeout: Duration,
     styler: Styler,
 ) -> Result<()> {
-    let endpoint = crate::build_endpoint(secret_key, relay)?
+    let endpoint = crate::build_endpoint(secret_key, relay, keepalive, idle_timeout)?
         .bind()
         .await
         .context(tr!("binding endpoint"))?;
@@ -647,19 +670,20 @@ pub async fn run_tun_connect(
     ensure_vip_free(own_vip)?;
     crate::wait_online(&endpoint).await?;
 
-    let dial_addr = match relay {
-        // With a custom relay we know exactly where the peer is: dial it
-        // through this relay, no DNS/pkarr lookup needed.
-        Some(relay_url) => {
-            let relay_url = relay_url
-                .parse()
-                .with_context(|| tr_fmt!("'{0}' is not a valid RelayUrl", relay_url))?;
-            EndpointAddr::new(peer_id).with_relay_url(relay_url)
-        }
-        // Default path: rely on n0's address discovery (DNS/pkarr) to find
-        // where the peer is.
-        None => EndpointAddr::from(peer_id),
-    };
+    let dial_addr = crate::build_dial_addr(peer_id, relay, &to_addr)?;
+    if !to_addr.is_empty() {
+        println!(
+            "  {}",
+            styler.dim(&tr_fmt!(
+                "dialing the peer's direct address hint(s): {0}",
+                to_addr
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        );
+    }
 
     // The TUN device lives for the whole process: sessions come and go, the
     // interface (and its /32 address) survives across reconnects. MTU is

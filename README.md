@@ -336,6 +336,19 @@ and existing files are tightened to `0600` on every start.
 - `--ephemeral` / `-e`: generate an in-memory identity that is never written
 to disk. The `EndpointId` differs on every start; useful for throwaway
 nodes and tests. Conflicts with `--identity`.
+- `--to-addr <ip:port>` (repeatable): pin one or more direct addresses for
+the peer instead of relying on discovery. `connect`, `tun connect` and
+`ping` dial them directly — no DNS/pkarr lookup — which is both faster to
+(re)connect and private: nothing about the peer has to be resolvable
+publicly. Works alongside `--relay` (the relay then stays as the fallback
+path). Exchange addresses out-of-band (a chat message, a paste), e.g.
+`connect --to <id> --to-addr 203.0.113.9:43303 --listen 127.0.0.1:2222`.
+- `--keepalive <secs>` / `--idle-timeout <secs>`: transport tuning.
+  Defaults 5s / 30s. The keepalive keeps NAT UDP mappings alive (they
+  typically expire after 20-30s idle); the idle timeout is how long a
+  silent peer may be before it's declared dead and re-dialed. Raise the
+  idle timeout on lossy/high-latency links so a brief outage doesn't tear
+  the tunnel down.
 - **Reconnect**: `connect` re-dials automatically when the underlying QUIC
 connection dies, with exponential backoff (1s → 30s cap). The local listener
 stays up throughout — clients arriving during a reconnect queue and succeed
@@ -343,6 +356,11 @@ once the peer is back. `tun connect` reconnects the same way (the whole
 session re-establishes: dial, VIP exchange, route). Run with
 `RUST_LOG=link_p2p=debug` to watch `reconnect failed; retrying in ...` /
 `reconnected to peer` (stream mode) or `reconnecting in ...` (TUN mode).
+- **Link-quality observability**: at `RUST_LOG=link_p2p=debug`, every 30s a
+  `path stats` line logs the connection's cumulative UDP datagram counters
+  and loss — UDP counters that grow mean the direct path is in use; flat
+  UDP while traffic flows means everything is going through the relay. See
+  whether a long-running tunnel is healthy without waiting for it to fail.
 - `ping`: `link-p2p ping <EndpointId>` measures RTT to a running `serve`
   (the serve side answers ping probes alongside its normal forwarding) or
   `tun serve` node, and reports whether the path is direct or relayed:
@@ -364,6 +382,21 @@ instead of being dropped.
 
 TUN mode is a single point-to-point QUIC connection and is not affected by
 `--max-conns`.
+
+### Security
+
+- **Peer whitelist**: `serve --allow <EndpointId>` (repeatable) restricts
+  who may connect. iroh authenticates every peer during the QUIC handshake,
+  so the check is real — a peer not on the list gets its connection closed
+  immediately. Without it, anyone who knows your `EndpointId` can connect
+  and (in `--proxy` mode) make your machine dial arbitrary destinations.
+  Recommended whenever the node is reachable from an untrusted network.
+- **Proxy SSRF guard**: `serve --proxy` rejects targets in private,
+  loopback and link-local ranges by default — a malicious peer could
+  otherwise use your node as a proxy into your LAN or cloud metadata
+  endpoints (`169.254.169.254`). The check runs on the *resolved* address,
+  so domains can't smuggle a private IP past it. `--allow-private` lifts
+  the guard for trusted peers.
 
 ### Running as a service (systemd)
 

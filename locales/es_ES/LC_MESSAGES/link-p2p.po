@@ -525,3 +525,42 @@ msgstr "el límite de datagramas de la ruta bajó a {0}; se redujo el MTU de la 
 
 msgid "dropped {0} oversized packets in the last 2s (interface MTU is {1})"
 msgstr "se descartaron {0} paquetes sobredimensionados en los últimos 2s (MTU de la interfaz: {1})"
+
+msgid "QUIC keepalive interval in seconds (default 5). Keeps NAT UDP mappings alive; the typical home-router mapping expires after 20-30s of idle. Raise it on high-latency links, lower it where NAT timeouts are aggressive."
+msgstr "Intervalo de keepalive QUIC en segundos (por defecto 5). Mantiene vivas las asignaciones UDP de NAT; la asignación típica de un router doméstico caduca tras 20-30s de inactividad. Súbelo en enlaces de alta latencia, bájalo donde los tiempos de NAT sean agresivos."
+
+msgid "QUIC max idle timeout in seconds (default 30). After this long without traffic the peer is declared dead and the connection re-dialed. Raise it for lossy / high-latency links so a brief outage doesn't tear the connection down."
+msgstr "Tiempo máximo de inactividad QUIC en segundos (por defecto 30). Tras este tiempo sin tráfico se considera que el peer ha caído y se vuelve a conectar. Súbelo en enlaces con pérdidas / alta latencia para que un corte breve no derribe la conexión."
+
+msgid "Only accept P2P connections from these EndpointIds (repeatable). Default: accept anyone who knows this node's EndpointId. Strongly recommended when the node is reachable from untrusted networks."
+msgstr "Solo acepta conexiones P2P de estos EndpointIds (repetible). Por defecto acepta a cualquiera que conozca el EndpointId de este nodo. Muy recomendable cuando el nodo es alcanzable desde redes no fiables."
+
+msgid "In proxy mode, allow forwarding to private/loopback/link-local addresses (blocked by default to prevent SSRF — a malicious peer could otherwise make this node reach into your LAN or cloud metadata endpoints such as 169.254.169.254)."
+msgstr "En modo proxy, permite reenviar a direcciones privadas/loopback/link-local (bloqueadas por defecto para evitar SSRF — un peer malicioso podría hacer que este nodo alcance tu LAN o endpoints de metadatos en la nube como 169.254.169.254)."
+
+msgid "Direct address hint(s) for the peer (repeatable), e.g. its public ip:port or a LAN address. Dialed directly, skipping discovery — use it when you exchanged addresses out-of-band and want no DNS/pkarr lookup (also faster reconnects). May be combined with --relay, which then stays as the fallback path."
+msgstr "Pista(s) de dirección directa del peer (repetible), p. ej. su ip:puerto pública o una dirección LAN. Se conecta directamente, omitiendo el descubrimiento — úsalo cuando hayáis intercambiado direcciones fuera de banda y no quieras resolución DNS/pkarr (también reconexiones más rápidas). Puede combinarse con --relay, que queda como ruta de reserva."
+
+msgid "Direct address hint(s) for the peer (repeatable) — see `connect --to-addr`. Dialed directly, skipping discovery."
+msgstr "Pista(s) de dirección directa del peer (repetible) — ver `connect --to-addr`. Se conecta directamente, omitiendo el descubrimiento."
+
+msgid "'{0}' is not a valid EndpointId in --allow"
+msgstr "'{0}' no es un EndpointId válido en --allow"
+
+msgid "only accepting connections from {0} allowed peer(s)"
+msgstr "solo se aceptan conexiones de {0} peer(s) autorizado(s)"
+
+msgid "proxy targets in private/loopback ranges are blocked (use --allow-private to permit)"
+msgstr "los destinos de proxy en rangos privados/loopback están bloqueados (usa --allow-private para permitirlos)"
+
+msgid "rejecting connection: peer is not in the --allow list"
+msgstr "rechazando conexión: el peer no está en la lista --allow"
+
+msgid "target {0} is in a private/loopback/link-local range; blocked in proxy mode (use --allow-private to permit)"
+msgstr "el destino {0} está en un rango privado/loopback/link-local; bloqueado en modo proxy (usa --allow-private para permitirlo)"
+
+msgid "connection slot closed"
+msgstr "el slot de conexión se ha cerrado"
+
+msgid "dialing the peer's direct address hint(s): {0}"
+msgstr "conectando a la(s) pista(s) de dirección directa del peer: {0}"

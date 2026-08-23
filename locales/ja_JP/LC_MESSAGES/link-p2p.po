@@ -520,3 +520,42 @@ msgstr "パスのデータグラム上限が {0} に低下しました。TUNイ�
 
 msgid "dropped {0} oversized packets in the last 2s (interface MTU is {1})"
 msgstr "直近2秒で {0} 個の超過パケットを破棄しました（インターフェースMTU: {1}）"
+
+msgid "QUIC keepalive interval in seconds (default 5). Keeps NAT UDP mappings alive; the typical home-router mapping expires after 20-30s of idle. Raise it on high-latency links, lower it where NAT timeouts are aggressive."
+msgstr "QUIC キープアライブ間隔（秒、デフォルト 5）。NAT の UDP マッピングを維持します。家庭用ルーターのマッピングは通常 20〜30 秒のアイドルで失効します。高遅延リンクでは上げ、NAT タイムアウトが短いネットワークでは下げてください。"
+
+msgid "QUIC max idle timeout in seconds (default 30). After this long without traffic the peer is declared dead and the connection re-dialed. Raise it for lossy / high-latency links so a brief outage doesn't tear the connection down."
+msgstr "QUIC の最大アイドルタイムアウト（秒、デフォルト 30）。この時間トラフィックがないとピアは切断されたとみなされ、再接続されます。ロスが多い・高遅延のリンクでは上げ、短時間の停止で接続が切れないようにします。"
+
+msgid "Only accept P2P connections from these EndpointIds (repeatable). Default: accept anyone who knows this node's EndpointId. Strongly recommended when the node is reachable from untrusted networks."
+msgstr "これらの EndpointId からの P2P 接続のみ受け付けます（繰り返し指定可）。デフォルトではこのノードの EndpointId を知っている誰でも受け付けます。信頼できないネットワークに公開する場合は強く推奨します。"
+
+msgid "In proxy mode, allow forwarding to private/loopback/link-local addresses (blocked by default to prevent SSRF — a malicious peer could otherwise make this node reach into your LAN or cloud metadata endpoints such as 169.254.169.254)."
+msgstr "プロキシモードでプライベート/ループバック/リンクローカルアドレスへの転送を許可します（デフォルトでは SSRF 防止のためブロック——悪意あるピアがこのノードを経由して LAN や 169.254.169.254 などのクラウドメタデータエンドポイントに到達できてしまいます）。"
+
+msgid "Direct address hint(s) for the peer (repeatable), e.g. its public ip:port or a LAN address. Dialed directly, skipping discovery — use it when you exchanged addresses out-of-band and want no DNS/pkarr lookup (also faster reconnects). May be combined with --relay, which then stays as the fallback path."
+msgstr "ピアの直接アドレスヒント（繰り返し指定可）。例: 相手のパブリック ip:port や LAN アドレス。ディスカバリをスキップして直接接続します——オフバンドでアドレスを交換済みで DNS/pkarr ルックアップを避けたい場合に使います（再接続も高速化）。--relay と併用可能で、その場合 relay はフォールバック経路になります。"
+
+msgid "Direct address hint(s) for the peer (repeatable) — see `connect --to-addr`. Dialed directly, skipping discovery."
+msgstr "ピアの直接アドレスヒント（繰り返し指定可）——`connect --to-addr` を参照。ディスカバリをスキップして直接接続します。"
+
+msgid "'{0}' is not a valid EndpointId in --allow"
+msgstr "'{0}' は --allow の有効な EndpointId ではありません"
+
+msgid "only accepting connections from {0} allowed peer(s)"
+msgstr "{0} 個の許可されたピアからの接続のみ受け付けます"
+
+msgid "proxy targets in private/loopback ranges are blocked (use --allow-private to permit)"
+msgstr "プロキシ先がプライベート/ループバック範囲のためブロックされています（--allow-private で許可できます）"
+
+msgid "rejecting connection: peer is not in the --allow list"
+msgstr "接続を拒否しました: ピアが --allow リストにありません"
+
+msgid "target {0} is in a private/loopback/link-local range; blocked in proxy mode (use --allow-private to permit)"
+msgstr "ターゲット {0} はプライベート/ループバック/リンクローカル範囲です。プロキシモードではブロックされています（--allow-private で許可できます）"
+
+msgid "connection slot closed"
+msgstr "接続スロットが閉じられました"
+
+msgid "dialing the peer's direct address hint(s): {0}"
+msgstr "ピアの直接アドレスヒントに接続しています: {0}"

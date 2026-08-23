@@ -15,6 +15,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Lost connection to relay server: Ping timeout` / `TLS close_notify`
   warnings (iroh internals, not this tool's bug), which only stop when the
   relay link itself is stable.
+- **Peer authorization** (`serve --allow <EndpointId>`, repeatable): only
+  whitelisted peers may connect; iroh authenticates the peer's key during
+  the handshake, and a non-whitelisted peer's connection is closed
+  immediately. Also bounds concurrent QUIC *connections* (not just
+  streams) via `--max-conns`.
+- **Proxy SSRF guard** (`serve --proxy`): targets in private/loopback/
+  link-local ranges are rejected by default (checked on the resolved
+  address, so domains can't smuggle a private IP past it);
+  `--allow-private` lifts the guard for trusted setups.
+- `--to-addr <ip:port>` (repeatable) on `connect`, `tun connect` and
+  `ping`: pin direct addresses for the peer, dialed straight through with
+  no DNS/pkarr lookup — faster reconnects and no public discovery of the
+  peer's address. Combines with `--relay` as a fallback.
+- `--keepalive <secs>` / `--idle-timeout <secs>`: the QUIC transport
+  params (defaults 5s / 30s) are now CLI-tunable for per-network tuning.
+- Key material (identity hex/bytes) is zeroized in memory after loading
+  (`zeroize`), on top of the existing 0600 file permissions.
+- Periodic `path stats` debug logging (30s interval): cumulative UDP
+  datagram counters + loss per connection, so a running tunnel's path
+  quality is diagnosable without waiting for a failure.
+
+### Changed
+
+- Reconnect wakeups are event-driven (`tokio::sync::watch`) instead of
+  200ms polling: a local client arriving during a reconnect window is
+  served the instant the new connection lands, not up to 200ms later.
 
 ### Fixed
 
