@@ -300,6 +300,9 @@ forces it on/off for scripts and pipes (`auto` is the default and respects
 
 Prerequisites, caveats and full instructions: `docs/testing.md`.
 
+Commit, versioning and release conventions for contributors:
+`docs/development.md`.
+
 ## Run
 
 On machine A (the side being exposed, e.g. forwarding to a local SSH server):
