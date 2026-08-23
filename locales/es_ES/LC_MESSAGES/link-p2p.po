@@ -564,3 +564,48 @@ msgstr "el slot de conexión se ha cerrado"
 
 msgid "dialing the peer's direct address hint(s): {0}"
 msgstr "conectando a la(s) pista(s) de dirección directa del peer: {0}"
+
+msgid "Passphrase protecting the identity key file. When set, the key is stored encrypted (Argon2id + XChaCha20-Poly1305) instead of plaintext hex, so a disk/backup leak doesn't expose the key. Prefer the LINK_P2P_PASSPHRASE environment variable over passing it inline — the flag value is visible in `ps` and shell history. Conflicts with --ephemeral."
+msgstr "Frase de contraseña que protege el archivo de clave de identidad. Al fijarla, la clave se guarda cifrada (Argon2id + XChaCha20-Poly1305) en lugar de en hex plano, de modo que una fuga del disco/copia de seguridad no expone la clave. Prefiere la variable de entorno LINK_P2P_PASSPHRASE a pasarla en línea — el valor del flag es visible en `ps` y en el historial de shell. Entra en conflicto con --ephemeral."
+
+msgid "using a passphrase-protected identity key file"
+msgstr "usando un archivo de clave de identidad protegido por frase de contraseña"
+
+msgid "encoding the passphrase salt"
+msgstr "codificando la sal de la frase de contraseña"
+
+msgid "invalid Argon2 parameters"
+msgstr "parámetros Argon2 inválidos"
+
+msgid "deriving key from passphrase"
+msgstr "derivando la clave de la frase de contraseña"
+
+msgid "encrypting identity file failed"
+msgstr "falló el cifrado del archivo de identidad"
+
+msgid "identity file is not passphrase-encrypted"
+msgstr "el archivo de identidad no está cifrado con frase de contraseña"
+
+msgid "incorrect passphrase or corrupted identity file"
+msgstr "frase de contraseña incorrecta o archivo de identidad corrupto"
+
+msgid "decrypted identity file is not valid UTF-8"
+msgstr "el archivo de identidad descifrado no es UTF-8 válido"
+
+msgid "identity file is passphrase-encrypted but no passphrase was provided (use --identity-passphrase or LINK_P2P_PASSPHRASE)"
+msgstr "el archivo de identidad está cifrado con frase de contraseña pero no se proporcionó ninguna (usa --identity-passphrase o LINK_P2P_PASSPHRASE)"
+
+msgid "decrypting identity file"
+msgstr "descifrando el archivo de identidad"
+
+msgid "identity file is neither plaintext hex nor encrypted"
+msgstr "el archivo de identidad no es ni hex plano ni está cifrado"
+
+msgid "re-encrypting the legacy plaintext identity file with the provided passphrase"
+msgstr "re-cifrando el archivo de identidad plano legado con la frase de contraseña proporcionada"
+
+msgid "could not encrypt the legacy identity file; it stays plaintext on disk"
+msgstr "no se pudo cifrar el archivo de identidad legado; permanece en texto plano en disco"
+
+msgid "writing passphrase-encrypted identity to {0}"
+msgstr "escribiendo la clave de identidad cifrada con frase de contraseña en {0}"

@@ -102,6 +102,15 @@ struct Cli {
     #[arg(long, short = 'e', global = true, conflicts_with = "identity")]
     ephemeral: bool,
 
+    /// Passphrase protecting the identity key file. When set, the key is
+    /// stored encrypted (Argon2id + XChaCha20-Poly1305) instead of plaintext
+    /// hex, so a disk/backup leak doesn't expose the key. Prefer the
+    /// LINK_P2P_PASSPHRASE environment variable over passing it inline — the
+    /// flag value is visible in `ps` and shell history. Conflicts with
+    /// --ephemeral.
+    #[arg(long, global = true, conflicts_with = "ephemeral")]
+    identity_passphrase: Option<String>,
+
     /// Use a custom relay server instead of n0's public one, e.g.
     /// http://127.0.0.1:3340 (run `iroh-relay --dev` locally). With this set,
     /// address discovery is skipped entirely: `connect` dials the peer
@@ -320,6 +329,10 @@ fn localized_command() -> clap::Command {
         .mut_arg(
             "ephemeral",
             |a| a.help(tr!("Use a temporary identity that is never written to disk: the EndpointId changes every start. Conflicts with --identity.")),
+        )
+        .mut_arg(
+            "identity_passphrase",
+            |a| a.help(tr!("Passphrase protecting the identity key file. When set, the key is stored encrypted (Argon2id + XChaCha20-Poly1305) instead of plaintext hex, so a disk/backup leak doesn't expose the key. Prefer the LINK_P2P_PASSPHRASE environment variable over passing it inline — the flag value is visible in `ps` and shell history. Conflicts with --ephemeral.")),
         )
         .mut_arg(
             "relay",
@@ -559,6 +572,16 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
     }
 
     let styler = style::apply_color_mode(color_mode);
+    // Passphrase for the identity file: --identity-passphrase wins over
+    // LINK_P2P_PASSPHRASE (the env var avoids the passphrase showing up in
+    // `ps`/shell history). Empty values are treated as unset.
+    let passphrase = cli
+        .identity_passphrase
+        .or_else(|| std::env::var("LINK_P2P_PASSPHRASE").ok())
+        .filter(|p| !p.is_empty());
+    if passphrase.is_some() {
+        info!("{}", tr!("using a passphrase-protected identity key file"));
+    }
     // --ephemeral: an in-memory identity, nothing touches the filesystem.
     let secret_key = if cli.ephemeral {
         println!(
@@ -570,7 +593,8 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
         SecretKey::generate()
     } else {
         let identity = resolve_identity_path(cli.identity)?;
-        load_or_create_secret_key(&identity).context(tr!("loading/creating persistent identity"))?
+        load_or_create_secret_key(&identity, passphrase.as_deref())
+            .context(tr!("loading/creating persistent identity"))?
     };
 
     match cli.command {
@@ -783,45 +807,192 @@ fn migrate_identity(from: &Path, to: &Path) -> Result<()> {
 /// On Unix the key file is always tightened to mode 0600 (owner-only): it's
 /// a private key, and `std::fs::write` would otherwise create it with the
 /// default umask-derived permissions (usually 0644, world-readable).
-fn load_or_create_secret_key(path: &Path) -> Result<SecretKey> {
-    if let Ok(mut hex) = std::fs::read_to_string(path) {
-        // hex and bytes hold the raw key material; wipe them on every exit
-        // path. The trim() below borrows, so there's exactly one mutable
-        // copy to zeroize, not a second heap allocation.
-        let result = (|| -> Result<SecretKey> {
-            let hex = hex.trim();
-            if hex.len() != 64 {
-                anyhow::bail!(tr_fmt!(
-                    "identity file exists but has unexpected length {0} (expected 64 hex chars)",
-                    hex.len()
-                ));
+/// File magic + version for passphrase-encrypted identity keys.
+/// Layout: magic | salt(16) | nonce(24) | ciphertext(64 hex chars + 16 tag).
+/// The plaintext format is exactly 64 hex chars (0-9a-f) and `l` is not a hex
+/// digit, so a plaintext file can never collide with this prefix.
+const KEY_FILE_MAGIC: &[u8] = b"linkp2p-k1";
+const KEY_FILE_SALT_LEN: usize = 16;
+const KEY_FILE_NONCE_LEN: usize = 24;
+const KEY_FILE_TAG_LEN: usize = 16;
+const KEY_FILE_OVERHEAD: usize =
+    KEY_FILE_MAGIC.len() + KEY_FILE_SALT_LEN + KEY_FILE_NONCE_LEN + KEY_FILE_TAG_LEN;
+
+/// Whether `data` looks like a passphrase-encrypted key file (vs legacy
+/// plaintext hex).
+fn is_encrypted_key(data: &[u8]) -> bool {
+    data.starts_with(KEY_FILE_MAGIC)
+}
+
+/// Argon2id key derivation from the passphrase + per-file salt.
+/// OWASP-recommended interactive-login parameters (19 MiB, t=2, p=1); the
+/// salt is random per file, so the derived key is fresh on every write.
+fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; 32]> {
+    use argon2::password_hash::SaltString;
+    use argon2::{Algorithm, Argon2, Params, Version};
+
+    let salt_str = SaltString::encode_b64(salt)
+        .map_err(|_| anyhow::anyhow!(tr!("encoding the passphrase salt")))?;
+    let params = Params::new(19 * 1024, 2, 1, Some(32))
+        .map_err(|_| anyhow::anyhow!(tr!("invalid Argon2 parameters")))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut dk = [0u8; 32];
+    argon2
+        .hash_password_into(passphrase.as_bytes(), salt_str.as_str().as_bytes(), &mut dk)
+        .map_err(|_| anyhow::anyhow!(tr!("deriving key from passphrase")))?;
+    Ok(dk)
+}
+
+/// Encrypt a 64-char hex key into the on-disk format (magic + salt + nonce +
+/// ciphertext). XChaCha20-Poly1305 with the file magic as AAD, so a header
+/// can't be swapped between files. The derived key is zeroized on return.
+fn encrypt_key_hex(hex: &str, passphrase: &str) -> Result<Vec<u8>> {
+    use argon2::password_hash::rand_core::{OsRng, RngCore};
+    use chacha20poly1305::aead::generic_array::GenericArray;
+    use chacha20poly1305::aead::{Aead, Payload};
+    use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
+
+    let mut salt = [0u8; KEY_FILE_SALT_LEN];
+    OsRng.fill_bytes(&mut salt);
+    let mut nonce = [0u8; KEY_FILE_NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce);
+
+    let mut dk = derive_key(passphrase, &salt)?;
+    let cipher = XChaCha20Poly1305::new((&dk).into());
+    let ciphertext = cipher
+        .encrypt(
+            GenericArray::from_slice(&nonce),
+            Payload {
+                msg: hex.as_bytes(),
+                aad: KEY_FILE_MAGIC,
+            },
+        )
+        .map_err(|_| anyhow::anyhow!(tr!("encrypting identity file failed")))?;
+    dk.zeroize();
+
+    let mut out = Vec::with_capacity(KEY_FILE_OVERHEAD + hex.len());
+    out.extend_from_slice(KEY_FILE_MAGIC);
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ciphertext);
+    Ok(out)
+}
+
+/// Decrypt a key file written by [`encrypt_key_hex`], returning the 64-char
+/// hex. A wrong passphrase or any tampering fails the AEAD tag check and
+/// errors here.
+fn decrypt_key_hex(data: &[u8], passphrase: &str) -> Result<String> {
+    use chacha20poly1305::aead::generic_array::GenericArray;
+    use chacha20poly1305::aead::{Aead, Payload};
+    use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
+
+    if !is_encrypted_key(data) {
+        bail!(tr!("identity file is not passphrase-encrypted"));
+    }
+    let salt = &data[KEY_FILE_MAGIC.len()..KEY_FILE_MAGIC.len() + KEY_FILE_SALT_LEN];
+    let nonce = &data[KEY_FILE_MAGIC.len() + KEY_FILE_SALT_LEN
+        ..KEY_FILE_MAGIC.len() + KEY_FILE_SALT_LEN + KEY_FILE_NONCE_LEN];
+    let ciphertext = &data[KEY_FILE_MAGIC.len() + KEY_FILE_SALT_LEN + KEY_FILE_NONCE_LEN..];
+
+    let mut dk = derive_key(passphrase, salt)?;
+    let cipher = XChaCha20Poly1305::new((&dk).into());
+    let plaintext = cipher
+        .decrypt(
+            GenericArray::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad: KEY_FILE_MAGIC,
+            },
+        )
+        .map_err(|_| anyhow::anyhow!(tr!("incorrect passphrase or corrupted identity file")))?;
+    dk.zeroize();
+    // Plaintext is the 64-char hex; ownership moves out, caller zeroizes.
+    String::from_utf8(plaintext).context(tr!("decrypted identity file is not valid UTF-8"))
+}
+
+/// Parse a 64-char hex identity blob into a [`SecretKey`], hardening the
+/// file permissions along the way (covers pre-existing plaintext files).
+fn secret_key_from_hex(hex: &str, path: &Path) -> Result<SecretKey> {
+    let hex = hex.trim();
+    if hex.len() != 64 {
+        anyhow::bail!(tr_fmt!(
+            "identity file exists but has unexpected length {0} (expected 64 hex chars)",
+            hex.len()
+        ));
+    }
+    let mut bytes = [0u8; 32];
+    for i in 0..32 {
+        bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+            .context(tr!("identity file exists but contains non-hex characters"))?;
+    }
+    harden_key_permissions(path)?;
+    let key = SecretKey::from_bytes(&bytes);
+    bytes.zeroize();
+    Ok(key)
+}
+
+/// Load a persisted SecretKey from `path`, or generate + save a new one.
+///
+/// With a passphrase the file is stored encrypted (Argon2id + XChaCha20-
+/// Poly1305); without one, plaintext hex (legacy behaviour, 0600 on Unix).
+/// A legacy plaintext file loaded *with* a passphrase is transparently
+/// re-encrypted on disk (best-effort — if that write fails the key still
+/// loads, it just stays plaintext).
+///
+/// Storage format: 64 hex chars (32-byte ed25519 seed). iroh 1.0
+/// SecretKey does not implement Display, so we hex-encode `to_bytes()`
+/// ourselves instead of relying on the old Display-based round-trip.
+fn load_or_create_secret_key(path: &Path, passphrase: Option<&str>) -> Result<SecretKey> {
+    if let Ok(data) = std::fs::read(path) {
+        let result = if is_encrypted_key(&data) {
+            // Passphrase-encrypted file: the passphrase is mandatory.
+            let pass = passphrase.context(tr!(
+                "identity file is passphrase-encrypted but no passphrase was provided (use --identity-passphrase or LINK_P2P_PASSPHRASE)"
+            ))?;
+            let mut hex = decrypt_key_hex(&data, pass).context(tr!("decrypting identity file"))?;
+            let key = secret_key_from_hex(&hex, path);
+            hex.zeroize();
+            key
+        } else {
+            // Legacy plaintext hex (the only other format that exists).
+            let mut hex = String::from_utf8(data)
+                .context(tr!("identity file is neither plaintext hex nor encrypted"))?;
+            // A passphrase on a plaintext file means "encrypt it now": load
+            // the key, then rewrite the file encrypted (best-effort).
+            if let Some(pass) = passphrase {
+                match write_key_file_encrypted(path, hex.trim(), pass) {
+                    Ok(()) => info!(
+                        "{}",
+                        tr!("re-encrypting the legacy plaintext identity file with the provided passphrase")
+                    ),
+                    Err(e) => warn!(
+                        error = %e,
+                        "{}",
+                        tr!("could not encrypt the legacy identity file; it stays plaintext on disk")
+                    ),
+                }
             }
-            let mut bytes = [0u8; 32];
-            for i in 0..32 {
-                bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-                    .context(tr!("identity file exists but contains non-hex characters"))?;
-            }
-            // Also harden pre-existing files (older versions wrote them 0644).
-            harden_key_permissions(path)?;
-            let key = SecretKey::from_bytes(&bytes);
-            bytes.zeroize();
-            Ok(key)
-        })();
-        hex.zeroize();
+            let key = secret_key_from_hex(&hex, path);
+            hex.zeroize();
+            key
+        };
         return result;
     }
+    // No file yet: generate, then persist in the requested format.
     let key = SecretKey::generate();
     let mut hex: String = key.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
-    let written = write_key_file(path, &hex);
+    let written = match passphrase {
+        Some(pass) => write_key_file_encrypted(path, &hex, pass),
+        None => write_key_file(path, &hex),
+    };
     hex.zeroize();
     written?;
     Ok(key)
 }
 
-/// Write the key material to `path`. On Unix the file is created with mode
-/// 0600 directly (no window where it's world-readable), then hardened again
-/// to cover the case where the file already existed.
-fn write_key_file(path: &Path, hex: &str) -> Result<()> {
+/// Open (create/truncate) the identity file with owner-only permissions on
+/// Unix — no window where the key material is world-readable.
+fn open_key_file_for_write(path: &Path) -> Result<std::fs::File> {
     // The XDG default lives under a per-app config dir that may not exist
     // yet; create it so the very first run can persist the new key.
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -835,11 +1006,37 @@ fn write_key_file(path: &Path, hex: &str) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut file = opts
-        .open(path)
-        .with_context(|| tr_fmt!("writing new identity to {0}", path.display()))?;
+    opts.open(path)
+        .with_context(|| tr_fmt!("writing new identity to {0}", path.display()))
+}
+
+/// Write the key material to `path` as plaintext hex (legacy format). On
+/// Unix the file is created with mode 0600 directly, then hardened again
+/// to cover the case where the file already existed.
+fn write_key_file(path: &Path, hex: &str) -> Result<()> {
+    let mut file = open_key_file_for_write(path)?;
     file.write_all(hex.as_bytes())
         .with_context(|| tr_fmt!("writing new identity to {0}", path.display()))?;
+    harden_key_permissions(path)
+}
+
+/// Write the key material to `path` passphrase-encrypted. Same 0600
+/// discipline as [`write_key_file`]; the on-disk bytes are magic + salt +
+/// nonce + ciphertext, so a disk/backup leak without the passphrase yields
+/// nothing.
+fn write_key_file_encrypted(path: &Path, hex: &str, passphrase: &str) -> Result<()> {
+    let encrypted = encrypt_key_hex(hex, passphrase)?;
+    let mut file = open_key_file_for_write(path)?;
+    let written = file.write_all(&encrypted);
+    drop(file);
+    if let Err(e) = written {
+        return Err(e).with_context(|| {
+            tr_fmt!(
+                "writing passphrase-encrypted identity to {0}",
+                path.display()
+            )
+        });
+    }
     harden_key_permissions(path)
 }
 
@@ -1857,6 +2054,75 @@ mod tests {
         assert!(check_proxy_target("8.8.8.8:80".parse().unwrap(), false).is_ok());
         // --allow-private lifts the block.
         assert!(check_proxy_target("127.0.0.1:80".parse().unwrap(), true).is_ok());
+    }
+
+    /// Passphrase encryption: round-trip, wrong passphrase, tampering, and
+    /// non-confusability with plaintext hex.
+    #[test]
+    fn key_encryption_round_trip() {
+        let hex = "abcdef0123456789".repeat(4); // 64 hex chars
+        let encrypted = encrypt_key_hex(&hex, "hunter2").unwrap();
+        assert!(is_encrypted_key(&encrypted));
+        assert_eq!(encrypted.len(), KEY_FILE_OVERHEAD + 64);
+        assert_eq!(decrypt_key_hex(&encrypted, "hunter2").unwrap(), hex);
+    }
+
+    #[test]
+    fn key_encryption_rejects_wrong_passphrase() {
+        let hex = "0123456789abcdef".repeat(4);
+        let encrypted = encrypt_key_hex(&hex, "right").unwrap();
+        assert!(decrypt_key_hex(&encrypted, "wrong").is_err());
+    }
+
+    #[test]
+    fn key_encryption_rejects_tampered_ciphertext() {
+        let hex = "0123456789abcdef".repeat(4);
+        let mut encrypted = encrypt_key_hex(&hex, "hunter2").unwrap();
+        let last = encrypted.len() - 1;
+        encrypted[last] ^= 0x01; // flip one ciphertext byte -> AEAD tag fails
+        assert!(decrypt_key_hex(&encrypted, "hunter2").is_err());
+        // Tampering with the header (salt/nonce) also fails, and swapping a
+        // header between files is blocked by the AAD (magic is the AAD).
+        encrypted[KEY_FILE_MAGIC.len()] ^= 0x01;
+        assert!(decrypt_key_hex(&encrypted, "hunter2").is_err());
+    }
+
+    #[test]
+    fn plaintext_hex_is_not_confusable_with_encrypted() {
+        // 'l' (magic's first byte) is not a hex digit, so a legacy 64-char
+        // plaintext file can never look encrypted.
+        let plain = "0123456789abcdef".repeat(4);
+        assert!(!is_encrypted_key(plain.as_bytes()));
+        assert!(!is_encrypted_key(b""));
+        assert!(!is_encrypted_key(b"linkp2p-k0")); // wrong version byte
+    }
+
+    #[test]
+    fn identity_file_passphrase_round_trip_on_disk() {
+        let dir = std::env::temp_dir().join(format!("link-p2p-keytest-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("identity.key");
+        let _ = std::fs::remove_file(&path);
+
+        // Create with a passphrase: file lands encrypted, key round-trips.
+        let key1 = load_or_create_secret_key(&path, Some("s3cret")).unwrap();
+        assert!(is_encrypted_key(&std::fs::read(&path).unwrap()));
+        let key2 = load_or_create_secret_key(&path, Some("s3cret")).unwrap();
+        assert_eq!(key1.to_bytes(), key2.to_bytes());
+        // Wrong passphrase and missing passphrase both fail loudly.
+        assert!(load_or_create_secret_key(&path, Some("nope")).is_err());
+        assert!(load_or_create_secret_key(&path, None).is_err());
+
+        // Legacy upgrade: overwrite with plaintext hex, load with a
+        // passphrase -> same key, file becomes encrypted.
+        let hex: String = key1.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        std::fs::write(&path, &hex).unwrap();
+        let key3 = load_or_create_secret_key(&path, Some("newpass")).unwrap();
+        assert_eq!(key1.to_bytes(), key3.to_bytes());
+        assert!(is_encrypted_key(&std::fs::read(&path).unwrap()));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

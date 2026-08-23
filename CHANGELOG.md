@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   params (defaults 5s / 30s) are now CLI-tunable for per-network tuning.
 - Key material (identity hex/bytes) is zeroized in memory after loading
   (`zeroize`), on top of the existing 0600 file permissions.
+- **Passphrase-encrypted identity files** (`--identity-passphrase` or
+  `LINK_P2P_PASSPHRASE`): the key file is stored Argon2id + XChaCha20-
+  Poly1305 encrypted instead of plaintext hex, so a disk/backup leak
+  doesn't expose the key. Pure opt-in; a legacy plaintext file is
+  transparently re-encrypted when loaded with a passphrase, and loading an
+  encrypted file without one fails with a clear error.
 - Periodic `path stats` debug logging (30s interval): cumulative UDP
   datagram counters + loss per connection, so a running tunnel's path
   quality is diagnosable without waiting for a failure.

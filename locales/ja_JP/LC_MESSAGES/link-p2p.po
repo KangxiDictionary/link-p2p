@@ -559,3 +559,48 @@ msgstr "接続スロットが閉じられました"
 
 msgid "dialing the peer's direct address hint(s): {0}"
 msgstr "ピアの直接アドレスヒントに接続しています: {0}"
+
+msgid "Passphrase protecting the identity key file. When set, the key is stored encrypted (Argon2id + XChaCha20-Poly1305) instead of plaintext hex, so a disk/backup leak doesn't expose the key. Prefer the LINK_P2P_PASSPHRASE environment variable over passing it inline — the flag value is visible in `ps` and shell history. Conflicts with --ephemeral."
+msgstr "IDキーファイルを保護するパスフレーズ。設定すると、キーは平文のhexではなく暗号化（Argon2id + XChaCha20-Poly1305）で保存されるため、ディスク/バックアップの漏洩でもキーは露呈しません。インライン指定より環境変数 LINK_P2P_PASSPHRASE を推奨します——フラグの値は `ps` やシェル履歴に残ります。--ephemeral と併用できません。"
+
+msgid "using a passphrase-protected identity key file"
+msgstr "パスフレーズで保護されたIDキーファイルを使用しています"
+
+msgid "encoding the passphrase salt"
+msgstr "パスフレーズのソルトをエンコード中"
+
+msgid "invalid Argon2 parameters"
+msgstr "不正な Argon2 パラメータ"
+
+msgid "deriving key from passphrase"
+msgstr "パスフレーズからキーを導出中"
+
+msgid "encrypting identity file failed"
+msgstr "IDファイルの暗号化に失敗しました"
+
+msgid "identity file is not passphrase-encrypted"
+msgstr "IDファイルはパスフレーズ暗号化形式ではありません"
+
+msgid "incorrect passphrase or corrupted identity file"
+msgstr "パスフレーズが正しくないか、IDファイルが破損しています"
+
+msgid "decrypted identity file is not valid UTF-8"
+msgstr "復号したIDファイルが有効なUTF-8ではありません"
+
+msgid "identity file is passphrase-encrypted but no passphrase was provided (use --identity-passphrase or LINK_P2P_PASSPHRASE)"
+msgstr "IDファイルはパスフレーズ暗号化されていますが、パスフレーズが指定されていません（--identity-passphrase または LINK_P2P_PASSPHRASE を使用してください）"
+
+msgid "decrypting identity file"
+msgstr "IDファイルを復号中"
+
+msgid "identity file is neither plaintext hex nor encrypted"
+msgstr "IDファイルが平文hexでも暗号化形式でもありません"
+
+msgid "re-encrypting the legacy plaintext identity file with the provided passphrase"
+msgstr "指定されたパスフレーズでレガシーの平文IDファイルを再暗号化しています"
+
+msgid "could not encrypt the legacy identity file; it stays plaintext on disk"
+msgstr "レガシーIDファイルを暗号化できませんでした。ディスク上では平文のままです"
+
+msgid "writing passphrase-encrypted identity to {0}"
+msgstr "パスフレーズ暗号化されたIDキーを {0} に書き込み中"

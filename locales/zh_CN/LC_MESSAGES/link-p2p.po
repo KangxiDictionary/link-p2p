@@ -556,3 +556,48 @@ msgstr "连接槽已关闭"
 
 msgid "dialing the peer's direct address hint(s): {0}"
 msgstr "正在拨号对端的直连地址提示：{0}"
+
+msgid "Passphrase protecting the identity key file. When set, the key is stored encrypted (Argon2id + XChaCha20-Poly1305) instead of plaintext hex, so a disk/backup leak doesn't expose the key. Prefer the LINK_P2P_PASSPHRASE environment variable over passing it inline — the flag value is visible in `ps` and shell history. Conflicts with --ephemeral."
+msgstr "保护身份密钥文件的口令。设置后，密钥将以加密形式存储（Argon2id + XChaCha20-Poly1305）而非明文 hex，磁盘/备份泄露也无法拿到密钥。建议使用环境变量 LINK_P2P_PASSPHRASE 而非内联传参——flag 值会出现在 `ps` 和 shell 历史中。与 --ephemeral 互斥。"
+
+msgid "using a passphrase-protected identity key file"
+msgstr "正在使用口令保护的身份密钥文件"
+
+msgid "encoding the passphrase salt"
+msgstr "编码口令盐值"
+
+msgid "invalid Argon2 parameters"
+msgstr "非法的 Argon2 参数"
+
+msgid "deriving key from passphrase"
+msgstr "从口令派生密钥"
+
+msgid "encrypting identity file failed"
+msgstr "加密身份文件失败"
+
+msgid "identity file is not passphrase-encrypted"
+msgstr "身份文件不是口令加密格式"
+
+msgid "incorrect passphrase or corrupted identity file"
+msgstr "口令不正确或身份文件已损坏"
+
+msgid "decrypted identity file is not valid UTF-8"
+msgstr "解密后的身份文件不是有效的 UTF-8"
+
+msgid "identity file is passphrase-encrypted but no passphrase was provided (use --identity-passphrase or LINK_P2P_PASSPHRASE)"
+msgstr "身份文件已用口令加密，但未提供口令（请用 --identity-passphrase 或设置 LINK_P2P_PASSPHRASE）"
+
+msgid "decrypting identity file"
+msgstr "解密身份文件"
+
+msgid "identity file is neither plaintext hex nor encrypted"
+msgstr "身份文件既不是明文 hex 也不是加密格式"
+
+msgid "re-encrypting the legacy plaintext identity file with the provided passphrase"
+msgstr "正在用提供的口令重新加密旧版明文身份文件"
+
+msgid "could not encrypt the legacy identity file; it stays plaintext on disk"
+msgstr "无法加密旧版身份文件；它仍以明文留在磁盘上"
+
+msgid "writing passphrase-encrypted identity to {0}"
+msgstr "正在向 {0} 写入口令加密的身份密钥"

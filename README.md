@@ -331,6 +331,21 @@ across restarts because the key is persisted — don't commit that file, it's
 a private key. On Unix the key file is created with mode `0600` (owner-only)
 and existing files are tightened to `0600` on every start.
 
+**Optional passphrase encryption** (`--identity-passphrase`, or the
+`LINK_P2P_PASSPHRASE` environment variable — prefer the env var, the flag
+value shows up in `ps` and shell history): the key file is then stored
+encrypted (Argon2id + XChaCha20-Poly1305) instead of plaintext hex, so a
+disk or backup leak no longer exposes the key material. Purely opt-in —
+without it, behaviour is exactly as above. A legacy plaintext file loaded
+with a passphrase is transparently re-encrypted on disk; loading an
+encrypted file without the passphrase fails with a clear error.
+Example:
+
+```bash
+# create/load an encrypted identity
+LINK_P2P_PASSPHRASE='long random phrase' link-p2p serve --forward 127.0.0.1:22
+```
+
 ### Operational flags and behaviors
 
 - `--ephemeral` / `-e`: generate an in-memory identity that is never written

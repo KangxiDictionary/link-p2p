@@ -35,6 +35,10 @@ blake3 = "1"
 bytes = "1"
 # Wipe key material (hex/bytes) from memory when loading identities.
 zeroize = "1"
+# Optional passphrase encryption for the identity file (--identity-passphrase
+# / LINK_P2P_PASSPHRASE): Argon2id key derivation + XChaCha20-Poly1305 AEAD.
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
 
 [[bin]]
 name = "link-p2p"
