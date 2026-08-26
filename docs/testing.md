@@ -3,6 +3,10 @@
 Two layers: fast local checks (no second machine, mostly no root) and the
 real-network harness that needs two machines on different networks.
 
+**Recorded run:** see [`docs/server-test-results.md`](server-test-results.md)
+for a 2026-08-26 session against `kangxi@server` (SSH, unit/smoke/e2e, and a
+cross-network stream + ping check).
+
 ## Local smoke test
 
 `scripts/local-test.sh` runs the full pipeline on localhost against a
@@ -30,6 +34,17 @@ port is released). It's `#[ignore]`d because it needs a release build and
 the `tools/iroh-relay` binary — missing prerequisites are reported and
 skipped, not failed.
 
+On machines whose environment sets `LANGUAGE` to a non-English value (common on
+`zh_CN` desktops), also pin the locale when running e2e — `LANG=C` alone is
+not enough because gettext prefers `LANGUAGE` over `LANG`:
+
+```bash
+env LANG=C LC_ALL=C LANGUAGE= cargo test --release -- --ignored
+```
+
+Without that, e2e times out grepping for the English banner substring
+`your EndpointId` even though serve printed a localized equivalent.
+
 ## Real-machine phase tests (two machines)
 
 `scripts/phase*-{server,client}.sh` are the harness for the real-network
@@ -42,8 +57,9 @@ online times and non-English locales:
 take up to ~30s — a poll, not a fixed sleep), prints a share box with the
 EndpointId + virtual IP, and stays up until Ctrl+C;
 - the **client** side connects, runs the measurement, and prints a verdict;
-- both sides run with `RUST_LOG=iroh=debug` and `LANG=C` (the app output is
-localized, so banner parsing is locale-independent).
+- both sides run with `RUST_LOG=iroh=debug` and `LANG=C LC_ALL=C LANGUAGE=`
+(the app output is localized; clearing `LANGUAGE` is what makes banner
+parsing locale-independent on gettext-based systems).
 
 Build a release binary first and run everything with `sudo` (TUN mode):
 
