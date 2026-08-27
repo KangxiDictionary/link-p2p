@@ -91,8 +91,6 @@ msgstr "Dirección local a la que reenviar los streams P2P entrantes, p. ej. 127
 msgid "Dial a remote node and expose it as a local TCP listener."
 msgstr "Marca a un nodo remoto y expónlo como un listener TCP local."
 
-msgid "The remote node's EndpointId (printed by `serve` on startup)"
-msgstr "El EndpointId del nodo remoto (impreso por `serve` al arrancar)"
 
 msgid "Local address to listen on, e.g. 127.0.0.1:9090"
 msgstr "Dirección local donde escuchar, p. ej. 127.0.0.1:9090"
@@ -285,8 +283,6 @@ msgstr ""
 msgid "serve requires either --forward or --proxy"
 msgstr "serve requiere --forward o --proxy"
 
-msgid "connect requires either --listen or --socks5-listen"
-msgstr "connect requiere --listen o --socks5-listen"
 
 # --- Modo TUN ---
 
@@ -340,8 +336,6 @@ msgstr ""
 "min(este valor, el máximo de datagrama QUIC negociado); se rechazan valores por "
 "encima de 1280."
 
-msgid "The remote node's EndpointId (printed by `tun serve` on startup)"
-msgstr "EndpointId del nodo remoto (impreso por `tun serve` al iniciar)"
 
 msgid ""
 "--mtu must be at most 1280 (got {0}); higher values would fragment the outer "
@@ -609,3 +603,69 @@ msgstr "no se pudo cifrar el archivo de identidad legado; permanece en texto pla
 
 msgid "writing passphrase-encrypted identity to {0}"
 msgstr "escribiendo la clave de identidad cifrada con frase de contraseña en {0}"
+
+msgid "connect requires exactly one of --listen, --socks5-listen, or --stdio"
+msgstr "connect requiere exactamente uno de --listen, --socks5-listen o --stdio"
+
+msgid "missing peer EndpointId (--to or LINK_P2P_TO)"
+msgstr "falta el EndpointId del peer (--to o LINK_P2P_TO)"
+
+msgid "--to - cannot be combined with --stdio (stdin conflict)"
+msgstr "--to - no se puede combinar con --stdio (conflicto de stdin)"
+
+msgid "reading EndpointId from stdin"
+msgstr "leyendo EndpointId desde stdin"
+
+msgid "empty EndpointId on stdin"
+msgstr "EndpointId vacío en stdin"
+
+msgid "--stream-recv-window / LINK_P2P_STREAM_RECV_WINDOW out of range"
+msgstr "--stream-recv-window / LINK_P2P_STREAM_RECV_WINDOW fuera de rango"
+
+msgid "connected. piping stdin/stdout to the remote peer."
+msgstr "conectado. canalizando stdin/stdout al peer remoto."
+
+msgid "opening stream"
+msgstr "abriendo stream"
+
+msgid "domain length out of range in target header"
+msgstr "longitud de dominio fuera de rango en la cabecera de destino"
+
+msgid "domain length out of range in SOCKS5 request"
+msgstr "longitud de dominio fuera de rango en la petición SOCKS5"
+
+msgid "rendering man page"
+msgstr "generando página man"
+
+msgid "writing man page"
+msgstr "escribiendo página man"
+
+msgid "Quiet user-facing banners (errors still print). Independent of RUST_LOG / -v."
+msgstr "Silencia banners visibles (los errores siguen mostrándose). Independiente de RUST_LOG / -v."
+
+msgid "Increase tracing detail (-v, -vv). Ignored when RUST_LOG is set."
+msgstr "Aumenta el detalle de tracing (-v, -vv). Se ignora si RUST_LOG está definido."
+
+msgid "QUIC congestion controller: cubic (default) or bbr3. Also LINK_P2P_CC. See docs/performance.md."
+msgstr "Control de congestión QUIC: cubic (por defecto) o bbr3. También LINK_P2P_CC. Ver docs/performance.md."
+
+msgid "QUIC connection send window in bytes. Also LINK_P2P_SEND_WINDOW."
+msgstr "Ventana de envío QUIC en bytes. También LINK_P2P_SEND_WINDOW."
+
+msgid "QUIC per-stream receive window in bytes. Also LINK_P2P_STREAM_RECV_WINDOW."
+msgstr "Ventana de recepción por stream QUIC en bytes. También LINK_P2P_STREAM_RECV_WINDOW."
+
+msgid "The remote node's EndpointId (printed by `serve` on startup). Use - to read one line from stdin. Also LINK_P2P_TO."
+msgstr "EndpointId del nodo remoto (lo imprime `serve` al arrancar). Use - para leer una línea de stdin. También LINK_P2P_TO."
+
+msgid "Pipe stdin/stdout to one QUIC stream (ssh ProxyCommand / rsync -e). Status banners go to stderr."
+msgstr "Enlaza stdin/stdout a un stream QUIC (ssh ProxyCommand / rsync -e). Los banners van a stderr."
+
+msgid "The remote node's EndpointId (printed by `tun serve` on startup). Use - to read one line from stdin. Also LINK_P2P_TO."
+msgstr "EndpointId del nodo remoto (lo imprime `tun serve` al arrancar). Use - para leer una línea de stdin. También LINK_P2P_TO."
+
+msgid "Output format: text (default) or json (for jq)."
+msgstr "Formato de salida: text (por defecto) o json (para jq)."
+
+msgid "Print a man page (troff) for link-p2p to stdout."
+msgstr "Imprime la página man (troff) de link-p2p en stdout."

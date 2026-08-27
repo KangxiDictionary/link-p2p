@@ -215,6 +215,16 @@ Also supports `powershell` and `elvish`. Re-run after upgrading if flags change.
   you make *in response to* a CPU/latency number from `docs/benchmarks.md` —
   not something to guess at ahead of time.
 
+## Unix-style CLI and transport tuning
+
+See [`docs/unix.md`](docs/unix.md) for `--stdio`, `--to -`, `ping --format json`,
+exit codes, `-q`/`-v`, `LINK_P2P_*` env defaults, completions and `man`.
+
+Before treating loopback benches as a QUIC “protocol wall”, run the one-session
+config matrix in [`scripts/bench-transport-matrix.sh`](scripts/bench-transport-matrix.sh)
+and read [`docs/performance.md`](docs/performance.md) (GSO defaults, CUBIC vs BBR3,
+windows, sysctl caveats).
+
 ## Install
 
 **Prebuilt binary (no Rust toolchain needed)** — download

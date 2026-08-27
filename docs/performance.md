@@ -48,3 +48,13 @@ To verify Linux GSO status against noq-udp logging, try a `RUST_LOG` that
 includes `noq_udp=debug` (confirm the exact target/crate name in the
 dependency tree — Linux GSO disable uses `crate::log::warn!` in noq-udp).
 If GSO is off, fix that before reading protocol-wall claims off the matrix.
+
+
+## GSO downgrade logging
+
+`noq-udp` records GSO disable / fallback with the **`log`** crate (`crate::log::warn!` /
+`info!`), not `tracing`. A bare `RUST_LOG=noq_udp=debug` may print nothing unless a
+`log`→`tracing` bridge is installed. Prefer looking for strings like
+`GSO disabled` / `halting segmentation offload` / `UDP_SEGMENT` in process logs when
+a bridge is present, or confirm kernel support with `setsockopt(UDP_SEGMENT)` as in
+the earlier config check.

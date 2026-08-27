@@ -40,29 +40,44 @@ impl Target {
 
 // --- wire header on the QUIC stream --------------------------------------
 
-pub async fn write_target<W: AsyncWrite + Unpin>(w: &mut W, t: &Target) -> Result<()> {
+fn encode_target(buf: &mut Vec<u8>, t: &Target) -> Result<()> {
     match t {
         Target::Addr(SocketAddr::V4(a)) => {
-            w.write_u8(1).await?;
-            w.write_all(&a.ip().octets()).await?;
-            w.write_u16(a.port()).await?;
+            buf.push(1);
+            buf.extend_from_slice(&a.ip().octets());
+            buf.extend_from_slice(&a.port().to_be_bytes());
         }
         Target::Addr(SocketAddr::V6(a)) => {
-            w.write_u8(4).await?;
-            w.write_all(&a.ip().octets()).await?;
-            w.write_u16(a.port()).await?;
+            buf.push(4);
+            buf.extend_from_slice(&a.ip().octets());
+            buf.extend_from_slice(&a.port().to_be_bytes());
         }
         Target::Domain(host, port) => {
             if host.len() > 255 {
                 bail!(tr_fmt!("domain name too long: {0} bytes", host.len()));
             }
-            w.write_u8(3).await?;
-            w.write_u8(host.len() as u8).await?;
-            w.write_all(host.as_bytes()).await?;
-            w.write_u16(*port).await?;
+            buf.push(3);
+            buf.push(host.len() as u8);
+            buf.extend_from_slice(host.as_bytes());
+            buf.extend_from_slice(&port.to_be_bytes());
         }
     }
-    w.flush().await?;
+    Ok(())
+}
+
+/// Write the proxy-mode stream header.
+///
+/// Encodes into a stack/heap buffer and issues a single `write_all`. There is
+/// deliberately **no** `.flush()` afterward: callers pass an unbuffered iroh
+/// QUIC `SendStream`, where each write is already scheduled for the wire.
+/// If a future caller wraps `W` in `BufWriter` (or similar), they must either
+/// restore an explicit `flush()` here or flush themselves — otherwise the
+/// header can sit in the buffer until it fills or the stream closes, which
+/// looks like a hung handshake under light traffic.
+pub async fn write_target<W: AsyncWrite + Unpin>(w: &mut W, t: &Target) -> Result<()> {
+    let mut buf = Vec::with_capacity(270);
+    encode_target(&mut buf, t)?;
+    w.write_all(&buf).await?;
     Ok(())
 }
 
@@ -87,10 +102,14 @@ pub async fn read_target<R: AsyncRead + Unpin>(r: &mut R) -> Result<Target> {
             }
             3 => {
                 let len = r.read_u8().await? as usize;
-                let mut buf = vec![0u8; len];
-                r.read_exact(&mut buf).await?;
-                let host =
-                    String::from_utf8(buf).context(tr!("non-utf8 domain in target header"))?;
+                if len > 255 {
+                    bail!(tr!("domain length out of range in target header"));
+                }
+                let mut domain = [0u8; 255];
+                r.read_exact(&mut domain[..len]).await?;
+                let host = std::str::from_utf8(&domain[..len])
+                    .context(tr!("non-utf8 domain in target header"))?
+                    .to_owned();
                 Target::Domain(host, r.read_u16().await?)
             }
             other => bail!(tr_fmt!("unknown address type {0} in target header", other)),
@@ -170,9 +189,14 @@ pub async fn accept_handshake(tcp: &mut TcpStream) -> Result<Target> {
         }
         0x03 => {
             let len = tcp.read_u8().await? as usize;
-            let mut buf = vec![0u8; len];
-            tcp.read_exact(&mut buf).await?;
-            let host = String::from_utf8(buf).context(tr!("non-utf8 domain in SOCKS5 request"))?;
+            if len > 255 {
+                bail!(tr!("domain length out of range in SOCKS5 request"));
+            }
+            let mut domain = [0u8; 255];
+            tcp.read_exact(&mut domain[..len]).await?;
+            let host = std::str::from_utf8(&domain[..len])
+                .context(tr!("non-utf8 domain in SOCKS5 request"))?
+                .to_owned();
             Target::Domain(host, tcp.read_u16().await?)
         }
         other => {

@@ -517,9 +517,10 @@ pub async fn run_tun_serve(
     relay: Option<&str>,
     keepalive: Duration,
     idle_timeout: Duration,
+    tune: crate::TransportTune,
     styler: Styler,
 ) -> Result<()> {
-    let endpoint = crate::build_endpoint(secret_key, relay, keepalive, idle_timeout)?
+    let endpoint = crate::build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune)?
         // PING_ALPN must be registered here or the probe never gets past the
         // TLS ALPN negotiation: iroh only accepts connections whose ALPN is
         // in this list, so the conn.alpn() dispatch below would be dead code.
@@ -656,9 +657,10 @@ pub async fn run_tun_connect(
     to_addr: Vec<SocketAddr>,
     keepalive: Duration,
     idle_timeout: Duration,
+    tune: crate::TransportTune,
     styler: Styler,
 ) -> Result<()> {
-    let endpoint = crate::build_endpoint(secret_key, relay, keepalive, idle_timeout)?
+    let endpoint = crate::build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune)?
         .bind()
         .await
         .context(tr!("binding endpoint"))?;

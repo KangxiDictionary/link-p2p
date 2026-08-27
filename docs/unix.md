@@ -1,7 +1,6 @@
 # Unix-style UX
 
-CLI shape aimed at scripts, `ssh`/`rsync`, and shell plumbing. Designed
-behavior (may land with the same PR as this doc).
+CLI shape aimed at scripts, `ssh`/`rsync`, and shell plumbing.
 
 ## Stream / identity plumbing
 
@@ -50,7 +49,9 @@ Explicit CLI flags always override the corresponding env var.
 
 ```bash
 link-p2p completions fish|bash|zsh|powershell|elvish
-link-p2p man          # print / generate manpage content
+link-p2p man | gzip -c > /usr/local/share/man/man1/link-p2p.1.gz   # example install
 ```
 
-Shell completion install paths are the same as in the README.
+`link-p2p man` prints a lightweight troff page built from the same localized
+clap `Command` tree as `--help` (no extra man-generator crate). Shell
+completion install paths are the same as in the README.

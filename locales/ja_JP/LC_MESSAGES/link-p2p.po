@@ -89,8 +89,6 @@ msgstr "受信 P2P ストリームを転送するローカルアドレス。例�
 msgid "Dial a remote node and expose it as a local TCP listener."
 msgstr "リモートノードにダイヤルし、ローカル TCP リスナーとして公開します。"
 
-msgid "The remote node's EndpointId (printed by `serve` on startup)"
-msgstr "リモートノードの EndpointId（`serve` 起動時に表示されます）"
 
 msgid "Local address to listen on, e.g. 127.0.0.1:9090"
 msgstr "リッスンするローカルアドレス。例：127.0.0.1:9090"
@@ -283,8 +281,6 @@ msgstr ""
 msgid "serve requires either --forward or --proxy"
 msgstr "serve には --forward または --proxy のいずれかが必要です"
 
-msgid "connect requires either --listen or --socks5-listen"
-msgstr "connect には --listen または --socks5-listen のいずれかが必要です"
 
 # --- TUN モード ---
 
@@ -335,8 +331,6 @@ msgstr ""
 "TUN インターフェースの MTU 上限（既定 1280）。最終 MTU は min(この値, ネゴシエートされた"
 "QUIC データグラム上限)。1280 を超える値は拒否される。"
 
-msgid "The remote node's EndpointId (printed by `tun serve` on startup)"
-msgstr "リモートノードの EndpointId（起動時に `tun serve` が表示する）"
 
 msgid ""
 "--mtu must be at most 1280 (got {0}); higher values would fragment the outer "
@@ -604,3 +598,69 @@ msgstr "レガシーIDファイルを暗号化できませんでした。ディ�
 
 msgid "writing passphrase-encrypted identity to {0}"
 msgstr "パスフレーズ暗号化されたIDキーを {0} に書き込み中"
+
+msgid "connect requires exactly one of --listen, --socks5-listen, or --stdio"
+msgstr "connect には --listen / --socks5-listen / --stdio のいずれかを指定してください"
+
+msgid "missing peer EndpointId (--to or LINK_P2P_TO)"
+msgstr "ピアの EndpointId がありません（--to または LINK_P2P_TO）"
+
+msgid "--to - cannot be combined with --stdio (stdin conflict)"
+msgstr "--to - は --stdio と併用できません（stdin が衝突します）"
+
+msgid "reading EndpointId from stdin"
+msgstr "stdin から EndpointId を読み取り中"
+
+msgid "empty EndpointId on stdin"
+msgstr "stdin の EndpointId が空です"
+
+msgid "--stream-recv-window / LINK_P2P_STREAM_RECV_WINDOW out of range"
+msgstr "--stream-recv-window / LINK_P2P_STREAM_RECV_WINDOW が範囲外です"
+
+msgid "connected. piping stdin/stdout to the remote peer."
+msgstr "接続しました。stdin/stdout をリモートピアにパイプします。"
+
+msgid "opening stream"
+msgstr "ストリームを開いています"
+
+msgid "domain length out of range in target header"
+msgstr "ターゲットヘッダのドメイン長が範囲外です"
+
+msgid "domain length out of range in SOCKS5 request"
+msgstr "SOCKS5 リクエストのドメイン長が範囲外です"
+
+msgid "rendering man page"
+msgstr "man ページを生成中"
+
+msgid "writing man page"
+msgstr "man ページを書き出し中"
+
+msgid "Quiet user-facing banners (errors still print). Independent of RUST_LOG / -v."
+msgstr "ユーザー向けバナーを抑制します（エラーは表示されます）。RUST_LOG / -v とは独立です。"
+
+msgid "Increase tracing detail (-v, -vv). Ignored when RUST_LOG is set."
+msgstr "トレーシング詳細度を上げます（-v、-vv）。RUST_LOG 設定時は無視されます。"
+
+msgid "QUIC congestion controller: cubic (default) or bbr3. Also LINK_P2P_CC. See docs/performance.md."
+msgstr "QUIC 輻輳制御: cubic（既定）または bbr3。LINK_P2P_CC でも指定可。docs/performance.md 参照。"
+
+msgid "QUIC connection send window in bytes. Also LINK_P2P_SEND_WINDOW."
+msgstr "QUIC 接続の送信ウィンドウ（バイト）。LINK_P2P_SEND_WINDOW でも指定可。"
+
+msgid "QUIC per-stream receive window in bytes. Also LINK_P2P_STREAM_RECV_WINDOW."
+msgstr "QUIC ストリーム受信ウィンドウ（バイト）。LINK_P2P_STREAM_RECV_WINDOW でも指定可。"
+
+msgid "The remote node's EndpointId (printed by `serve` on startup). Use - to read one line from stdin. Also LINK_P2P_TO."
+msgstr "リモートノードの EndpointId（`serve` 起動時に表示）。- で stdin から1行読めます。LINK_P2P_TO でも可。"
+
+msgid "Pipe stdin/stdout to one QUIC stream (ssh ProxyCommand / rsync -e). Status banners go to stderr."
+msgstr "stdin/stdout を1本の QUIC ストリームに接続（ssh ProxyCommand / rsync -e）。状態表示は stderr。"
+
+msgid "The remote node's EndpointId (printed by `tun serve` on startup). Use - to read one line from stdin. Also LINK_P2P_TO."
+msgstr "リモートノードの EndpointId（`tun serve` 起動時に表示）。- で stdin から1行読めます。LINK_P2P_TO でも可。"
+
+msgid "Output format: text (default) or json (for jq)."
+msgstr "出力形式: text（既定）または json（jq 向け）。"
+
+msgid "Print a man page (troff) for link-p2p to stdout."
+msgstr "link-p2p の man ページ（troff）を stdout に出力します。"
