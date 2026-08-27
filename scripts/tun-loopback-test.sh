@@ -27,6 +27,8 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$SCRIPT_DIR/.."
+# shellcheck source=scripts/parse-endpoint-id.sh
+source "$REPO_DIR/scripts/parse-endpoint-id.sh"
 LINK_P2P="${LINK_P2P:-$REPO_DIR/target/release/link-p2p}"
 RELAY_BIN="${RELAY_BIN:-$REPO_DIR/tools/iroh-relay}"
 RELAY_URL="http://127.0.0.1:3340"
@@ -97,7 +99,7 @@ SERVE_PID=$!
 
 SECONDS=0
 while [ $SECONDS -lt 20 ]; do
-    if grep -q "your EndpointId" /tmp/lp-tun-serve.log 2>/dev/null; then break; fi
+    if wait_for_endpoint_id /tmp/lp-tun-serve.log 2>/dev/null; then break; fi
     if ! kill -0 "$SERVE_PID" 2>/dev/null; then
         echo -e "${RED}tun serve died.  Log:${NC}"
         cat /tmp/lp-tun-serve.log
@@ -106,9 +108,7 @@ while [ $SECONDS -lt 20 ]; do
     sleep 1
 done
 
-# Extract EndpointId — id printed on its own line immediately after the
-# "your EndpointId" prompt.  Read the line after the marker with awk.
-SERVE_ID=$(awk '/your EndpointId/{getline; gsub(/[[:space:]]+/, ""); if(length($0)>=50) print}' /tmp/lp-tun-serve.log || true)
+SERVE_ID=$(parse_endpoint_id /tmp/lp-tun-serve.log)
 if [ -z "$SERVE_ID" ]; then
     echo -e "${RED}Could not extract EndpointId from serve output.${NC}"
     echo "  last serve lines:"

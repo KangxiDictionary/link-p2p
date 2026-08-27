@@ -18,6 +18,8 @@ SERVE_PORT=18080  # python http.server (the "forward target")
 LISTEN_PORT=19999 # local port exposed by `connect`
 
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/parse-endpoint-id.sh
+source ./scripts/parse-endpoint-id.sh
 
 # iroh's relay client fetches the relay's config over HTTP first. If a proxy
 # is set in the environment (common in CI/sandboxes) it must not intercept
@@ -62,8 +64,8 @@ SERVE_PID=$!
 # ~4s even with a local relay; give it room on slow/constrained machines.
 sleep 6
 
-# Parse the EndpointId printed by serve. It's the line after the prompt.
-EP_ID=$(sed -n 's/^    \([0-9a-f]\{52,\}\)$/\1/p' "$LOG_DIR/serve.log" | head -1)
+# Parse the machine line from serve stdout (`ENDPOINT_ID=<hex>`).
+EP_ID=$(parse_endpoint_id "$LOG_DIR/serve.log")
 if [ -z "$EP_ID" ]; then
     echo "failed to get EndpointId from serve output:" >&2
     cat "$LOG_DIR/serve.log" >&2

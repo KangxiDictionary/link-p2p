@@ -1225,7 +1225,9 @@ async fn run_serve(
             "your EndpointId (give this to peers running `connect --to`):"
         ))
     );
-    println!("    {}", styler.highlight(&endpoint.id().to_string()));
+    let ep_hex = endpoint.id().to_string();
+    println!("    {}", styler.highlight(&ep_hex));
+    println!("ENDPOINT_ID={ep_hex}");
     println!();
     println!("{}", styler.dim(&tr!("Press Ctrl+C to stop.")));
 

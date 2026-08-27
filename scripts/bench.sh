@@ -3,6 +3,8 @@
 export NO_PROXY="127.0.0.1,localhost,::1"
 export no_proxy="127.0.0.1,localhost,::1"
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/parse-endpoint-id.sh
+source ./scripts/parse-endpoint-id.sh
 
 DURATION="${1:-8}"
 LISTEN_PORT=19990
@@ -21,7 +23,7 @@ echo "[2/5] serve"
     --relay http://127.0.0.1:3340 --identity .bench-serve.key >.bench-serve.log 2>&1 &
 S=$!
 sleep 7
-EP=$(sed -n 's/^    \([0-9a-f]\{52,\}\)$/\1/p' .bench-serve.log | head -1)
+EP=$(parse_endpoint_id .bench-serve.log)
 echo "      EndpointId: ${EP:0:12}..."
 
 echo "[3/5] connect"

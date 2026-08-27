@@ -34,16 +34,16 @@ port is released). It's `#[ignore]`d because it needs a release build and
 the `tools/iroh-relay` binary — missing prerequisites are reported and
 skipped, not failed.
 
-On machines whose environment sets `LANGUAGE` to a non-English value (common on
-`zh_CN` desktops), also pin the locale when running e2e — `LANG=C` alone is
-not enough because gettext prefers `LANGUAGE` over `LANG`:
+`serve` and `tun serve` print a machine-parseable identity line on stdout:
 
-```bash
-env LANG=C LC_ALL=C LANGUAGE= cargo test --release -- --ignored
+```
+ENDPOINT_ID=<64 hex chars>
 ```
 
-Without that, e2e times out grepping for the English banner substring
-`your EndpointId` even though serve printed a localized equivalent.
+This line is never localized. Scripts source `scripts/parse-endpoint-id.sh`
+to read it; e2e parses the same format. Human-facing banner text stays
+translated. The e2e harness also clears `LANGUAGE` when spawning binaries
+(belt-and-suspenders on older builds that lack the machine line).
 
 ## Real-machine phase tests (two machines)
 
@@ -97,3 +97,51 @@ switch the connect machine's network (WiFi off/on or hotspot), then reports
 the drop count, iroh's path events, and whether the session survived — a
 handful of dropped pings is the expected migration cost; 100% loss means the
 session was rebuilt, not migrated.
+
+## Phase test setup (sudo, Tailscale, relay forcing)
+
+### Scoped passwordless sudo (recommended)
+
+Do **not** grant `NOPASSWD: ALL`. For a dedicated test machine, allow only
+the phase/TUN scripts by absolute path:
+
+```
+# /etc/sudoers.d/link-p2p-test  (visudo -f ...)
+kangxi ALL=(root) NOPASSWD: /home/kangxi/文档/link-p2p/scripts/tun-loopback-test.sh, \
+                               /home/kangxi/文档/link-p2p/scripts/phase0-nat-matrix-server.sh, \
+                               /home/kangxi/文档/link-p2p/scripts/phase0-relay-bench-server.sh, \
+                               /home/kangxi/文档/link-p2p/scripts/phase1-migration-server.sh
+```
+
+Adjust the home path if the clone lives elsewhere. Remove the file to revoke.
+Client-side phase scripts also need root on the connect machine — mirror the
+same pattern there if both boxes are yours.
+
+### NAT matrix: run two rounds when Tailscale is installed
+
+If both machines run Tailscale, iroh may select Tailscale direct paths before
+public UDP hole-punching — that is **not** a pure NAT-traversal measurement.
+Run the matrix at least twice:
+
+1. **Tailscale off** on both ends (`sudo tailscale down` or stop the daemon) —
+   baseline for public NAT / n0 hole-punch.
+2. **Tailscale on** (normal daily setup) — documents real-world coexistence.
+
+Compare `path::selected` / `ping` path reports between the two runs.
+
+### Relay throughput: force relay, don't wait for luck
+
+For reproducible relay numbers, drop inbound UDP from the peer's public IP on
+**both** machines while the session is up (relay is TCP/WebSocket; direct UDP
+dies). The harness already documents this:
+
+```bash
+sudo ./scripts/phase-relay-ctl.sh force-relay <peer-public-ip>
+# ... run phase0-relay-bench-{server,client}.sh ...
+sudo ./scripts/phase-relay-ctl.sh clear-relay <peer-public-ip>
+```
+
+Apply the DROP on both sides **before** connecting if you need a clean
+relay-only measurement from the first packet. The bench client's
+`--force-relay <peer-ip>` flag applies its own DROP and prints the command
+for the serve side.

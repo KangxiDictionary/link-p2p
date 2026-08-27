@@ -10,6 +10,8 @@
 export NO_PROXY="127.0.0.1,localhost,::1"
 export no_proxy="127.0.0.1,localhost,::1"
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/parse-endpoint-id.sh
+source ./scripts/parse-endpoint-id.sh
 
 N="${1:-4}"
 DURATION="${2:-6}"
@@ -34,7 +36,7 @@ sleep 8
 
 # collect each serve's EndpointId
 for i in $(seq 1 $N); do
-    EP=$(sed -n 's/^    \([0-9a-f]\{52,\}\)$/\1/p' .bm-serve-$i.log | head -1)
+    EP=$(parse_endpoint_id .bm-serve-$i.log)
     eval "EP_$i=$EP"
 done
 echo "pairs: $N, endpoints: ${EP_1:0:8}.. ${EP_2:0:8}.. ${EP_3:0:8}.. ${EP_4:0:8}.."

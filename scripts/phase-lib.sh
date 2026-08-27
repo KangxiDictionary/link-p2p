@@ -15,6 +15,8 @@
 set -u
 
 PHASE_REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/parse-endpoint-id.sh
+source "$PHASE_REPO_DIR/scripts/parse-endpoint-id.sh"
 # Overridable, e.g. to stub the binary in tests.
 PHASE_BIN="${PHASE_BIN:-$PHASE_REPO_DIR/target/release/link-p2p}"
 PHASE_RUST_LOG="${PHASE_RUST_LOG:-iroh=debug,link_p2p=debug}"
@@ -45,14 +47,14 @@ phase_serve() {
     PHASE_SERVE_PID=$!
     local deadline=$((SECONDS + 90))
     while [ $SECONDS -lt $deadline ]; do
-        grep -q "your EndpointId" "$log" 2>/dev/null && break
+        wait_for_endpoint_id "$log" && break
         sleep 2
     done
-    grep -q "your EndpointId" "$log" 2>/dev/null || {
+    wait_for_endpoint_id "$log" || {
         echo "serve: no EndpointId banner within 90s — see $log" >&2
         exit 1
     }
-    PHASE_SERVE_EP=$(awk '/your EndpointId/{getline; gsub(/[[:space:]]+/, ""); print}' "$log" | tail -1)
+    PHASE_SERVE_EP=$(parse_endpoint_id "$log")
     PHASE_SERVE_VIP=$(awk '/your virtual IP/{getline; gsub(/[[:space:]]+/, ""); print}' "$log" | tail -1)
     [ -n "${PHASE_SERVE_EP:-}" ] || {
         echo "serve: EndpointId parse failed — see $log" >&2

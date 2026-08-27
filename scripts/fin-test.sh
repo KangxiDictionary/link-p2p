@@ -4,6 +4,8 @@
 export NO_PROXY="127.0.0.1,localhost,::1"
 export no_proxy="127.0.0.1,localhost,::1"
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/parse-endpoint-id.sh
+source ./scripts/parse-endpoint-id.sh
 
 pkill -f 'link-p2p' 2>/dev/null
 pkill -f iroh-relay 2>/dev/null
@@ -41,7 +43,7 @@ sleep 1
     --relay http://127.0.0.1:3340 --identity .fin-serve.key >.fin-serve.log 2>&1 &
 S=$!
 sleep 7
-EP=$(sed -n 's/^    \([0-9a-f]\{52,\}\)$/\1/p' .fin-serve.log | head -1)
+EP=$(parse_endpoint_id .fin-serve.log)
 echo "EndpointId: ${EP:0:12}..."
 
 ./target/release/link-p2p connect --to "$EP" --listen 127.0.0.1:19990 \

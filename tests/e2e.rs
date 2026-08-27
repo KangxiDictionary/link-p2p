@@ -86,16 +86,36 @@ fn wait_exit(what: &str, child: &mut Child) {
     }
 }
 
-/// The EndpointId is the line right after "your EndpointId".
+/// Pin locale for spawned test binaries. `LANG=C` alone is not enough when
+/// `LANGUAGE` is set — gettext prefers it over `LANG`.
+fn pin_test_locale(cmd: &mut Command) {
+    cmd.env("LANG", "C");
+    cmd.env("LC_ALL", "C");
+    cmd.env_remove("LANGUAGE");
+}
+
+/// Parse the machine line `ENDPOINT_ID=<64 hex>` from serve/tun serve stdout.
 fn extract_endpoint_id(log: &Path) -> String {
     let content = std::fs::read_to_string(log).expect("serve log readable");
-    content
-        .lines()
-        .skip_while(|l| !l.contains("your EndpointId"))
-        .nth(1)
-        .map(|l| l.trim().to_string())
-        .filter(|l| l.len() == 64 && l.bytes().all(|b| b.is_ascii_hexdigit()))
-        .expect("EndpointId line")
+    for line in content.lines() {
+        if let Some(id) = line.strip_prefix("ENDPOINT_ID=") {
+            if id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return id.to_string();
+            }
+        }
+    }
+    panic!("ENDPOINT_ID= line not found in {}", log.display());
+}
+
+fn serve_log_has_endpoint_id(log: &Path) -> bool {
+    std::fs::read_to_string(log)
+        .map(|content| {
+            content.lines().any(|line| {
+                line.strip_prefix("ENDPOINT_ID=")
+                    .is_some_and(|id| id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+            })
+        })
+        .unwrap_or(false)
 }
 
 #[test]
@@ -165,10 +185,10 @@ fn e2e_forward_roundtrip_and_clean_shutdown() {
     let serve_log = tmp.join("serve.log");
     let serve_out = std::fs::File::create(&serve_log).expect("serve log file");
     guard.0.push(
-        Command::new(&bin)
-            .env("LANG", "C")
-            .env("LC_ALL", "C")
-            .args([
+        {
+            let mut cmd = Command::new(&bin);
+            pin_test_locale(&mut cmd);
+            cmd.args([
                 "--ephemeral",
                 "serve",
                 "--forward",
@@ -179,13 +199,12 @@ fn e2e_forward_roundtrip_and_clean_shutdown() {
             .stdout(Stdio::from(serve_out))
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn serve"),
+            .expect("spawn serve")
+        },
     );
 
     wait_for("serve EndpointId", Duration::from_secs(30), || {
-        std::fs::read_to_string(&serve_log)
-            .map(|c| c.contains("your EndpointId"))
-            .unwrap_or(false)
+        serve_log_has_endpoint_id(&serve_log)
     });
     let ep = extract_endpoint_id(&serve_log);
 
@@ -193,10 +212,10 @@ fn e2e_forward_roundtrip_and_clean_shutdown() {
     let conn_log = tmp.join("conn.log");
     let conn_out = std::fs::File::create(&conn_log).expect("conn log file");
     guard.0.push(
-        Command::new(&bin)
-            .env("LANG", "C")
-            .env("LC_ALL", "C")
-            .args([
+        {
+            let mut cmd = Command::new(&bin);
+            pin_test_locale(&mut cmd);
+            cmd.args([
                 "--ephemeral",
                 "connect",
                 "--to",
@@ -209,7 +228,8 @@ fn e2e_forward_roundtrip_and_clean_shutdown() {
             .stdout(Stdio::from(conn_out))
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn connect"),
+            .expect("spawn connect")
+        },
     );
 
     // The listener is up only after the QUIC dial succeeded, so a successful
@@ -354,10 +374,10 @@ fn e2e_proxy_socks5_roundtrip_and_clean_shutdown() {
     let serve_log = tmp.join("serve.log");
     let serve_out = std::fs::File::create(&serve_log).expect("serve log file");
     guard.0.push(
-        Command::new(&bin)
-            .env("LANG", "C")
-            .env("LC_ALL", "C")
-            .args([
+        {
+            let mut cmd = Command::new(&bin);
+            pin_test_locale(&mut cmd);
+            cmd.args([
                 "--ephemeral",
                 "serve",
                 "--proxy",
@@ -368,13 +388,12 @@ fn e2e_proxy_socks5_roundtrip_and_clean_shutdown() {
             .stdout(Stdio::from(serve_out))
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn serve"),
+            .expect("spawn serve")
+        },
     );
 
     wait_for("serve EndpointId", Duration::from_secs(30), || {
-        std::fs::read_to_string(&serve_log)
-            .map(|c| c.contains("your EndpointId"))
-            .unwrap_or(false)
+        serve_log_has_endpoint_id(&serve_log)
     });
     let ep = extract_endpoint_id(&serve_log);
 
@@ -382,10 +401,10 @@ fn e2e_proxy_socks5_roundtrip_and_clean_shutdown() {
     let conn_log = tmp.join("conn.log");
     let conn_out = std::fs::File::create(&conn_log).expect("conn log file");
     guard.0.push(
-        Command::new(&bin)
-            .env("LANG", "C")
-            .env("LC_ALL", "C")
-            .args([
+        {
+            let mut cmd = Command::new(&bin);
+            pin_test_locale(&mut cmd);
+            cmd.args([
                 "--ephemeral",
                 "connect",
                 "--to",
@@ -398,7 +417,8 @@ fn e2e_proxy_socks5_roundtrip_and_clean_shutdown() {
             .stdout(Stdio::from(conn_out))
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn connect"),
+            .expect("spawn connect")
+        },
     );
 
     wait_for("connect socks5 listener", Duration::from_secs(30), || {

@@ -548,7 +548,9 @@ pub async fn run_tun_serve(
             "your EndpointId (give this to peers running `tun connect --to`):"
         ))
     );
-    println!("    {}", styler.highlight(&own_id.to_string()));
+    let ep_hex = own_id.to_string();
+    println!("    {}", styler.highlight(&ep_hex));
+    println!("ENDPOINT_ID={ep_hex}");
     println!();
     println!("{}", styler.dim(&tr!("Press Ctrl+C to stop.")));
 
