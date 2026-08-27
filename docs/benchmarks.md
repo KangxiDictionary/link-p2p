@@ -5,7 +5,9 @@ For where zero-copy and async tuning help (and where they do not), see
 
 The actual point of this MVP was to get real numbers before building anything
 else. This document keeps the methodology and the machine-specific numbers;
-the README only points here.
+the README only points here. For bottleneck attribution (config vs protocol)
+and the loopback A/B matrix, see [`performance.md`](performance.md) and
+[`scripts/bench-transport-matrix.sh`](../scripts/bench-transport-matrix.sh).
 
 ## Methodology
 

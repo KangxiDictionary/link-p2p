@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Unix-style UX** (`docs/unix.md`, **`cfg(unix)` builds only**):
+  `connect --stdio`, `--to -` (EndpointId from stdin), `link-p2p man`.
+  Cross-platform: `ping --format json`, stable exit codes (0–5), `-q`/`-v`/`-vv`,
+  `LINK_P2P_*` env defaults (flags win), shell completions. Windows notes:
+  `docs/windows.md`.
+- **Transport tune** env/flags: `LINK_P2P_CC` / `--cc`,
+  `LINK_P2P_SEND_WINDOW` / `--send-window`,
+  `LINK_P2P_STREAM_RECV_WINDOW` / `--stream-recv-window` (see
+  `docs/performance.md`).
+- `scripts/bench-transport-matrix.sh`: one-session loopback matrix
+  (baseline | sysctl | bbr3 | bbr3+windows) for config exclusion before
+  protocol-wall claims.
 - `contrib/systemd/iroh-relay.service` template unit to run a self-hosted
   relay as a service. Pointing both ends at `--relay http://<your-relay>:3340`
   replaces n0's public relay — the source of the recurring
@@ -44,6 +56,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- SOCKS5 `write_target` batches the header into one `write_all` and omits
+  `.flush()` so callers can keep an unbuffered iroh QUIC `SendStream`
+  (BufWriter without flush would hang; documented in `docs/performance.md`).
 - Reconnect wakeups are event-driven (`tokio::sync::watch`) instead of
   200ms polling: a local client arriving during a reconnect window is
   served the instant the new connection lands, not up to 200ms later.
@@ -55,9 +70,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in `Builder::alpns` at TLS negotiation — so the ping dispatch was dead
   code. `PING_ALPN` is now registered alongside `TUN_ALPN`.
 - TUN mode no longer spams a per-packet `warn!` for oversized datagrams
-  after an MTU drop (a local sender keeps pushing old-size packets until it
-  notices; TUN has no ICMP feedback to shrink it). Drops are now counted
-  and flushed as one summary line on the existing 2s refresh tick.
+  after an MTU drop. Drops are counted and flushed as one summary line on
+  the existing 2s refresh tick; each drop also injects an ICMP Type 3
+  Code 4 (Fragmentation Needed) back into the TUN so local TCP PMTUD
+  shrinks MSS immediately instead of waiting for black-hole timeouts.
+  Raising the interface MTU is held off for 15s after a shrink so path
+  ceiling flicker (e.g. Tailscale vs relay) cannot oscillate
+  raise→drop→shrink.
 
 ## [0.1.0] - 2026-08-21
 

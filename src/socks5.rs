@@ -65,6 +65,15 @@ fn encode_target(buf: &mut Vec<u8>, t: &Target) -> Result<()> {
     Ok(())
 }
 
+/// Write the proxy-mode stream header.
+///
+/// Encodes into a stack/heap buffer and issues a single `write_all`. There is
+/// deliberately **no** `.flush()` afterward: callers pass an unbuffered iroh
+/// QUIC `SendStream`, where each write is already scheduled for the wire.
+/// If a future caller wraps `W` in `BufWriter` (or similar), they must either
+/// restore an explicit `flush()` here or flush themselves — otherwise the
+/// header can sit in the buffer until it fills or the stream closes, which
+/// looks like a hung handshake under light traffic.
 pub async fn write_target<W: AsyncWrite + Unpin>(w: &mut W, t: &Target) -> Result<()> {
     let mut buf = Vec::with_capacity(270);
     encode_target(&mut buf, t)?;

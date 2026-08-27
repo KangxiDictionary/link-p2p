@@ -45,7 +45,9 @@ vip(ep) = 172.24.0.0/16 段内，取 BLAKE3(EndpointId) 的低 16 bit 作为主�
 - 运行时必须 `max_datagram_size()` 钳制：noq 保证"至少 1KB 出头"，若协商值 < 1280（理论上极少见）以协商值为准。
 - **已知限制：`max_datagram_size()` 是本端值，不是双向对称的**。noq 的 `max_size()` = `min(本端 current_mtu() 预算, 对端公告的 max_datagram_frame_size)`，前者由本端自己发 PMTUD 探测、受本端出网接口 MTU 约束（PPPoE/VPN/Tailscale exit node 等都会让两端不一致），后者默认 65535 档、对称。
 - **判读校准（重要）：两端数字不相等本身无害**。每端 tun MTU = `min(1280, 自己的 max_datagram_size)`，只要两边都 ≥ 1280，最终都会被同一个 1280 封顶，差值被抹平。**真正的危险信号是任一端 < 1280**：该端的 tun MTU 被迫小于对端，对端仍按 1280 发包，超出部分在该端 tun 写入时被内核静默丢弃（该端自己的发送没问题，被自己的较小上限钳制）。真机判据：看两台机器 `RUST_LOG=link_p2p=info` 里 `TUN datagram negotiation` 行的 `max_datagram_size` 相对 1280 的位置，而非两数是否相等；`ping -s 1200/1500` 只作交叉确认。若任一端 < 1280 且大包丢包，再补 mini handshake（各开一条 uni stream 交换 MTU，取 min）。注意：该值在会话期间可能随路径 MTU 变化漂移——`run_datagram_loop` 每 2s 重查 `max_datagram_size()`，PMTUD 收敛后接口 MTU 会向上调（日志：`TUN interface MTU raised {0} → {1}`），`TUN datagram negotiation` 那一行只反映建连时刻。
-- 内层超过 MTU 的包由内核在 TUN 接口做标准 IP 分片，隧道层不处理分片。
+- **升/降不对称 + 滞回**：升 MTU 由 2s 定时器驱动（`refresh_tun_mtu`）；降 MTU 只在发送路径撞到超限包时事件驱动（`shrink_tun_mtu`）。缩 MTU 后 **15s 内禁止再升**（`MTU_RAISE_HOLDOFF`），避免 Tailscale 直连 ↔ relay 等路径抖动时出现 raise→丢包→shrink 振荡。运维止血仍可用 `--mtu` 钉在抖动下限（如 1162）。
+- **ICMP PMTUD 反馈（根治“卡一下”）**：超限丢包时不只内部计数，还会向 TUN **反向注入** ICMP Type 3 Code 4（Fragmentation Needed，Next-Hop MTU = 当前 ceiling），源地址为本端 VIP。本机 TCP 立刻收到下一跳 MTU 变小的信号并降 MSS，不必等黑洞探测的重传超时。对 ICMP 自身 / 组播广播源地址不回复；注入限速 20/s。IPv6 Packet Too Big 留给日后（v1 VIP 仅 IPv4）。
+- 内层超过 *接口* MTU 的包由内核在 TUN 接口做标准 IP 分片；超过 *路径 datagram ceiling* 但接口尚未跟上的包由本层丢弃并走上面的 ICMP 路径。
 
 ## 决策 3：与现有 stream 模式的关系 —— 独立子命令，共存
 

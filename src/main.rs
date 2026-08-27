@@ -14,6 +14,7 @@
 //! doesn't compile, it's most likely a small signature drift — check
 //! `cargo doc -p iroh --open` rather than assuming the overall approach is wrong.
 
+mod exit;
 mod i18n;
 mod socks5;
 mod style;
@@ -26,14 +27,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
 use iroh::{
     endpoint::{presets, Connection, QuicTransportConfig, RecvStream, SendStream, VarInt},
     protocol::{AcceptError, ProtocolHandler, Router},
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, SecretKey,
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use noq_proto::congestion::{Bbr3Config, CubicConfig};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+#[allow(unused_imports)]
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinHandle;
@@ -63,20 +67,6 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// waiting for the idle timeout to notice the dead stream.
 const STREAM_ABORT_CODE: VarInt = VarInt::from_u32(1);
 
-/// Buffer size for TCP ↔ QUIC stream relay. Tokio's `io::copy` uses 8 KiB;
-/// a larger buffer reduces syscall/await iterations. Benchmarks show the
-/// ceiling is QUIC processing, not this constant — but 64 KiB is a cheap default.
-const PIPE_BUF_SIZE: usize = 64 * 1024;
-
-/// Hint the kernel for bulk forwarding: disable Nagle, widen socket buffers.
-fn tune_tcp(socket: &TcpStream) {
-    let _ = socket.set_nodelay(true);
-    const BUF: usize = 256 * 1024;
-    let sock = socket2::SockRef::from(socket);
-    let _ = sock.set_recv_buffer_size(BUF);
-    let _ = sock.set_send_buffer_size(BUF);
-}
-
 #[derive(Parser)]
 #[command(
     name = "link-p2p",
@@ -85,18 +75,7 @@ fn tune_tcp(socket: &TcpStream) {
     long_about = "link-p2p exposes a local TCP service to a P2P network (or dials one) \
                   over a direct, end-to-end encrypted QUIC connection. No TUN device, \
                   no root/admin privileges — just a persistent EndpointId and a QUIC hop.",
-    after_help = "QUICK START:\n  \
-                  \x20 # On the machine you want to expose (e.g. its SSH server):\n  \
-                  \x20 link-p2p serve --forward 127.0.0.1:22\n  \
-                  \x20 # -> prints an EndpointId, share it with the other side\n\n  \
-                  \x20 # On the connecting machine:\n  \
-                  \x20 link-p2p connect --to <EndpointId> --listen 127.0.0.1:2222\n  \
-                  \x20 ssh -p 2222 localhost\n\n\
-                  SHELL COMPLETIONS:\n  \
-                  \x20 link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish\n  \
-                  \x20 link-p2p completions bash > /etc/bash_completion.d/link-p2p\n\n\
-                  See README.md for self-hosted --relay setup and benchmarking against \
-                  WireGuard/Tailscale."
+    after_help = "See README.md and docs/windows.md (Windows) or docs/unix.md (Unix)."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -130,7 +109,8 @@ struct Cli {
     /// address discovery is skipped entirely: `connect` dials the peer
     /// directly through this relay, so no DNS/pkarr lookup to iroh.link is
     /// needed. Useful for self-hosted relays and for offline/local testing.
-    #[arg(long, global = true)]
+    /// Also accepted via `LINK_P2P_RELAY` (flag wins).
+    #[arg(long, global = true, env = "LINK_P2P_RELAY")]
     relay: Option<String>,
 
     /// Control colored output: auto (colors on TTY only), always, or never.
@@ -146,6 +126,30 @@ struct Cli {
     /// jq/CI pipelines).
     #[arg(long, global = true, value_enum, default_value_t = LogFormat::Text)]
     log_format: LogFormat,
+
+    /// Quiet user-facing banners (errors still print). Independent of
+    /// `RUST_LOG` / `-v`.
+    #[arg(short = 'q', long, global = true, conflicts_with = "verbose")]
+    quiet: bool,
+
+    /// Increase user-facing / tracing detail (`-v`, `-vv`). Ignored when
+    /// `RUST_LOG` is set.
+    #[arg(short = 'v', long, global = true, action = ArgAction::Count)]
+    verbose: u8,
+
+    /// QUIC congestion controller: `cubic` (default) or `bbr3`. Also
+    /// `LINK_P2P_CC`. Experimental — see docs/performance.md.
+    #[arg(long, global = true, env = "LINK_P2P_CC", value_enum)]
+    cc: Option<CongestionControl>,
+
+    /// QUIC connection send window in bytes. Also `LINK_P2P_SEND_WINDOW`.
+    #[arg(long, global = true, env = "LINK_P2P_SEND_WINDOW")]
+    send_window: Option<u64>,
+
+    /// QUIC per-stream receive window in bytes. Also
+    /// `LINK_P2P_STREAM_RECV_WINDOW`.
+    #[arg(long, global = true, env = "LINK_P2P_STREAM_RECV_WINDOW")]
+    stream_recv_window: Option<u64>,
 
     /// QUIC keepalive interval in seconds (default 5). Keeps NAT UDP
     /// mappings alive; the typical home-router mapping expires after
@@ -167,6 +171,48 @@ struct Cli {
 enum LogFormat {
     Text,
     Json,
+}
+
+/// Machine-oriented output for status commands (`ping`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum OutputFormat {
+    Text,
+    Json,
+}
+
+/// QUIC congestion controller selection (maps to noq-proto factories).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum CongestionControl {
+    Cubic,
+    Bbr3,
+}
+
+/// Tunables applied on top of iroh/noq transport defaults.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TransportTune {
+    cc: Option<CongestionControl>,
+    send_window: Option<u64>,
+    stream_recv_window: Option<u64>,
+}
+
+/// User-facing status lines: respect `-q` and keep stdout clean in `--stdio`.
+#[derive(Clone, Copy)]
+struct Ui {
+    quiet: bool,
+    stderr_only: bool,
+}
+
+impl Ui {
+    fn line(self, s: impl AsRef<str>) {
+        if self.quiet {
+            return;
+        }
+        if self.stderr_only {
+            eprintln!("{}", s.as_ref());
+        } else {
+            println!("{}", s.as_ref());
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -195,17 +241,24 @@ enum Command {
     },
     /// Dial a remote node and expose it as a local TCP listener.
     Connect {
-        /// The remote node's EndpointId (printed by `serve` on startup)
-        #[arg(long)]
-        to: String,
+        /// The remote node's EndpointId (printed by `serve` on startup).
+        /// On Unix, `-` reads one line from stdin. Also `LINK_P2P_TO`.
+        #[arg(long, env = "LINK_P2P_TO")]
+        to: Option<String>,
         /// Local address to listen on, e.g. 127.0.0.1:9090
         #[arg(long, conflicts_with = "socks5_listen")]
         listen: Option<SocketAddr>,
         /// Speak SOCKS5 (no-auth, CONNECT only) on this local address; local
         /// clients can then reach any destination through the remote
-        /// `serve --proxy`. Conflicts with --listen.
+        /// `serve --proxy`. Conflicts with --listen
         #[arg(long, conflicts_with = "listen")]
         socks5_listen: Option<SocketAddr>,
+        /// Pipe stdin/stdout to one QUIC stream (ssh ProxyCommand / rsync -e).
+        /// Unix only. Status banners go to stderr. Conflicts with --listen /
+        /// --socks5-listen and with `--to -` (stdin is the data path).
+        #[cfg(unix)]
+        #[arg(long, conflicts_with_all = ["listen", "socks5_listen"])]
+        stdio: bool,
         /// Direct address hint(s) for the peer (repeatable), e.g. its public
         /// ip:port or a LAN address. Dialed directly, skipping discovery —
         /// use it when you exchanged addresses out-of-band and want no
@@ -227,22 +280,30 @@ enum Command {
     },
     /// Measure RTT to a remote node over the P2P network.
     Ping {
-        /// The remote node's EndpointId (printed by `serve` on startup)
-        #[arg(long)]
-        to: String,
+        /// The remote node's EndpointId (printed by `serve` on startup).
+        /// Use `-` to read one line from stdin. Also `LINK_P2P_TO`.
+        #[arg(long, env = "LINK_P2P_TO")]
+        to: Option<String>,
         /// Direct address hint(s) for the peer (repeatable) — see `connect
         /// --to-addr`. Dialed directly, skipping discovery.
         #[arg(long = "to-addr")]
         to_addr: Vec<SocketAddr>,
+        /// Output format: text (default) or json (for jq).
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
     },
     /// Print a shell completion script to stdout.
     ///
     /// Redirect it to wherever your shell loads completions from, e.g.
-    /// `link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish`.
+    /// `link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish`
+    /// or `link-p2p completions powershell` on Windows.
     Completions {
         /// Which shell to generate a completion script for.
         shell: Shell,
     },
+    /// Print a man page (troff) for link-p2p to stdout. Unix builds only.
+    #[cfg(unix)]
+    Man,
     /// Print help for link-p2p or one of its subcommands.
     //
     // (implementation detail, not user-facing: this replaces clap's built-in
@@ -275,9 +336,10 @@ enum TunCommand {
     },
     /// Dial a peer and bridge this machine to it at the IP layer.
     Connect {
-        /// The remote node's EndpointId (printed by `tun serve` on startup)
-        #[arg(long)]
-        to: String,
+        /// The remote node's EndpointId (printed by `tun serve` on startup).
+        /// Use `-` to read one line from stdin. Also `LINK_P2P_TO`.
+        #[arg(long, env = "LINK_P2P_TO")]
+        to: Option<String>,
         /// Override this node's virtual IP (default: derived from its
         /// EndpointId, inside 172.24.0.0/16).
         #[arg(long)]
@@ -319,8 +381,34 @@ fn version_arg() -> clap::Arg {
 /// The `Command` from derive, with all display strings overridden at runtime
 /// so `--help` output is localized. clap derive only accepts string literals,
 /// so the structure comes from derive and the text is swapped here.
+/// Platform-specific quick start appended to `--help`.
+#[cfg(unix)]
+fn platform_after_help() -> &'static str {
+    "QUICK START:\n    link-p2p serve --forward 127.0.0.1:22\n    link-p2p connect --to <EndpointId> --listen 127.0.0.1:2222\n\nUNIX-ONLY:\n    connect --stdio, --to -, link-p2p man\n\nCOMPLETIONS:\n    link-p2p completions fish|bash|zsh > …\n\nSee docs/unix.md and README.md."
+}
+
+#[cfg(windows)]
+fn platform_after_help() -> &'static str {
+    "QUICK START:\n    link-p2p serve --forward 127.0.0.1:3389\n    link-p2p connect --to <EndpointId> --listen 127.0.0.1:13389\n\nCOMPLETIONS:\n    link-p2p completions powershell | Out-File $PROFILE\\link-p2p.ps1\n\nTUN mode is Linux-only. See docs/windows.md and README.md."
+}
+
+#[cfg(not(any(unix, windows)))]
+fn platform_after_help() -> &'static str {
+    "See README.md. TUN mode requires Linux."
+}
+
+#[cfg(unix)]
+fn peer_to_help() -> &'static str {
+    "The remote node's EndpointId (printed by `serve` on startup). Use `-` to read one line from stdin. Also `LINK_P2P_TO`."
+}
+
+#[cfg(not(unix))]
+fn peer_to_help() -> &'static str {
+    "The remote node's EndpointId (printed by `serve` on startup). Also `LINK_P2P_TO`."
+}
+
 fn localized_command() -> clap::Command {
-    Cli::command()
+    let mut cmd = Cli::command()
         // clap's built-in `help` subcommand hardcodes English text that
         // cannot be localized; disable it and localize the derived Help
         // variant instead (see the Command::Help doc). Same for the
@@ -333,9 +421,7 @@ fn localized_command() -> clap::Command {
         .long_about(tr!(
             "link-p2p exposes a local TCP service to a P2P network (or dials one) over a direct, end-to-end encrypted QUIC connection. No TUN device, no root/admin privileges — just a persistent EndpointId and a QUIC hop."
         ))
-        .after_help(tr!(
-            "QUICK START:\n    # On the machine you want to expose (e.g. its SSH server):\n    link-p2p serve --forward 127.0.0.1:22\n    # -> prints an EndpointId, share it with the other side\n\n    # On the connecting machine:\n    link-p2p connect --to <EndpointId> --listen 127.0.0.1:2222\n    ssh -p 2222 localhost\n\nSHELL COMPLETIONS:\n    link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish\n    link-p2p completions bash > /etc/bash_completion.d/link-p2p\n\nSee README.md for self-hosted --relay setup and benchmarking against WireGuard/Tailscale."
-        ))
+        .after_help(i18n::lookup(platform_after_help()))
         .mut_arg(
             "identity",
             |a| a.help(tr!("Path to store/load this node's persistent secret key. If it doesn't exist yet, a new one is generated and saved there. Default: the XDG config dir, $XDG_CONFIG_HOME/link-p2p/identity.key (usually ~/.config/link-p2p/identity.key); a legacy ./identity.key in the working directory is migrated there once. Keep this stable if you want your EndpointId to stay the same across restarts.")),
@@ -363,6 +449,26 @@ fn localized_command() -> clap::Command {
         .mut_arg(
             "log_format",
             |a| a.help(tr!("Log output format: text (human-readable) or json (structured, for jq/CI pipelines).")),
+        )
+        .mut_arg(
+            "quiet",
+            |a| a.help(tr!("Quiet user-facing banners (errors still print). Independent of RUST_LOG / -v.")),
+        )
+        .mut_arg(
+            "verbose",
+            |a| a.help(tr!("Increase tracing detail (-v, -vv). Ignored when RUST_LOG is set.")),
+        )
+        .mut_arg(
+            "cc",
+            |a| a.help(tr!("QUIC congestion controller: cubic (default) or bbr3. Also LINK_P2P_CC. See docs/performance.md.")),
+        )
+        .mut_arg(
+            "send_window",
+            |a| a.help(tr!("QUIC connection send window in bytes. Also LINK_P2P_SEND_WINDOW.")),
+        )
+        .mut_arg(
+            "stream_recv_window",
+            |a| a.help(tr!("QUIC per-stream receive window in bytes. Also LINK_P2P_STREAM_RECV_WINDOW.")),
         )
         .mut_arg(
             "keepalive",
@@ -394,13 +500,11 @@ fn localized_command() -> clap::Command {
                 )
         })
         .mut_subcommand("connect", |s| {
-            s.disable_help_flag(true)
+            let mut s = s
+                .disable_help_flag(true)
                 .arg(help_arg())
                 .about(tr!("Dial a remote node and expose it as a local TCP listener."))
-                .mut_arg(
-                    "to",
-                    |a| a.help(tr!("The remote node's EndpointId (printed by `serve` on startup)")),
-                )
+                .mut_arg("to", |a| a.help(i18n::lookup(peer_to_help())))
                 .mut_arg(
                     "listen",
                     |a| a.help(tr!("Local address to listen on, e.g. 127.0.0.1:9090")),
@@ -408,11 +512,22 @@ fn localized_command() -> clap::Command {
                 .mut_arg(
                     "socks5_listen",
                     |a| a.help(tr!("Speak SOCKS5 (no-auth, CONNECT only) on this local address; local clients can then reach any destination through the remote `serve --proxy`.")),
-                )
-                .mut_arg(
-                    "to_addr",
-                    |a| a.help(tr!("Direct address hint(s) for the peer (repeatable), e.g. its public ip:port or a LAN address. Dialed directly, skipping discovery — use it when you exchanged addresses out-of-band and want no DNS/pkarr lookup (also faster reconnects). May be combined with --relay, which then stays as the fallback path.")),
-                )
+                );
+            #[cfg(unix)]
+            {
+                s = s.mut_arg(
+                    "stdio",
+                    |a| a.help(tr!(
+                        "Pipe stdin/stdout to one QUIC stream (ssh ProxyCommand / rsync -e). Status banners go to stderr."
+                    )),
+                );
+            }
+            s.mut_arg(
+                "to_addr",
+                |a| a.help(tr!(
+                    "Direct address hint(s) for the peer (repeatable), e.g. its public ip:port or a LAN address. Dialed directly, skipping discovery — use it when you exchanged addresses out-of-band and want no DNS/pkarr lookup (also faster reconnects). May be combined with --relay, which then stays as the fallback path."
+                )),
+            )
         })
         .mut_subcommand("tun", |s| {
             s.disable_help_flag(true)
@@ -443,7 +558,7 @@ fn localized_command() -> clap::Command {
                         .about(tr!("Dial a peer and bridge this machine to it at the IP layer."))
                         .mut_arg(
                             "to",
-                            |a| a.help(tr!("The remote node's EndpointId (printed by `tun serve` on startup)")),
+                            |a| a.help(tr!("The remote node's EndpointId (printed by `tun serve` on startup). Use - to read one line from stdin. Also LINK_P2P_TO.")),
                         )
                         .mut_arg(
                             "tun_ip",
@@ -465,11 +580,15 @@ fn localized_command() -> clap::Command {
                 .about(tr!("Measure RTT to a remote node over the P2P network."))
                 .mut_arg(
                     "to",
-                    |a| a.help(tr!("The remote node's EndpointId (printed by `serve` on startup)")),
+                    |a| a.help(i18n::lookup(peer_to_help())),
                 )
                 .mut_arg(
                     "to_addr",
                     |a| a.help(tr!("Direct address hint(s) for the peer (repeatable) — see `connect --to-addr`. Dialed directly, skipping discovery.")),
+                )
+                .mut_arg(
+                    "format",
+                    |a| a.help(tr!("Output format: text (default) or json (for jq).")),
                 )
         })
         .mut_subcommand("completions", |s| {
@@ -484,7 +603,16 @@ fn localized_command() -> clap::Command {
                     |a| a.help(tr!("Which shell to generate a completion script for.")),
                 )
         })
-        .mut_subcommand("help", |s| {
+        ;
+    #[cfg(unix)]
+    {
+        cmd = cmd.mut_subcommand("man", |s| {
+            s.disable_help_flag(true)
+                .arg(help_arg())
+                .about(tr!("Print a man page (troff) for link-p2p to stdout."))
+        });
+    }
+    cmd.mut_subcommand("help", |s| {
             // Our derived Help variant replaces clap's built-in one (disabled
             // above); this is the only way to localize its description.
             s.disable_help_flag(true)
@@ -512,7 +640,7 @@ async fn main() {
 
     if let Err(e) = real_main(color_mode).await {
         eprintln!("{}: {e:#}", styler.err(&tr!("error")));
-        std::process::exit(1);
+        std::process::exit(exit::code_from(&e));
     }
 }
 
@@ -522,8 +650,8 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
         .get_matches();
     let cli = Cli::from_arg_matches(&matches)?;
 
-    // Completions are pure stdout generation — no identity file, no logging,
-    // no network. Handle it before any of that machinery spins up.
+    // Completions / man are pure stdout generation — no identity file, no
+    // logging, no network. Handle them before any of that machinery spins up.
     if let Command::Completions { shell } = cli.command {
         clap_complete::generate(
             shell,
@@ -531,6 +659,42 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             "link-p2p",
             &mut std::io::stdout(),
         );
+        return Ok(());
+    }
+    #[cfg(unix)]
+    if matches!(cli.command, Command::Man) {
+        // Lightweight man page without clap_mangen (avoids pulling edition2024
+        // crates on older toolchains). Help text comes from the same localized
+        // Command tree as `--help`.
+        let mut cmd = localized_command().color(color_mode.to_clap());
+        let about = cmd.get_about().map(|s| s.to_string()).unwrap_or_default();
+        let mut help = Vec::new();
+        cmd.write_long_help(&mut help)
+            .context(tr!("rendering man page"))?;
+        let help = String::from_utf8_lossy(&help);
+        let mut out = String::new();
+        out.push_str(".TH LINK-P2P 1\n");
+        out.push_str(".SH NAME\n");
+        out.push_str("link-p2p \\- minimal TCP-over-QUIC forwarder on iroh\n");
+        out.push_str(".SH SYNOPSIS\n");
+        out.push_str("link-p2p [OPTIONS] <COMMAND>\n");
+        out.push_str(".SH DESCRIPTION\n");
+        out.push_str(&about);
+        out.push('\n');
+        out.push_str(".SH OPTIONS\n");
+        // Escape leading dots so troff does not treat help lines as macros.
+        for line in help.lines() {
+            if line.starts_with('.') {
+                out.push('\\');
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str(".SH SEE ALSO\n");
+        out.push_str("docs/unix.md, docs/performance.md, README.md\n");
+        std::io::stdout()
+            .write_all(out.as_bytes())
+            .context(tr!("writing man page"))?;
         return Ok(());
     }
 
@@ -554,6 +718,15 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
     }
 
     let log_format = cli.log_format;
+    let ui = Ui {
+        quiet: cli.quiet,
+        stderr_only: false,
+    };
+    let tune = TransportTune {
+        cc: cli.cc,
+        send_window: cli.send_window,
+        stream_recv_window: cli.stream_recv_window,
+    };
 
     // Enable iroh's internal logging (RUST_LOG=iroh=debug etc). Without this
     // iroh's tracing events go nowhere, so RUST_LOG would be a no-op.
@@ -562,12 +735,19 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
     // fair amount of info-level chatter internally (relay/discovery churn),
     // which would drown out our own connection-lifecycle logs. Explicit
     // RUST_LOG always wins, e.g. `RUST_LOG=iroh=trace` for the path-selection
-    // debugging described in README.md.
+    // debugging described in README.md. `-q`/`-v`/`-vv` only apply when
+    // RUST_LOG is unset.
+    let default_filter = match (cli.quiet, cli.verbose) {
+        (true, _) => "link_p2p=warn,iroh=error",
+        (false, 0) => "link_p2p=info,iroh=warn",
+        (false, 1) => "link_p2p=debug,iroh=info",
+        (false, _) => "link_p2p=trace,iroh=debug",
+    };
     let fmt = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("link_p2p=info,iroh=warn")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter)),
         )
         .with_target(true)
         // Emit span close events so timing/byte-count spans (dial, pipe) are
@@ -598,12 +778,9 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
     }
     // --ephemeral: an in-memory identity, nothing touches the filesystem.
     let secret_key = if cli.ephemeral {
-        println!(
-            "{}",
-            styler.warn(&tr!(
-                "ephemeral identity: this EndpointId will not persist across restarts"
-            ))
-        );
+        ui.line(styler.warn(&tr!(
+            "ephemeral identity: this EndpointId will not persist across restarts"
+        )));
         SecretKey::generate()
     } else {
         let identity = resolve_identity_path(cli.identity)?;
@@ -619,15 +796,27 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             allow_private,
         } => {
             if !proxy && forward.is_none() {
-                anyhow::bail!(tr!("serve requires either --forward or --proxy"));
+                return Err(exit::coded(
+                    exit::USAGE,
+                    anyhow::anyhow!(tr!("serve requires either --forward or --proxy")),
+                ));
             }
             // Parse the --allow whitelist up front so a typo'd EndpointId
-            // fails before we bind and wait for the network.
+            // fails before we bind and wait for the network. Empty CLI list
+            // falls back to LINK_P2P_ALLOW (comma-separated).
+            let allow = merge_allow_list(allow);
             let allowed = allow
                 .iter()
                 .map(|s| {
-                    s.parse()
-                        .with_context(|| tr_fmt!("'{0}' is not a valid EndpointId in --allow", s))
+                    s.parse().map_err(|e| {
+                        exit::coded(
+                            exit::USAGE,
+                            anyhow::Error::new(e).context(tr_fmt!(
+                                "'{0}' is not a valid EndpointId in --allow",
+                                s
+                            )),
+                        )
+                    })
                 })
                 .collect::<Result<Vec<_>>>()?;
             run_serve(
@@ -640,6 +829,8 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                 cli.max_conns,
                 Duration::from_secs(cli.keepalive),
                 Duration::from_secs(cli.idle_timeout),
+                tune,
+                ui,
                 styler,
             )
             .await
@@ -648,21 +839,41 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             to,
             listen,
             socks5_listen,
+            #[cfg(unix)]
+            stdio,
             to_addr,
         } => {
-            if listen.is_none() && socks5_listen.is_none() {
-                anyhow::bail!(tr!("connect requires either --listen or --socks5-listen"));
+            #[cfg(not(unix))]
+            let stdio = false;
+            let modes = u8::from(listen.is_some()) + u8::from(socks5_listen.is_some());
+            #[cfg(unix)]
+            let modes = modes + u8::from(stdio);
+            if modes != 1 {
+                let msg = if cfg!(unix) {
+                    tr!("connect requires exactly one of --listen, --socks5-listen, or --stdio")
+                } else {
+                    tr!("connect requires exactly one of --listen or --socks5-listen")
+                };
+                return Err(exit::coded(exit::USAGE, anyhow::anyhow!(msg)));
             }
+            let to = resolve_peer_to(to, stdio)?;
+            let ui = Ui {
+                quiet: ui.quiet,
+                stderr_only: stdio,
+            };
             run_connect(
                 secret_key,
                 &to,
                 listen,
                 socks5_listen,
+                stdio,
                 cli.relay.as_deref(),
                 to_addr,
                 cli.max_conns,
                 Duration::from_secs(cli.keepalive),
                 Duration::from_secs(cli.idle_timeout),
+                tune,
+                ui,
                 styler,
             )
             .await
@@ -672,12 +883,9 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             // concurrency cap doesn't apply. Surface that instead of letting
             // the flag silently do nothing.
             if cli.max_conns != 1024 {
-                println!(
-                    "{}",
-                    styler.warn(&tr!(
-                        "note: --max-conns is not used by TUN mode (single point-to-point session)"
-                    ))
-                );
+                ui.line(styler.warn(&tr!(
+                    "note: --max-conns is not used by TUN mode (single point-to-point session)"
+                )));
             }
             match command {
                 TunCommand::Serve { tun_ip, mtu } => {
@@ -689,6 +897,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                         cli.relay.as_deref(),
                         Duration::from_secs(cli.keepalive),
                         Duration::from_secs(cli.idle_timeout),
+                        tune,
                         styler,
                     )
                     .await
@@ -700,6 +909,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                     to_addr,
                 } => {
                     tun::validate_mtu(mtu)?;
+                    let to = resolve_peer_to(to, false)?;
                     tun::run_tun_connect(
                         secret_key,
                         &to,
@@ -709,13 +919,19 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                         to_addr,
                         Duration::from_secs(cli.keepalive),
                         Duration::from_secs(cli.idle_timeout),
+                        tune,
                         styler,
                     )
                     .await
                 }
             }
         }
-        Command::Ping { to, to_addr } => {
+        Command::Ping {
+            to,
+            to_addr,
+            format,
+        } => {
+            let to = resolve_peer_to(to, false)?;
             run_ping(
                 secret_key,
                 &to,
@@ -723,12 +939,79 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                 to_addr,
                 Duration::from_secs(cli.keepalive),
                 Duration::from_secs(cli.idle_timeout),
+                tune,
+                format,
+                ui,
                 styler,
             )
             .await
         }
-        Command::Completions { .. } => unreachable!("handled above"),
-        Command::Help { .. } => unreachable!("handled above"),
+        Command::Completions { .. } | Command::Man | Command::Help { .. } => {
+            unreachable!("handled before identity/logging setup")
+        }
+    }
+}
+
+/// Resolve `--to` / `LINK_P2P_TO`, including `-` = read EndpointId from stdin.
+/// Incompatible with `--stdio` (stdin is the data path).
+fn resolve_peer_to(to: Option<String>, stdio: bool) -> Result<String> {
+    let raw = to
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            exit::coded(
+                exit::USAGE,
+                anyhow::anyhow!(tr!("missing peer EndpointId (--to or LINK_P2P_TO)")),
+            )
+        })?;
+    if raw == "-" {
+        #[cfg(not(unix))]
+        {
+            return Err(exit::coded(
+                exit::USAGE,
+                anyhow::anyhow!(tr!("--to - (read EndpointId from stdin) is only available on Unix builds")),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            if stdio {
+                return Err(exit::coded(
+                    exit::USAGE,
+                    anyhow::anyhow!(tr!("--to - cannot be combined with --stdio (stdin conflict)")),
+                ));
+            }
+            let mut line = String::new();
+            std::io::stdin()
+                .read_line(&mut line)
+                .context(tr!("reading EndpointId from stdin"))?;
+            let id = line.trim();
+            if id.is_empty() {
+                return Err(exit::coded(
+                    exit::USAGE,
+                    anyhow::anyhow!(tr!("empty EndpointId on stdin")),
+                ));
+            }
+            if let Some(rest) = id.strip_prefix("ENDPOINT_ID=") {
+                return Ok(rest.trim().to_string());
+            }
+            return Ok(id.to_string());
+        }
+    }
+    Ok(raw)
+}
+
+/// CLI `--allow` wins; otherwise parse comma-separated `LINK_P2P_ALLOW`.
+fn merge_allow_list(cli: Vec<String>) -> Vec<String> {
+    if !cli.is_empty() {
+        return cli;
+    }
+    match std::env::var("LINK_P2P_ALLOW") {
+        Ok(s) if !s.trim().is_empty() => s
+            .split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -1103,8 +1386,9 @@ fn build_endpoint(
     relay: Option<&str>,
     keepalive: Duration,
     idle_timeout: Duration,
+    tune: &TransportTune,
 ) -> Result<iroh::endpoint::Builder> {
-    let transport = transport_config(keepalive, idle_timeout)?;
+    let transport = transport_config(keepalive, idle_timeout, tune)?;
     match relay {
         Some(relay_url) => {
             // Minimal sets only the mandatory crypto provider; we configure
@@ -1168,11 +1452,34 @@ fn build_dial_addr(
 /// Both are CLI-tunable (`--keepalive`, `--idle-timeout`) because the right
 /// value depends on the network: aggressive home-router NATs want a shorter
 /// keepalive, high-latency or lossy links want a longer idle timeout.
-fn transport_config(keepalive: Duration, idle_timeout: Duration) -> Result<QuicTransportConfig> {
-    Ok(QuicTransportConfig::builder()
+fn transport_config(
+    keepalive: Duration,
+    idle_timeout: Duration,
+    tune: &TransportTune,
+) -> Result<QuicTransportConfig> {
+    let mut b = QuicTransportConfig::builder()
         .keep_alive_interval(keepalive)
-        .max_idle_timeout(Some(idle_timeout.try_into()?))
-        .build())
+        .max_idle_timeout(Some(idle_timeout.try_into()?));
+    // Defaults are CUBIC + ~100Mbps/100ms windows (noq). Override only when
+    // the operator asked — see docs/performance.md and the transport matrix.
+    match tune.cc {
+        Some(CongestionControl::Cubic) => {
+            b = b.congestion_controller_factory(Arc::new(CubicConfig::default()));
+        }
+        Some(CongestionControl::Bbr3) => {
+            b = b.congestion_controller_factory(Arc::new(Bbr3Config::default()));
+        }
+        None => {}
+    }
+    if let Some(w) = tune.send_window {
+        b = b.send_window(w);
+    }
+    if let Some(w) = tune.stream_recv_window {
+        b = b.stream_receive_window(VarInt::from_u64(w).map_err(|_| {
+            anyhow::anyhow!(tr!("--stream-recv-window / LINK_P2P_STREAM_RECV_WINDOW out of range"))
+        })?);
+    }
+    Ok(b.build())
 }
 
 // ---------------------------------------------------------------------------
@@ -1191,9 +1498,12 @@ async fn run_serve(
     max_conns: usize,
     keepalive: Duration,
     idle_timeout: Duration,
+    tune: TransportTune,
+    ui: Ui,
     styler: Styler,
 ) -> Result<()> {
-    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout)?
+    let _ = ui; // banners still use println for ENDPOINT_ID machine line compat
+    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune)?
         .alpns(vec![ALPN.to_vec(), PING_ALPN.to_vec()])
         .bind()
         .await
@@ -1454,7 +1764,6 @@ async fn handle_forward_stream(
     let tcp = TcpStream::connect(target)
         .await
         .with_context(|| tr_fmt!("connecting to {0}", target))?;
-    tune_tcp(&tcp);
     pipe_streams(tcp, send, recv).await
 }
 
@@ -1683,91 +1992,91 @@ async fn run_connect(
     to: &str,
     listen: Option<SocketAddr>,
     socks5_listen: Option<SocketAddr>,
+    stdio: bool,
     relay: Option<&str>,
     to_addr: Vec<SocketAddr>,
     max_conns: usize,
     keepalive: Duration,
     idle_timeout: Duration,
+    tune: TransportTune,
+    ui: Ui,
     styler: Styler,
 ) -> Result<()> {
-    // Exactly one of --listen / --socks5-listen was validated by the caller.
-    let local_addr = socks5_listen.or(listen).expect("validated");
-    let is_socks5 = socks5_listen.is_some();
-    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout)?
+    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune)?
         .bind()
         .await
-        .context(tr!("binding endpoint"))?;
+        .map_err(|e| exit::coded(exit::CONNECT, anyhow::Error::new(e).context(tr!("binding endpoint"))))?;
     wait_online(&endpoint).await?;
 
-    let remote_id: EndpointId = to
-        .parse()
-        .with_context(|| tr_fmt!("'{0}' is not a valid EndpointId", to))?;
+    let remote_id: EndpointId = to.parse().map_err(|e| {
+        exit::coded(
+            exit::USAGE,
+            anyhow::Error::new(e).context(tr_fmt!("'{0}' is not a valid EndpointId", to)),
+        )
+    })?;
 
     let dial_addr = build_dial_addr(remote_id, relay, &to_addr)?;
     if !to_addr.is_empty() {
-        println!(
-            "  {}",
-            styler.dim(&tr_fmt!(
-                "dialing the peer's direct address hint(s): {0}",
-                to_addr
-                    .iter()
-                    .map(|a| a.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))
-        );
+        ui.line(styler.dim(&tr_fmt!(
+            "dialing the peer's direct address hint(s): {0}",
+            to_addr
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
     }
 
-    println!("{}", styler.info(&tr_fmt!("dialing {0}...", remote_id)));
-    // Time the handshake. Deliberately a structured event, not a span:
-    // iroh spawns long-lived internal tasks during connect() that inherit
-    // the current span (tokio::spawn captures it), which would keep the span
-    // open for the whole connection lifetime and never emit a close event.
+    ui.line(styler.info(&tr_fmt!("dialing {0}...", remote_id)));
     let start = std::time::Instant::now();
     let connection = endpoint
         .connect(dial_addr.clone(), ALPN)
         .await
-        .context(tr!("connecting to remote endpoint"))?;
+        .map_err(|e| exit::coded(exit::CONNECT, anyhow::Error::new(e).context(tr!("connecting to remote endpoint"))))?;
     tracing::debug!(
         peer = %remote_id,
         elapsed_ms = start.elapsed().as_millis() as u64,
         "dial completed"
     );
 
-    // Seed the connection slot and start the reconnect watcher: when the
-    // QUIC connection dies, it re-dials with backoff and swaps the slot.
-    // The local TCP listener keeps accepting throughout — clients that
-    // arrive during a reconnect wait in open_stream_wait.
+    if stdio {
+        #[cfg(unix)]
+        {
+            ui.line(styler.ok(&tr!("connected. piping stdin/stdout to the remote peer.")));
+            let (send, recv) = connection
+                .open_bi()
+                .await
+                .context(tr!("opening stream"))?;
+            let result = pipe_stdio(send, recv).await;
+            endpoint.close().await;
+            return result;
+        }
+        #[cfg(not(unix))]
+        unreachable!("stdio validated only on Unix builds");
+    }
+
+    // Exactly one of --listen / --socks5-listen was validated by the caller.
+    let local_addr = socks5_listen.or(listen).expect("validated");
+    let is_socks5 = socks5_listen.is_some();
+
     let slot = ConnSlot::new(Some(connection.clone()));
     spawn_reconnect_watcher(&slot, &endpoint, dial_addr, remote_id);
-    // Same path-quality observability as the serve side.
     spawn_path_stats_logger(connection, remote_id);
 
     let tcp_listener = TcpListener::bind(local_addr)
         .await
         .with_context(|| tr_fmt!("binding local listener on {0}", local_addr))?;
-    // The "connected" banner comes only after the listener is actually up —
-    // printing it before bind would claim success for a port that's taken.
-    println!(
-        "{}",
-        styler.ok(&tr_fmt!(
-            "connected. local TCP listener on {0} now forwards to the remote peer.",
-            local_addr
-        ))
-    );
+    ui.line(styler.ok(&tr_fmt!(
+        "connected. local TCP listener on {0} now forwards to the remote peer.",
+        local_addr
+    )));
 
-    // Same concurrency bound as serve. Here the permit is acquired *inside*
-    // the spawned task so the accept loop stays responsive: excess local
-    // connections queue in the kernel backlog, and only `max_conns` of them
-    // are actively forwarded at any time.
     let semaphore = Arc::new(Semaphore::new(if max_conns == 0 {
         usize::MAX
     } else {
         max_conns
     }));
 
-    // Track every spawned forwarder so Ctrl+C can drain them (bounded)
-    // instead of dropping them mid-flush.
     let mut tasks = Vec::new();
 
     loop {
@@ -1778,21 +2087,13 @@ async fn run_connect(
                 let semaphore = semaphore.clone();
                 tasks.push(tokio::spawn(async move {
                     let result = async {
-                        tune_tcp(&tcp_stream);
                         if is_socks5 {
-                            // SOCKS5 mode: parse the local client's CONNECT
-                            // request, then tell the remote `serve --proxy`
-                            // where to dial via the stream header. The
-                            // handshake happens before the permit so a client
-                            // that never completes it doesn't hold a slot.
                             let target = socks5::accept_handshake(&mut tcp_stream).await?;
                             let _permit = semaphore.acquire_owned().await?;
                             let (mut send, recv) = open_stream_wait(&slot).await?;
                             socks5::write_target(&mut send, &target).await?;
                             pipe_streams(tcp_stream, send, recv).await
                         } else {
-                            // Plain mode: forward to the remote serve's
-                            // fixed --forward target.
                             let _permit = semaphore.acquire_owned().await?;
                             let (send, recv) = open_stream_wait(&slot).await?;
                             pipe_streams(tcp_stream, send, recv).await
@@ -1805,16 +2106,12 @@ async fn run_connect(
                 }));
             }
             _ = tokio::signal::ctrl_c() => {
-                // Stop accepting new local connections.
-                println!("{}", styler.warn(&tr!("shutting down...")));
+                ui.line(styler.warn(&tr!("shutting down...")));
                 break;
             }
         }
     }
-    // Graceful drain: give in-flight streams a bounded window to flush their
-    // last bytes before the runtime is torn down, instead of cutting them off
-    // the instant the process exits. Long-running streams are cut at the
-    // timeout (DRAIN_TIMEOUT).
+
     let drain_deadline = tokio::time::sleep(DRAIN_TIMEOUT);
     tokio::pin!(drain_deadline);
     for task in tasks {
@@ -1823,6 +2120,7 @@ async fn run_connect(
             _ = &mut drain_deadline => break,
         }
     }
+    endpoint.close().await;
     Ok(())
 }
 
@@ -1839,25 +2137,33 @@ async fn run_ping(
     to_addr: Vec<SocketAddr>,
     keepalive: Duration,
     idle_timeout: Duration,
+    tune: TransportTune,
+    format: OutputFormat,
+    ui: Ui,
     styler: Styler,
 ) -> Result<()> {
-    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout)?
+    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune)?
         .bind()
         .await
-        .context(tr!("binding endpoint"))?;
+        .map_err(|e| exit::coded(exit::CONNECT, anyhow::Error::new(e).context(tr!("binding endpoint"))))?;
     wait_online(&endpoint).await?;
 
-    let remote_id: EndpointId = to
-        .parse()
-        .with_context(|| tr_fmt!("'{0}' is not a valid EndpointId", to))?;
+    let remote_id: EndpointId = to.parse().map_err(|e| {
+        exit::coded(
+            exit::USAGE,
+            anyhow::Error::new(e).context(tr_fmt!("'{0}' is not a valid EndpointId", to)),
+        )
+    })?;
 
     let dial_addr = build_dial_addr(remote_id, relay, &to_addr)?;
 
-    println!("{}", styler.info(&tr_fmt!("pinging {0}...", remote_id)));
+    if format == OutputFormat::Text {
+        ui.line(styler.info(&tr_fmt!("pinging {0}...", remote_id)));
+    }
     let connection = endpoint
         .connect(dial_addr, PING_ALPN)
         .await
-        .context(tr!("connecting to remote endpoint"))?;
+        .map_err(|e| exit::coded(exit::CONNECT, anyhow::Error::new(e).context(tr!("connecting to remote endpoint"))))?;
 
     let start = std::time::Instant::now();
     let (mut send, mut recv) = connection.open_bi().await?;
@@ -1874,35 +2180,44 @@ async fn run_ping(
         bail!(tr!("peer echoed a mismatched ping timestamp"));
     }
 
-    println!(
-        "{}",
-        styler.ok(&tr_fmt!(
-            "pong from {0}: RTT {1}µs",
-            remote_id.fmt_short(),
-            rtt_us
-        ))
-    );
-    // iroh 1.0.3 exposes no "current path" query on an established
-    // Connection, so classify via the stats: a direct path carries UDP, a
-    // relay-only path carries everything over the relay's TCP/WebSocket.
     let stats = connection.stats();
-    if stats.udp_tx.datagrams + stats.udp_rx.datagrams > 0 {
-        println!("  {}", styler.dim(&tr!("path: direct (UDP)")));
+    let path = if stats.udp_tx.datagrams + stats.udp_rx.datagrams > 0 {
+        "direct"
     } else {
-        println!(
-            "  {}",
-            styler.dim(&tr!("path: relay (no direct UDP path yet)"))
-        );
+        "relay"
+    };
+
+    match format {
+        OutputFormat::Json => {
+            // Always stdout — machine output for jq, even under -q.
+            println!(
+                "{{\"peer\":\"{peer}\",\"rtt_us\":{rtt},\"path\":\"{path}\"}}",
+                peer = remote_id,
+                rtt = rtt_us,
+                path = path,
+            );
+        }
+        OutputFormat::Text => {
+            ui.line(styler.ok(&tr_fmt!(
+                "pong from {0}: RTT {1}µs",
+                remote_id.fmt_short(),
+                rtt_us
+            )));
+            if path == "direct" {
+                ui.line(styler.dim(&tr!("path: direct (UDP)")));
+            } else {
+                ui.line(styler.dim(&tr!("path: relay (no direct UDP path yet)")));
+            }
+        }
     }
-    // Close gracefully instead of dropping the socket (avoids iroh's
-    // ungraceful-drop error and lets the peer's session end immediately).
     endpoint.close().await;
     Ok(())
 }
 
-// Bidirectional relay: TCP socket ↔ QUIC bidi stream. Each direction runs
-// concurrently; a clean EOF on one side does not cancel the other; an error
-// on one side resets/stops the QUIC half promptly.
+// ---------------------------------------------------------------------------
+// shared: bidirectional copy between a TCP socket and a QUIC stream pair.
+// ---------------------------------------------------------------------------
+
 async fn pipe_streams(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
     let span = tracing::debug_span!(
         "pipe",
@@ -1915,15 +2230,27 @@ async fn pipe_streams(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream
 
         let client_to_remote = async {
             let n = copy(&mut tcp_read, &mut send).await?;
+            // Signal "no more data" on the QUIC send side so the peer's
+            // tokio::io::copy on its end returns instead of hanging forever.
             send.finish().context(tr!("finishing send stream"))?;
             Ok::<_, anyhow::Error>(n)
         };
         let remote_to_client = async {
             let r = copy(&mut recv, &mut tcp_write).await;
+            // The stream side is done (EOF or error): signal EOF to the local TCP
+            // peer explicitly. Relying on the write half being dropped at function
+            // exit would delay the FIN until *both* directions finish, which
+            // never happens when the peer keeps the connection open.
             let _ = tcp_write.shutdown().await;
             r
         };
 
+        // Run both directions concurrently. A half-closed TCP connection (client
+        // stops writing but still reads, or vice versa) is common and shouldn't be
+        // treated as an error on its own, so a *clean* completion of one direction
+        // must not cancel the other. An *error* in either direction, however,
+        // should abort the whole pipe promptly rather than waiting for the other
+        // side to give up on its own.
         let mut client_to_remote = Box::pin(client_to_remote);
         let mut remote_to_client = Box::pin(remote_to_client);
         let (mut res_client, mut res_remote) = (None, None);
@@ -1939,6 +2266,8 @@ async fn pipe_streams(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream
                 }
             }
         }
+        // The futures above hold `&mut` borrows of send/recv; drop them to
+        // release the borrows before the error path touches those streams.
         drop(client_to_remote);
         drop(remote_to_client);
         match (res_client, res_remote) {
@@ -1949,11 +2278,22 @@ async fn pipe_streams(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream
                 record_span.record("recv_bytes", recvd);
                 Ok(())
             }
+            // One direction errored; the other was cancelled by the select! drop.
+            // Tell the peer explicitly instead of letting the stream half just
+            // drop: a RESET/STOP propagates immediately, whereas a silently
+            // dropped stream only becomes visible to the peer once the idle
+            // timeout fires (which is the point of task 1's keepalive work —
+            // the reset makes abnormal teardown cheap). Best-effort: if the
+            // stream is already closed, there's nothing to signal.
             (Some(a), None) => {
+                // client→remote copy failed (send side broke): stop reading
+                // from the peer so it doesn't keep pushing data into a dead pipe.
                 let _ = recv.stop(STREAM_ABORT_CODE);
                 a.map(|_| ())
             }
             (None, Some(b)) => {
+                // remote→client copy failed (recv side broke): reset our send
+                // half so the peer's read fails immediately instead of hanging.
                 let _ = send.reset(STREAM_ABORT_CODE);
                 b.map(|_| ())
             }
@@ -1963,25 +2303,67 @@ async fn pipe_streams(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream
     fut.instrument(span).await
 }
 
+
+/// stdin/stdout ↔ QUIC bidi stream (`connect --stdio`). Unix builds only.
+#[cfg(unix)]
+async fn pipe_stdio(mut send: SendStream, mut recv: RecvStream) -> Result<()> {
+    let mut stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+
+    let client_to_remote = async {
+        let n = copy(&mut stdin, &mut send).await?;
+        send.finish().context(tr!("finishing send stream"))?;
+        Ok::<_, anyhow::Error>(n)
+    };
+    let remote_to_client = async {
+        let r = copy(&mut recv, &mut stdout).await;
+        let _ = stdout.flush().await;
+        r
+    };
+
+    let mut client_to_remote = Box::pin(client_to_remote);
+    let mut remote_to_client = Box::pin(remote_to_client);
+    let (mut res_client, mut res_remote) = (None, None);
+    while res_client.is_none() || res_remote.is_none() {
+        tokio::select! {
+            r = &mut client_to_remote, if res_client.is_none() => {
+                res_client = Some(r);
+                if res_client.as_ref().unwrap().is_err() { break; }
+            }
+            r = &mut remote_to_client, if res_remote.is_none() => {
+                res_remote = Some(r);
+                if res_remote.as_ref().unwrap().is_err() { break; }
+            }
+        }
+    }
+    drop(client_to_remote);
+    drop(remote_to_client);
+    match (res_client, res_remote) {
+        (Some(a), Some(b)) => {
+            a?;
+            b?;
+            Ok(())
+        }
+        (Some(a), None) => {
+            let _ = recv.stop(STREAM_ABORT_CODE);
+            a.map(|_| ())
+        }
+        (None, Some(b)) => {
+            let _ = send.reset(STREAM_ABORT_CODE);
+            b.map(|_| ())
+        }
+        (None, None) => unreachable!("loop exits only when both complete or one errors"),
+    }
+}
+
 async fn copy<R, W>(reader: &mut R, writer: &mut W) -> Result<u64>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut buf = vec![0u8; PIPE_BUF_SIZE];
-    let mut total = 0u64;
-    loop {
-        let n = reader.read(&mut buf).await.context(tr!("reading stream data"))?;
-        if n == 0 {
-            break;
-        }
-        writer
-            .write_all(&buf[..n])
-            .await
-            .context(tr!("writing stream data"))?;
-        total += n as u64;
-    }
-    Ok(total)
+    tokio::io::copy(reader, writer)
+        .await
+        .context(tr!("copying stream data"))
 }
 
 #[cfg(test)]

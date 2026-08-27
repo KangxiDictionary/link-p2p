@@ -89,8 +89,6 @@ msgstr "转发 P2P 入站流的目标本地地址，例如 127.0.0.1:8080"
 msgid "Dial a remote node and expose it as a local TCP listener."
 msgstr "拨号连接远端节点，并将其暴露为本地 TCP 监听端口。"
 
-msgid "The remote node's EndpointId (printed by `serve` on startup)"
-msgstr "远端节点的 EndpointId（`serve` 启动时会打印）"
 
 msgid "Local address to listen on, e.g. 127.0.0.1:9090"
 msgstr "本地监听地址，例如 127.0.0.1:9090"
@@ -281,8 +279,6 @@ msgstr ""
 msgid "serve requires either --forward or --proxy"
 msgstr "serve 需要 --forward 或 --proxy 其中之一"
 
-msgid "connect requires either --listen or --socks5-listen"
-msgstr "connect 需要 --listen 或 --socks5-listen 其中之一"
 
 # --- TUN 模式 ---
 
@@ -332,8 +328,6 @@ msgstr ""
 "TUN 接口 MTU 的上限（默认 1280）。最终 MTU 为 min(该值, 协商出的 QUIC "
 "datagram 上限)；超过 1280 的值会被拒绝。"
 
-msgid "The remote node's EndpointId (printed by `tun serve` on startup)"
-msgstr "远端节点的 EndpointId（`tun serve` 启动时会打印）"
 
 msgid ""
 "--mtu must be at most 1280 (got {0}); higher values would fragment the outer "
@@ -515,8 +509,11 @@ msgstr "打印版本"
 msgid "path datagram ceiling dropped to {0}; lowered TUN interface MTU and dropped one packet"
 msgstr "路径数据报上限降至 {0}，已下调 TUN 接口 MTU 并丢弃一个数据包"
 
-msgid "dropped {0} oversized packets in the last 2s (interface MTU is {1})"
-msgstr "最近 2 秒内丢弃了 {0} 个超限数据包（接口 MTU 为 {1}）"
+msgid "dropped {0} oversized packets in the last 2s (interface MTU is {1}; injected {2} ICMP Fragmentation Needed)"
+msgstr "最近 2 秒内丢弃了 {0} 个超限数据包（接口 MTU 为 {1}；已注入 {2} 个 ICMP Fragmentation Needed）"
+
+msgid "failed to inject ICMP Fragmentation Needed into TUN"
+msgstr "向 TUN 注入 ICMP Fragmentation Needed 失败"
 
 msgid "QUIC keepalive interval in seconds (default 5). Keeps NAT UDP mappings alive; the typical home-router mapping expires after 20-30s of idle. Raise it on high-latency links, lower it where NAT timeouts are aggressive."
 msgstr "QUIC 保活间隔（秒，默认 5）。用于维持 NAT 的 UDP 映射；家庭路由器的映射通常在空闲 20-30 秒后过期。高延迟链路上可调大，NAT 超时激进的网络可调小。"
@@ -601,3 +598,75 @@ msgstr "无法加密旧版身份文件；它仍以明文留在磁盘上"
 
 msgid "writing passphrase-encrypted identity to {0}"
 msgstr "正在向 {0} 写入口令加密的身份密钥"
+
+msgid "connect requires exactly one of --listen, --socks5-listen, or --stdio"
+msgstr "connect 需要恰好指定 --listen、--socks5-listen 或 --stdio 之一"
+
+msgid "connect requires exactly one of --listen or --socks5-listen"
+msgstr "connect 需要恰好指定 --listen 或 --socks5-listen 之一"
+
+msgid "--to - (read EndpointId from stdin) is only available on Unix builds"
+msgstr "--to -（从 stdin 读取 EndpointId）仅在 Unix 构建中可用"
+
+msgid "missing peer EndpointId (--to or LINK_P2P_TO)"
+msgstr "缺少对端 EndpointId（--to 或 LINK_P2P_TO）"
+
+msgid "--to - cannot be combined with --stdio (stdin conflict)"
+msgstr "--to - 不能与 --stdio 同时使用（stdin 冲突）"
+
+msgid "reading EndpointId from stdin"
+msgstr "从 stdin 读取 EndpointId"
+
+msgid "empty EndpointId on stdin"
+msgstr "stdin 上的 EndpointId 为空"
+
+msgid "--stream-recv-window / LINK_P2P_STREAM_RECV_WINDOW out of range"
+msgstr "--stream-recv-window / LINK_P2P_STREAM_RECV_WINDOW 超出范围"
+
+msgid "connected. piping stdin/stdout to the remote peer."
+msgstr "已连接。正在将 stdin/stdout 对接到远程对端。"
+
+msgid "opening stream"
+msgstr "打开流"
+
+msgid "domain length out of range in target header"
+msgstr "目标头中的域名长度超出范围"
+
+msgid "domain length out of range in SOCKS5 request"
+msgstr "SOCKS5 请求中的域名长度超出范围"
+
+msgid "rendering man page"
+msgstr "生成 man 页"
+
+msgid "writing man page"
+msgstr "写入 man 页"
+
+msgid "Quiet user-facing banners (errors still print). Independent of RUST_LOG / -v."
+msgstr "减少面向用户的横幅输出（错误仍会打印）。与 RUST_LOG / -v 相互独立。"
+
+msgid "Increase tracing detail (-v, -vv). Ignored when RUST_LOG is set."
+msgstr "提高 tracing 详细度（-v、-vv）。若已设置 RUST_LOG 则忽略。"
+
+msgid "QUIC congestion controller: cubic (default) or bbr3. Also LINK_P2P_CC. See docs/performance.md."
+msgstr "QUIC 拥塞控制：cubic（默认）或 bbr3。也可设 LINK_P2P_CC。详见 docs/performance.md。"
+
+msgid "QUIC connection send window in bytes. Also LINK_P2P_SEND_WINDOW."
+msgstr "QUIC 连接发送窗口（字节）。也可设 LINK_P2P_SEND_WINDOW。"
+
+msgid "QUIC per-stream receive window in bytes. Also LINK_P2P_STREAM_RECV_WINDOW."
+msgstr "QUIC 每流接收窗口（字节）。也可设 LINK_P2P_STREAM_RECV_WINDOW。"
+
+msgid "The remote node's EndpointId (printed by `serve` on startup). Use - to read one line from stdin. Also LINK_P2P_TO."
+msgstr "对端节点的 EndpointId（`serve` 启动时打印）。用 - 可从 stdin 读一行。也可设 LINK_P2P_TO。"
+
+msgid "Pipe stdin/stdout to one QUIC stream (ssh ProxyCommand / rsync -e). Status banners go to stderr."
+msgstr "将 stdin/stdout 接到一条 QUIC 流（ssh ProxyCommand / rsync -e）。状态横幅走 stderr。"
+
+msgid "The remote node's EndpointId (printed by `tun serve` on startup). Use - to read one line from stdin. Also LINK_P2P_TO."
+msgstr "对端节点的 EndpointId（`tun serve` 启动时打印）。用 - 可从 stdin 读一行。也可设 LINK_P2P_TO。"
+
+msgid "Output format: text (default) or json (for jq)."
+msgstr "输出格式：text（默认）或 json（供 jq 使用）。"
+
+msgid "Print a man page (troff) for link-p2p to stdout."
+msgstr "将 link-p2p 的 man 页（troff）打印到 stdout。"
