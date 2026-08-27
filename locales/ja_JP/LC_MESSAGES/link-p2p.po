@@ -605,6 +605,12 @@ msgstr "パスフレーズ暗号化されたIDキーを {0} に書き込み中"
 msgid "connect requires exactly one of --listen, --socks5-listen, or --stdio"
 msgstr "connect には --listen / --socks5-listen / --stdio のいずれかを指定してください"
 
+msgid "connect requires exactly one of --listen or --socks5-listen"
+msgstr "connect には --listen または --socks5-listen のいずれかを指定してください"
+
+msgid "--to - (read EndpointId from stdin) is only available on Unix builds"
+msgstr "--to -（stdin から EndpointId を読む）は Unix ビルドでのみ利用できます"
+
 msgid "missing peer EndpointId (--to or LINK_P2P_TO)"
 msgstr "ピアの EndpointId がありません（--to または LINK_P2P_TO）"
 

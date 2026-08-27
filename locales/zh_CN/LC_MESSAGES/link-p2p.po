@@ -602,6 +602,12 @@ msgstr "正在向 {0} 写入口令加密的身份密钥"
 msgid "connect requires exactly one of --listen, --socks5-listen, or --stdio"
 msgstr "connect 需要恰好指定 --listen、--socks5-listen 或 --stdio 之一"
 
+msgid "connect requires exactly one of --listen or --socks5-listen"
+msgstr "connect 需要恰好指定 --listen 或 --socks5-listen 之一"
+
+msgid "--to - (read EndpointId from stdin) is only available on Unix builds"
+msgstr "--to -（从 stdin 读取 EndpointId）仅在 Unix 构建中可用"
+
 msgid "missing peer EndpointId (--to or LINK_P2P_TO)"
 msgstr "缺少对端 EndpointId（--to 或 LINK_P2P_TO）"
 

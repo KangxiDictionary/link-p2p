@@ -9,10 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Unix-style UX** (`docs/unix.md`): `connect --stdio`, `--to -` (EndpointId
-  from stdin), `ping --format json`, stable exit codes (0–5), `-q`/`-v`/`-vv`
-  alongside `RUST_LOG`, `LINK_P2P_*` env defaults (flags win), completions +
-  `link-p2p man`.
+- **Unix-style UX** (`docs/unix.md`, **`cfg(unix)` builds only**):
+  `connect --stdio`, `--to -` (EndpointId from stdin), `link-p2p man`.
+  Cross-platform: `ping --format json`, stable exit codes (0–5), `-q`/`-v`/`-vv`,
+  `LINK_P2P_*` env defaults (flags win), shell completions. Windows notes:
+  `docs/windows.md`.
 - **Transport tune** env/flags: `LINK_P2P_CC` / `--cc`,
   `LINK_P2P_SEND_WINDOW` / `--send-window`,
   `LINK_P2P_STREAM_RECV_WINDOW` / `--stream-recv-window` (see

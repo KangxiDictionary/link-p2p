@@ -2,7 +2,12 @@
 
 CLI shape aimed at scripts, `ssh`/`rsync`, and shell plumbing.
 
-## Stream / identity plumbing
+## Unix-style UX (Unix builds only)
+
+Shell plumbing features (`connect --stdio`, `--to -`, `link-p2p man`) are compiled
+in only on Unix targets (`cfg(unix)`). Windows builds keep stream/proxy/ping,
+JSON output, env vars, exit codes, and PowerShell completions — see
+[`docs/windows.md`](docs/windows.md).
 
 | Flag / mode | Behavior |
 |---|---|

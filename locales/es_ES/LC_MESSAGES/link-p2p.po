@@ -610,6 +610,12 @@ msgstr "escribiendo la clave de identidad cifrada con frase de contraseña en {0
 msgid "connect requires exactly one of --listen, --socks5-listen, or --stdio"
 msgstr "connect requiere exactamente uno de --listen, --socks5-listen o --stdio"
 
+msgid "connect requires exactly one of --listen or --socks5-listen"
+msgstr "connect requiere exactamente uno de --listen o --socks5-listen"
+
+msgid "--to - (read EndpointId from stdin) is only available on Unix builds"
+msgstr "--to - (leer EndpointId desde stdin) solo está disponible en compilaciones Unix"
+
 msgid "missing peer EndpointId (--to or LINK_P2P_TO)"
 msgstr "falta el EndpointId del peer (--to o LINK_P2P_TO)"
 

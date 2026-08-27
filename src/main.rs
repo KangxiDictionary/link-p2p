@@ -75,18 +75,7 @@ const STREAM_ABORT_CODE: VarInt = VarInt::from_u32(1);
     long_about = "link-p2p exposes a local TCP service to a P2P network (or dials one) \
                   over a direct, end-to-end encrypted QUIC connection. No TUN device, \
                   no root/admin privileges — just a persistent EndpointId and a QUIC hop.",
-    after_help = "QUICK START:\n  \
-                  \x20 # On the machine you want to expose (e.g. its SSH server):\n  \
-                  \x20 link-p2p serve --forward 127.0.0.1:22\n  \
-                  \x20 # -> prints an EndpointId, share it with the other side\n\n  \
-                  \x20 # On the connecting machine:\n  \
-                  \x20 link-p2p connect --to <EndpointId> --listen 127.0.0.1:2222\n  \
-                  \x20 ssh -p 2222 localhost\n\n\
-                  SHELL COMPLETIONS:\n  \
-                  \x20 link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish\n  \
-                  \x20 link-p2p completions bash > /etc/bash_completion.d/link-p2p\n\n\
-                  See README.md for self-hosted --relay setup and benchmarking against \
-                  WireGuard/Tailscale."
+    after_help = "See README.md and docs/windows.md (Windows) or docs/unix.md (Unix)."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -253,20 +242,21 @@ enum Command {
     /// Dial a remote node and expose it as a local TCP listener.
     Connect {
         /// The remote node's EndpointId (printed by `serve` on startup).
-        /// Use `-` to read one line from stdin. Also `LINK_P2P_TO`.
+        /// On Unix, `-` reads one line from stdin. Also `LINK_P2P_TO`.
         #[arg(long, env = "LINK_P2P_TO")]
         to: Option<String>,
         /// Local address to listen on, e.g. 127.0.0.1:9090
-        #[arg(long, conflicts_with_all = ["socks5_listen", "stdio"])]
+        #[arg(long, conflicts_with = "socks5_listen")]
         listen: Option<SocketAddr>,
         /// Speak SOCKS5 (no-auth, CONNECT only) on this local address; local
         /// clients can then reach any destination through the remote
-        /// `serve --proxy`. Conflicts with --listen / --stdio.
-        #[arg(long, conflicts_with_all = ["listen", "stdio"])]
+        /// `serve --proxy`. Conflicts with --listen
+        #[arg(long, conflicts_with = "listen")]
         socks5_listen: Option<SocketAddr>,
         /// Pipe stdin/stdout to one QUIC stream (ssh ProxyCommand / rsync -e).
-        /// Status banners go to stderr. Conflicts with --listen /
+        /// Unix only. Status banners go to stderr. Conflicts with --listen /
         /// --socks5-listen and with `--to -` (stdin is the data path).
+        #[cfg(unix)]
         #[arg(long, conflicts_with_all = ["listen", "socks5_listen"])]
         stdio: bool,
         /// Direct address hint(s) for the peer (repeatable), e.g. its public
@@ -305,12 +295,14 @@ enum Command {
     /// Print a shell completion script to stdout.
     ///
     /// Redirect it to wherever your shell loads completions from, e.g.
-    /// `link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish`.
+    /// `link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish`
+    /// or `link-p2p completions powershell` on Windows.
     Completions {
         /// Which shell to generate a completion script for.
         shell: Shell,
     },
-    /// Print a man page (troff) for link-p2p to stdout.
+    /// Print a man page (troff) for link-p2p to stdout. Unix builds only.
+    #[cfg(unix)]
     Man,
     /// Print help for link-p2p or one of its subcommands.
     //
@@ -389,8 +381,34 @@ fn version_arg() -> clap::Arg {
 /// The `Command` from derive, with all display strings overridden at runtime
 /// so `--help` output is localized. clap derive only accepts string literals,
 /// so the structure comes from derive and the text is swapped here.
+/// Platform-specific quick start appended to `--help`.
+#[cfg(unix)]
+fn platform_after_help() -> &'static str {
+    "QUICK START:\n    link-p2p serve --forward 127.0.0.1:22\n    link-p2p connect --to <EndpointId> --listen 127.0.0.1:2222\n\nUNIX-ONLY:\n    connect --stdio, --to -, link-p2p man\n\nCOMPLETIONS:\n    link-p2p completions fish|bash|zsh > …\n\nSee docs/unix.md and README.md."
+}
+
+#[cfg(windows)]
+fn platform_after_help() -> &'static str {
+    "QUICK START:\n    link-p2p serve --forward 127.0.0.1:3389\n    link-p2p connect --to <EndpointId> --listen 127.0.0.1:13389\n\nCOMPLETIONS:\n    link-p2p completions powershell | Out-File $PROFILE\\link-p2p.ps1\n\nTUN mode is Linux-only. See docs/windows.md and README.md."
+}
+
+#[cfg(not(any(unix, windows)))]
+fn platform_after_help() -> &'static str {
+    "See README.md. TUN mode requires Linux."
+}
+
+#[cfg(unix)]
+fn peer_to_help() -> &'static str {
+    "The remote node's EndpointId (printed by `serve` on startup). Use `-` to read one line from stdin. Also `LINK_P2P_TO`."
+}
+
+#[cfg(not(unix))]
+fn peer_to_help() -> &'static str {
+    "The remote node's EndpointId (printed by `serve` on startup). Also `LINK_P2P_TO`."
+}
+
 fn localized_command() -> clap::Command {
-    Cli::command()
+    let mut cmd = Cli::command()
         // clap's built-in `help` subcommand hardcodes English text that
         // cannot be localized; disable it and localize the derived Help
         // variant instead (see the Command::Help doc). Same for the
@@ -403,9 +421,7 @@ fn localized_command() -> clap::Command {
         .long_about(tr!(
             "link-p2p exposes a local TCP service to a P2P network (or dials one) over a direct, end-to-end encrypted QUIC connection. No TUN device, no root/admin privileges — just a persistent EndpointId and a QUIC hop."
         ))
-        .after_help(tr!(
-            "QUICK START:\n    # On the machine you want to expose (e.g. its SSH server):\n    link-p2p serve --forward 127.0.0.1:22\n    # -> prints an EndpointId, share it with the other side\n\n    # On the connecting machine:\n    link-p2p connect --to <EndpointId> --listen 127.0.0.1:2222\n    ssh -p 2222 localhost\n\nSHELL COMPLETIONS:\n    link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish\n    link-p2p completions bash > /etc/bash_completion.d/link-p2p\n\nSee README.md for self-hosted --relay setup and benchmarking against WireGuard/Tailscale."
-        ))
+        .after_help(i18n::lookup(platform_after_help()))
         .mut_arg(
             "identity",
             |a| a.help(tr!("Path to store/load this node's persistent secret key. If it doesn't exist yet, a new one is generated and saved there. Default: the XDG config dir, $XDG_CONFIG_HOME/link-p2p/identity.key (usually ~/.config/link-p2p/identity.key); a legacy ./identity.key in the working directory is migrated there once. Keep this stable if you want your EndpointId to stay the same across restarts.")),
@@ -484,13 +500,11 @@ fn localized_command() -> clap::Command {
                 )
         })
         .mut_subcommand("connect", |s| {
-            s.disable_help_flag(true)
+            let mut s = s
+                .disable_help_flag(true)
                 .arg(help_arg())
                 .about(tr!("Dial a remote node and expose it as a local TCP listener."))
-                .mut_arg(
-                    "to",
-                    |a| a.help(tr!("The remote node's EndpointId (printed by `serve` on startup). Use - to read one line from stdin. Also LINK_P2P_TO.")),
-                )
+                .mut_arg("to", |a| a.help(i18n::lookup(peer_to_help())))
                 .mut_arg(
                     "listen",
                     |a| a.help(tr!("Local address to listen on, e.g. 127.0.0.1:9090")),
@@ -498,15 +512,22 @@ fn localized_command() -> clap::Command {
                 .mut_arg(
                     "socks5_listen",
                     |a| a.help(tr!("Speak SOCKS5 (no-auth, CONNECT only) on this local address; local clients can then reach any destination through the remote `serve --proxy`.")),
-                )
-                .mut_arg(
+                );
+            #[cfg(unix)]
+            {
+                s = s.mut_arg(
                     "stdio",
-                    |a| a.help(tr!("Pipe stdin/stdout to one QUIC stream (ssh ProxyCommand / rsync -e). Status banners go to stderr.")),
-                )
-                .mut_arg(
-                    "to_addr",
-                    |a| a.help(tr!("Direct address hint(s) for the peer (repeatable), e.g. its public ip:port or a LAN address. Dialed directly, skipping discovery — use it when you exchanged addresses out-of-band and want no DNS/pkarr lookup (also faster reconnects). May be combined with --relay, which then stays as the fallback path.")),
-                )
+                    |a| a.help(tr!(
+                        "Pipe stdin/stdout to one QUIC stream (ssh ProxyCommand / rsync -e). Status banners go to stderr."
+                    )),
+                );
+            }
+            s.mut_arg(
+                "to_addr",
+                |a| a.help(tr!(
+                    "Direct address hint(s) for the peer (repeatable), e.g. its public ip:port or a LAN address. Dialed directly, skipping discovery — use it when you exchanged addresses out-of-band and want no DNS/pkarr lookup (also faster reconnects). May be combined with --relay, which then stays as the fallback path."
+                )),
+            )
         })
         .mut_subcommand("tun", |s| {
             s.disable_help_flag(true)
@@ -559,7 +580,7 @@ fn localized_command() -> clap::Command {
                 .about(tr!("Measure RTT to a remote node over the P2P network."))
                 .mut_arg(
                     "to",
-                    |a| a.help(tr!("The remote node's EndpointId (printed by `serve` on startup). Use - to read one line from stdin. Also LINK_P2P_TO.")),
+                    |a| a.help(i18n::lookup(peer_to_help())),
                 )
                 .mut_arg(
                     "to_addr",
@@ -582,12 +603,16 @@ fn localized_command() -> clap::Command {
                     |a| a.help(tr!("Which shell to generate a completion script for.")),
                 )
         })
-        .mut_subcommand("man", |s| {
+        ;
+    #[cfg(unix)]
+    {
+        cmd = cmd.mut_subcommand("man", |s| {
             s.disable_help_flag(true)
                 .arg(help_arg())
                 .about(tr!("Print a man page (troff) for link-p2p to stdout."))
-        })
-        .mut_subcommand("help", |s| {
+        });
+    }
+    cmd.mut_subcommand("help", |s| {
             // Our derived Help variant replaces clap's built-in one (disabled
             // above); this is the only way to localize its description.
             s.disable_help_flag(true)
@@ -636,6 +661,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
         );
         return Ok(());
     }
+    #[cfg(unix)]
     if matches!(cli.command, Command::Man) {
         // Lightweight man page without clap_mangen (avoids pulling edition2024
         // crates on older toolchains). Help text comes from the same localized
@@ -813,19 +839,22 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             to,
             listen,
             socks5_listen,
+            #[cfg(unix)]
             stdio,
             to_addr,
         } => {
-            let modes = u8::from(listen.is_some())
-                + u8::from(socks5_listen.is_some())
-                + u8::from(stdio);
+            #[cfg(not(unix))]
+            let stdio = false;
+            let modes = u8::from(listen.is_some()) + u8::from(socks5_listen.is_some());
+            #[cfg(unix)]
+            let modes = modes + u8::from(stdio);
             if modes != 1 {
-                return Err(exit::coded(
-                    exit::USAGE,
-                    anyhow::anyhow!(tr!(
-                        "connect requires exactly one of --listen, --socks5-listen, or --stdio"
-                    )),
-                ));
+                let msg = if cfg!(unix) {
+                    tr!("connect requires exactly one of --listen, --socks5-listen, or --stdio")
+                } else {
+                    tr!("connect requires exactly one of --listen or --socks5-listen")
+                };
+                return Err(exit::coded(exit::USAGE, anyhow::anyhow!(msg)));
             }
             let to = resolve_peer_to(to, stdio)?;
             let ui = Ui {
@@ -936,27 +965,37 @@ fn resolve_peer_to(to: Option<String>, stdio: bool) -> Result<String> {
             )
         })?;
     if raw == "-" {
-        if stdio {
+        #[cfg(not(unix))]
+        {
             return Err(exit::coded(
                 exit::USAGE,
-                anyhow::anyhow!(tr!("--to - cannot be combined with --stdio (stdin conflict)")),
+                anyhow::anyhow!(tr!("--to - (read EndpointId from stdin) is only available on Unix builds")),
             ));
         }
-        let mut line = String::new();
-        std::io::stdin()
-            .read_line(&mut line)
-            .context(tr!("reading EndpointId from stdin"))?;
-        let id = line.trim();
-        if id.is_empty() {
-            return Err(exit::coded(
-                exit::USAGE,
-                anyhow::anyhow!(tr!("empty EndpointId on stdin")),
-            ));
+        #[cfg(unix)]
+        {
+            if stdio {
+                return Err(exit::coded(
+                    exit::USAGE,
+                    anyhow::anyhow!(tr!("--to - cannot be combined with --stdio (stdin conflict)")),
+                ));
+            }
+            let mut line = String::new();
+            std::io::stdin()
+                .read_line(&mut line)
+                .context(tr!("reading EndpointId from stdin"))?;
+            let id = line.trim();
+            if id.is_empty() {
+                return Err(exit::coded(
+                    exit::USAGE,
+                    anyhow::anyhow!(tr!("empty EndpointId on stdin")),
+                ));
+            }
+            if let Some(rest) = id.strip_prefix("ENDPOINT_ID=") {
+                return Ok(rest.trim().to_string());
+            }
+            return Ok(id.to_string());
         }
-        if let Some(rest) = id.strip_prefix("ENDPOINT_ID=") {
-            return Ok(rest.trim().to_string());
-        }
-        return Ok(id.to_string());
     }
     Ok(raw)
 }
@@ -2001,14 +2040,19 @@ async fn run_connect(
     );
 
     if stdio {
-        ui.line(styler.ok(&tr!("connected. piping stdin/stdout to the remote peer.")));
-        let (send, recv) = connection
-            .open_bi()
-            .await
-            .context(tr!("opening stream"))?;
-        let result = pipe_stdio(send, recv).await;
-        endpoint.close().await;
-        return result;
+        #[cfg(unix)]
+        {
+            ui.line(styler.ok(&tr!("connected. piping stdin/stdout to the remote peer.")));
+            let (send, recv) = connection
+                .open_bi()
+                .await
+                .context(tr!("opening stream"))?;
+            let result = pipe_stdio(send, recv).await;
+            endpoint.close().await;
+            return result;
+        }
+        #[cfg(not(unix))]
+        unreachable!("stdio validated only on Unix builds");
     }
 
     // Exactly one of --listen / --socks5-listen was validated by the caller.
@@ -2260,7 +2304,8 @@ async fn pipe_streams(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream
 }
 
 
-/// stdin/stdout ↔ QUIC bidi stream (connect --stdio).
+/// stdin/stdout ↔ QUIC bidi stream (`connect --stdio`). Unix builds only.
+#[cfg(unix)]
 async fn pipe_stdio(mut send: SendStream, mut recv: RecvStream) -> Result<()> {
     let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();

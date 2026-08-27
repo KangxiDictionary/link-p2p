@@ -1,13 +1,11 @@
-//! Process exit codes for shell / systemd scripting.
+//! Process exit codes for shell / systemd / PowerShell scripting.
 //!
-//! Prefer wrapping failures with [`coded`] at the call site so the code is
-//! intentional. [`code_from`] also applies light heuristics for errors that
-//! bubble up as plain `anyhow` (e.g. iroh connect failures).
+//! On Unix, see `docs/unix.md`. Stable codes are enabled on all platforms.
 
 use std::fmt;
 
 /// Success.
-#[allow(dead_code)] // documented in docs/unix.md; success path returns Ok(())
+#[allow(dead_code)]
 pub const OK: i32 = 0;
 /// Unexpected / unclassified error.
 pub const OTHER: i32 = 1;
