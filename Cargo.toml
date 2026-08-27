@@ -33,6 +33,8 @@ tun2 = { version = "4", features = ["async"] }
 blake3 = "1"
 # QUIC datagram payload type for TUN mode.
 bytes = "1"
+# TCP socket buffer hints for stream forwarding.
+socket2 = "0.6"
 # Wipe key material (hex/bytes) from memory when loading identities.
 zeroize = "1"
 # Optional passphrase encryption for the identity file (--identity-passphrase

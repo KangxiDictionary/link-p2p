@@ -33,7 +33,7 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router},
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, SecretKey,
 };
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinHandle;
@@ -62,6 +62,20 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// of a pipe failed): the peer sees an immediate reset/stop instead of
 /// waiting for the idle timeout to notice the dead stream.
 const STREAM_ABORT_CODE: VarInt = VarInt::from_u32(1);
+
+/// Buffer size for TCP ↔ QUIC stream relay. Tokio's `io::copy` uses 8 KiB;
+/// a larger buffer reduces syscall/await iterations. Benchmarks show the
+/// ceiling is QUIC processing, not this constant — but 64 KiB is a cheap default.
+const PIPE_BUF_SIZE: usize = 64 * 1024;
+
+/// Hint the kernel for bulk forwarding: disable Nagle, widen socket buffers.
+fn tune_tcp(socket: &TcpStream) {
+    let _ = socket.set_nodelay(true);
+    const BUF: usize = 256 * 1024;
+    let sock = socket2::SockRef::from(socket);
+    let _ = sock.set_recv_buffer_size(BUF);
+    let _ = sock.set_send_buffer_size(BUF);
+}
 
 #[derive(Parser)]
 #[command(
@@ -1440,6 +1454,7 @@ async fn handle_forward_stream(
     let tcp = TcpStream::connect(target)
         .await
         .with_context(|| tr_fmt!("connecting to {0}", target))?;
+    tune_tcp(&tcp);
     pipe_streams(tcp, send, recv).await
 }
 
@@ -1763,6 +1778,7 @@ async fn run_connect(
                 let semaphore = semaphore.clone();
                 tasks.push(tokio::spawn(async move {
                     let result = async {
+                        tune_tcp(&tcp_stream);
                         if is_socks5 {
                             // SOCKS5 mode: parse the local client's CONNECT
                             // request, then tell the remote `serve --proxy`
@@ -1884,10 +1900,9 @@ async fn run_ping(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// shared: bidirectional copy between a TCP socket and a QUIC stream pair.
-// ---------------------------------------------------------------------------
-
+// Bidirectional relay: TCP socket ↔ QUIC bidi stream. Each direction runs
+// concurrently; a clean EOF on one side does not cancel the other; an error
+// on one side resets/stops the QUIC half promptly.
 async fn pipe_streams(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
     let span = tracing::debug_span!(
         "pipe",
@@ -1900,27 +1915,15 @@ async fn pipe_streams(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream
 
         let client_to_remote = async {
             let n = copy(&mut tcp_read, &mut send).await?;
-            // Signal "no more data" on the QUIC send side so the peer's
-            // tokio::io::copy on its end returns instead of hanging forever.
             send.finish().context(tr!("finishing send stream"))?;
             Ok::<_, anyhow::Error>(n)
         };
         let remote_to_client = async {
             let r = copy(&mut recv, &mut tcp_write).await;
-            // The stream side is done (EOF or error): signal EOF to the local TCP
-            // peer explicitly. Relying on the write half being dropped at function
-            // exit would delay the FIN until *both* directions finish, which
-            // never happens when the peer keeps the connection open.
             let _ = tcp_write.shutdown().await;
             r
         };
 
-        // Run both directions concurrently. A half-closed TCP connection (client
-        // stops writing but still reads, or vice versa) is common and shouldn't be
-        // treated as an error on its own, so a *clean* completion of one direction
-        // must not cancel the other. An *error* in either direction, however,
-        // should abort the whole pipe promptly rather than waiting for the other
-        // side to give up on its own.
         let mut client_to_remote = Box::pin(client_to_remote);
         let mut remote_to_client = Box::pin(remote_to_client);
         let (mut res_client, mut res_remote) = (None, None);
@@ -1936,8 +1939,6 @@ async fn pipe_streams(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream
                 }
             }
         }
-        // The futures above hold `&mut` borrows of send/recv; drop them to
-        // release the borrows before the error path touches those streams.
         drop(client_to_remote);
         drop(remote_to_client);
         match (res_client, res_remote) {
@@ -1948,22 +1949,11 @@ async fn pipe_streams(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream
                 record_span.record("recv_bytes", recvd);
                 Ok(())
             }
-            // One direction errored; the other was cancelled by the select! drop.
-            // Tell the peer explicitly instead of letting the stream half just
-            // drop: a RESET/STOP propagates immediately, whereas a silently
-            // dropped stream only becomes visible to the peer once the idle
-            // timeout fires (which is the point of task 1's keepalive work —
-            // the reset makes abnormal teardown cheap). Best-effort: if the
-            // stream is already closed, there's nothing to signal.
             (Some(a), None) => {
-                // client→remote copy failed (send side broke): stop reading
-                // from the peer so it doesn't keep pushing data into a dead pipe.
                 let _ = recv.stop(STREAM_ABORT_CODE);
                 a.map(|_| ())
             }
             (None, Some(b)) => {
-                // remote→client copy failed (recv side broke): reset our send
-                // half so the peer's read fails immediately instead of hanging.
                 let _ = send.reset(STREAM_ABORT_CODE);
                 b.map(|_| ())
             }
@@ -1978,9 +1968,20 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    tokio::io::copy(reader, writer)
-        .await
-        .context(tr!("copying stream data"))
+    let mut buf = vec![0u8; PIPE_BUF_SIZE];
+    let mut total = 0u64;
+    loop {
+        let n = reader.read(&mut buf).await.context(tr!("reading stream data"))?;
+        if n == 0 {
+            break;
+        }
+        writer
+            .write_all(&buf[..n])
+            .await
+            .context(tr!("writing stream data"))?;
+        total += n as u64;
+    }
+    Ok(total)
 }
 
 #[cfg(test)]

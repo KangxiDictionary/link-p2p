@@ -14,7 +14,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
-use bytes::Bytes;
+use bytes::BytesMut;
 use iroh::endpoint::Connection;
 use iroh::protocol::ProtocolHandler;
 use iroh::{EndpointId, SecretKey};
@@ -389,6 +389,7 @@ async fn run_datagram_loop(
     styler: Styler,
 ) -> Result<SessionEnd> {
     let mut buf = vec![0u8; *mtu as usize + 64];
+    let mut send_buf = BytesMut::with_capacity(*mtu as usize + 64);
     let mut refresh = time::interval(Duration::from_secs(2));
     // Path-quality observability: every 15 refresh ticks (= 30s), log the
     // connection's cumulative datagram/loss counters so a running tunnel is
@@ -428,7 +429,11 @@ async fn run_datagram_loop(
                     }
                     continue;
                 }
-                let pkt = Bytes::copy_from_slice(&buf[..n]);
+                let pkt = {
+                    send_buf.clear();
+                    send_buf.extend_from_slice(&buf[..n]);
+                    send_buf.split().freeze()
+                };
                 if let Err(e) = conn.send_datagram_wait(pkt).await {
                     // The connection is still alive (closed() above would
                     // have fired if not) — iroh is migrating to a new path.
@@ -458,6 +463,9 @@ async fn run_datagram_loop(
                         old, *mtu
                     ));
                     buf.resize(*mtu as usize + 64, 0);
+                    if send_buf.capacity() < buf.len() {
+                        send_buf.reserve(buf.len() - send_buf.capacity());
+                    }
                 }
                 // Flush the drop counter once per tick instead of logging
                 // every dropped oversize packet individually (a long-lived

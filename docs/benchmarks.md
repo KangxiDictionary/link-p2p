@@ -1,5 +1,8 @@
 # Benchmarks: link-p2p vs the raw path
 
+For where zero-copy and async tuning help (and where they do not), see
+[`performance.md`](performance.md).
+
 The actual point of this MVP was to get real numbers before building anything
 else. This document keeps the methodology and the machine-specific numbers;
 the README only points here.
