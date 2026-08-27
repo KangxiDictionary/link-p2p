@@ -55,9 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in `Builder::alpns` at TLS negotiation — so the ping dispatch was dead
   code. `PING_ALPN` is now registered alongside `TUN_ALPN`.
 - TUN mode no longer spams a per-packet `warn!` for oversized datagrams
-  after an MTU drop (a local sender keeps pushing old-size packets until it
-  notices; TUN has no ICMP feedback to shrink it). Drops are now counted
-  and flushed as one summary line on the existing 2s refresh tick.
+  after an MTU drop. Drops are counted and flushed as one summary line on
+  the existing 2s refresh tick; each drop also injects an ICMP Type 3
+  Code 4 (Fragmentation Needed) back into the TUN so local TCP PMTUD
+  shrinks MSS immediately instead of waiting for black-hole timeouts.
+  Raising the interface MTU is held off for 15s after a shrink so path
+  ceiling flicker (e.g. Tailscale vs relay) cannot oscillate
+  raise→drop→shrink.
 
 ## [0.1.0] - 2026-08-21
 

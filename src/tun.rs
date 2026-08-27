@@ -10,6 +10,7 @@
 //! CAP_NET_ADMIN (unlike the stream modes).
 
 use std::net::{Ipv4Addr, SocketAddr};
+use std::time::Instant;
 #[cfg(target_os = "linux")]
 use std::process::Command;
 
@@ -237,15 +238,25 @@ fn set_tun_mtu(tun_name: &str, mtu: u16) -> Result<()> {
 /// 1414), and the interface MTU should follow it up to the user's --mtu
 /// bound.
 ///
-/// Deliberately only raises: lowering is driven by the *event* of an actual
-/// oversize packet reaching the send path (see shrink_tun_mtu), never by
-/// this timer. That split gives natural hysteresis — the MTU tracks the
-/// real path ceiling instead of oscillating with every transient PMTUD
-/// wiggle. `max_datagram_size()` is the max payload `send_datagram` will
-/// accept (QUIC framing already subtracted), so the interface MTU can be
-/// set to it directly; no margin constant needed.
+/// Deliberately only raises (and only after `raise_after`): lowering is
+/// driven by an actual oversize packet on the send path (see
+/// `shrink_tun_mtu`). The hold-off after a shrink stops the
+/// raise→oversize→drop→shrink loop when `max_datagram_size()` wiggles
+/// between two paths (e.g. Tailscale vs relay) whose ceilings differ.
+/// `max_datagram_size()` is the max payload `send_datagram` will accept
+/// (QUIC framing already subtracted), so the interface MTU can be set to
+/// it directly.
 #[cfg(target_os = "linux")]
-fn refresh_tun_mtu(tun_name: &str, user_mtu: u16, conn: &Connection, mtu: &mut u16) -> Result<()> {
+fn refresh_tun_mtu(
+    tun_name: &str,
+    user_mtu: u16,
+    conn: &Connection,
+    mtu: &mut u16,
+    raise_after: Instant,
+) -> Result<()> {
+    if Instant::now() < raise_after {
+        return Ok(());
+    }
     let Some(max_dgram) = conn.max_datagram_size() else {
         return Ok(()); // datagrams gone (shouldn't happen); keep current MTU
     };
@@ -288,6 +299,7 @@ fn refresh_tun_mtu(
     _user_mtu: u16,
     _conn: &Connection,
     _mtu: &mut u16,
+    _raise_after: Instant,
 ) -> Result<()> {
     Ok(())
 }
@@ -301,6 +313,110 @@ fn set_tun_mtu(_tun_name: &str, _mtu: u16) -> Result<()> {
 // VIP exchange: each side tells the peer which address is really on its TUN
 // interface, so routes point at the peer's actual VIP (derived or --tun-ip).
 // ---------------------------------------------------------------------------
+
+/// How long to refuse raising the TUN MTU after a path-ceiling shrink.
+/// Stops the raise→oversize-drop→shrink oscillation when
+/// `max_datagram_size()` flickers between two path ceilings.
+const MTU_RAISE_HOLDOFF: Duration = Duration::from_secs(15);
+
+/// Cap ICMP Frag Needed injections so a UDP flood of oversize packets
+/// cannot turn into an ICMP storm back into the local stack.
+const ICMP_PTB_RATE_PER_SEC: u32 = 20;
+
+/// Internet checksum (RFC 1071) over `data`, with an odd trailing byte
+/// treated as a high-order octet paired with a zero low octet.
+fn inet_checksum(data: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut chunks = data.chunks_exact(2);
+    for chunk in chunks.by_ref() {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+    if let Some(&b) = chunks.remainder().first() {
+        sum += u16::from_be_bytes([b, 0]) as u32;
+    }
+    while sum > 0xffff {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+/// Build an IPv4 ICMP Destination Unreachable / Fragmentation Needed
+/// (Type 3 Code 4) packet announcing `next_hop_mtu`, addressed to the
+/// original packet's source, sourced from our TUN VIP (we are the next hop).
+///
+/// Returns `None` when the original is not a unicast IPv4 packet we should
+/// answer (too short, ICMP already, multicast/broadcast) — RFC 1122 says
+/// never ICMP-error an ICMP error.
+///
+/// Wire shape (RFC 792 + RFC 1191 Next-Hop MTU in the formerly-unused field):
+/// ```text
+/// IP(src=gateway, dst=orig.src, proto=ICMP)
+///   ICMP type=3 code=4 | checksum | unused=0 | next_hop_mtu
+///   orig IP header + first 8 bytes of orig payload
+/// ```
+fn build_icmp_frag_needed(orig: &[u8], next_hop_mtu: u16, gateway: Ipv4Addr) -> Option<Vec<u8>> {
+    if orig.len() < 20 {
+        return None;
+    }
+    let ihl = (orig[0] & 0x0f) as usize * 4;
+    if ihl < 20 || orig.len() < ihl {
+        return None;
+    }
+    // IPv4 version check
+    if orig[0] >> 4 != 4 {
+        return None;
+    }
+    let proto = orig[9];
+    if proto == 1 {
+        // ICMP — do not reply to ICMP (error storms).
+        return None;
+    }
+    let orig_src = Ipv4Addr::new(orig[12], orig[13], orig[14], orig[15]);
+    if orig_src.is_unspecified()
+        || orig_src.is_broadcast()
+        || orig_src.is_multicast()
+        || orig_src.is_loopback()
+    {
+        return None;
+    }
+
+    // Classic RFC 792 quote: IP header + 64 bits of original datagram.
+    let quote_len = std::cmp::min(orig.len(), ihl + 8);
+    let quote = &orig[..quote_len];
+
+    // ICMP header (8) + quote
+    let mut icmp = Vec::with_capacity(8 + quote_len);
+    icmp.push(3); // Destination Unreachable
+    icmp.push(4); // Fragmentation Needed
+    icmp.extend_from_slice(&0u16.to_be_bytes()); // checksum placeholder
+    icmp.extend_from_slice(&0u16.to_be_bytes()); // unused
+    icmp.extend_from_slice(&next_hop_mtu.to_be_bytes());
+    icmp.extend_from_slice(quote);
+    let csum = inet_checksum(&icmp);
+    icmp[2] = (csum >> 8) as u8;
+    icmp[3] = (csum & 0xff) as u8;
+
+    let total_len = 20 + icmp.len();
+    if total_len > u16::MAX as usize {
+        return None;
+    }
+    let mut pkt = Vec::with_capacity(total_len);
+    pkt.push(0x45); // v4, IHL=5
+    pkt.push(0); // TOS
+    pkt.extend_from_slice(&(total_len as u16).to_be_bytes());
+    pkt.extend_from_slice(&0u16.to_be_bytes()); // identification
+    pkt.extend_from_slice(&0u16.to_be_bytes()); // flags/frag
+    pkt.push(64); // TTL
+    pkt.push(1); // protocol ICMP
+    pkt.extend_from_slice(&0u16.to_be_bytes()); // header checksum placeholder
+    pkt.extend_from_slice(&gateway.octets());
+    pkt.extend_from_slice(&orig_src.octets());
+    let ip_csum = inet_checksum(&pkt[..20]);
+    pkt[10] = (ip_csum >> 8) as u8;
+    pkt[11] = (ip_csum & 0xff) as u8;
+    pkt.extend_from_slice(&icmp);
+    Some(pkt)
+}
 
 /// How long the one-shot VIP exchange may take before the session fails. A
 /// peer that completes the QUIC handshake but never answers is either an old
@@ -376,15 +492,19 @@ enum SessionEnd {
 /// branches just log a warning and keep going.
 ///
 /// The interface MTU is adjusted in both directions: the timer raises it as
-/// the path's PMTUD converges upward, and the send path lowers it (via
-/// shrink_tun_mtu) when an actual oversize packet shows up after a switch
-/// to a worse path.
+/// the path's PMTUD converges upward (held off for [`MTU_RAISE_HOLDOFF`] after
+/// a shrink), and the send path lowers it (via `shrink_tun_mtu`) when an
+/// actual oversize packet shows up after a switch to a worse path. Oversized
+/// drops also inject an ICMP Fragmentation Needed (Type 3 Code 4) back into
+/// the TUN so the local TCP stack learns the new Next-Hop MTU immediately
+/// instead of waiting for black-hole detection.
 async fn run_datagram_loop(
     tun: &tun2::AsyncDevice,
     tun_name: &str,
     conn: &Connection,
     user_mtu: u16,
     mtu: &mut u16,
+    own_vip: Ipv4Addr,
     peer: EndpointId,
     styler: Styler,
 ) -> Result<SessionEnd> {
@@ -395,6 +515,10 @@ async fn run_datagram_loop(
     // diagnosable without waiting for a failure (debug level only).
     let mut stats_log_ticks = 0u8;
     let mut dropped_oversized: u64 = 0;
+    let mut icmp_injected: u64 = 0;
+    let mut raise_after = Instant::now();
+    let mut icmp_window_start = Instant::now();
+    let mut icmp_window_count: u32 = 0;
     loop {
         tokio::select! {
             biased; // closed() first — a disconnection is detected before
@@ -411,20 +535,34 @@ async fn run_datagram_loop(
                 // smaller, e.g. 1280 interface vs 1230 ceiling). Check before
                 // sending so an oversize packet *lowers* the MTU instead of
                 // being refused by the QUIC layer as "datagram too large" on
-                // every send. The packet itself is dropped — TUN mode is
-                // best-effort, the inner protocol retransmits. Once the MTU
-                // has been lowered, a sender that keeps pushing old-size
-                // packets is just counted (see the refresh tick summary)
-                // rather than logging one line per packet.
+                // every send. The packet itself is dropped — and we synthesize
+                // ICMP Frag Needed into the TUN so local TCP PMTUD reacts
+                // immediately rather than via black-hole timeouts.
                 let ceiling = conn.max_datagram_size().unwrap_or(usize::MAX);
                 if n > ceiling {
+                    let next_hop = u16::try_from(ceiling).unwrap_or(u16::MAX);
+                    dropped_oversized += 1;
                     if shrink_tun_mtu(tun_name, ceiling, mtu)? {
+                        raise_after = Instant::now() + MTU_RAISE_HOLDOFF;
                         warn!(%peer, "{}", tr_fmt!(
                             "path datagram ceiling dropped to {0}; lowered TUN interface MTU and dropped one packet",
                             *mtu
                         ));
-                    } else {
-                        dropped_oversized += 1;
+                    }
+                    // Rate-limited ICMP PTB back into the local stack.
+                    if icmp_window_start.elapsed() >= Duration::from_secs(1) {
+                        icmp_window_start = Instant::now();
+                        icmp_window_count = 0;
+                    }
+                    if icmp_window_count < ICMP_PTB_RATE_PER_SEC {
+                        if let Some(icmp) = build_icmp_frag_needed(&buf[..n], next_hop, own_vip) {
+                            if let Err(e) = tun.send(&icmp).await {
+                                warn!(%peer, error = %e, "{}", tr!("failed to inject ICMP Fragmentation Needed into TUN"));
+                            } else {
+                                icmp_injected += 1;
+                                icmp_window_count += 1;
+                            }
+                        }
                     }
                     continue;
                 }
@@ -451,7 +589,7 @@ async fn run_datagram_loop(
             }
             _ = refresh.tick() => {
                 let old = *mtu;
-                refresh_tun_mtu(tun_name, user_mtu, conn, mtu)?;
+                refresh_tun_mtu(tun_name, user_mtu, conn, mtu, raise_after)?;
                 if *mtu != old {
                     info!(%peer, "{}", tr_fmt!(
                         "TUN interface MTU raised {0} → {1} (datagram path MTU converged)",
@@ -459,16 +597,15 @@ async fn run_datagram_loop(
                     ));
                     buf.resize(*mtu as usize + 64, 0);
                 }
-                // Flush the drop counter once per tick instead of logging
-                // every dropped oversize packet individually (a long-lived
-                // local sender can keep pushing old-size packets for a while
-                // after the MTU drops — TUN has no ICMP feedback to tell it).
-                if dropped_oversized > 0 {
+                // Flush drop / ICMP counters once per tick instead of one
+                // log line per oversize packet.
+                if dropped_oversized > 0 || icmp_injected > 0 {
                     warn!(%peer, "{}", tr_fmt!(
-                        "dropped {0} oversized packets in the last 2s (interface MTU is {1})",
-                        dropped_oversized, *mtu
+                        "dropped {0} oversized packets in the last 2s (interface MTU is {1}; injected {2} ICMP Fragmentation Needed)",
+                        dropped_oversized, *mtu, icmp_injected
                     ));
                     dropped_oversized = 0;
+                    icmp_injected = 0;
                 }
                 if stats_log_ticks == 0 {
                     let s = conn.stats();
@@ -597,7 +734,8 @@ pub async fn run_tun_serve(
 
                 let result = async {
                     add_peer_route(&tun_name, peer_vip)?;
-                    let mut mtu = choose_mtu(mtu, &conn)?;
+                    let user_mtu = mtu;
+                    let mut mtu = choose_mtu(user_mtu, &conn)?;
                     set_tun_mtu(&tun_name, mtu)?;
                     // Observability for the MTU-symmetry question: max_datagram_size
                     // is a per-end value (local path MTU estimate + peer-advertised
@@ -613,7 +751,10 @@ pub async fn run_tun_serve(
                         conn.max_datagram_size().unwrap_or_default(),
                         mtu
                     ));
-                    run_datagram_loop(&tun, &tun_name, &conn, mtu, &mut mtu, peer, styler).await
+                    run_datagram_loop(
+                        &tun, &tun_name, &conn, user_mtu, &mut mtu, own_vip, peer, styler,
+                    )
+                    .await
                 }
                 .await;
 
@@ -726,7 +867,8 @@ pub async fn run_tun_connect(
             let peer_vip = exchange_peer_vip(&conn, own_vip, true).await?;
 
             // Fail closed on datagram support before bridging anything.
-            let mut mtu = choose_mtu(mtu, &conn)?;
+            let user_mtu = mtu;
+            let mut mtu = choose_mtu(user_mtu, &conn)?;
             set_tun_mtu(&tun_name, mtu)?;
             add_peer_route(&tun_name, peer_vip)?;
             // Same observability line as `tun serve`: compare this across both
@@ -754,8 +896,10 @@ pub async fn run_tun_connect(
                 println!("{}", styler.dim(&tr!("Press Ctrl+C to stop.")));
             }
 
-            let end =
-                run_datagram_loop(&tun, &tun_name, &conn, mtu, &mut mtu, peer_id, styler).await?;
+            let end = run_datagram_loop(
+                &tun, &tun_name, &conn, user_mtu, &mut mtu, own_vip, peer_id, styler,
+            )
+            .await?;
             Ok::<_, anyhow::Error>((end, Some(peer_vip)))
         }
         .await;
@@ -790,4 +934,82 @@ pub async fn run_tun_connect(
     // instant) and iroh doesn't log its ungraceful-drop error.
     endpoint.close().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal IPv4 TCP SYN-ish packet: 20-byte header + 8 bytes "payload".
+    fn sample_ipv4_tcp(src: Ipv4Addr, dst: Ipv4Addr, total_len: u16) -> Vec<u8> {
+        let mut p = vec![0u8; total_len as usize];
+        p[0] = 0x45;
+        p[2..4].copy_from_slice(&total_len.to_be_bytes());
+        p[8] = 64; // TTL
+        p[9] = 6; // TCP
+        p[12..16].copy_from_slice(&src.octets());
+        p[16..20].copy_from_slice(&dst.octets());
+        let csum = inet_checksum(&p[..20]);
+        p[10] = (csum >> 8) as u8;
+        p[11] = (csum & 0xff) as u8;
+        // Fake TCP ports + seq so the 8-byte quote is non-zero.
+        p[20..28].copy_from_slice(&[0x04, 0xd2, 0x00, 0x50, 1, 2, 3, 4]);
+        p
+    }
+
+    #[test]
+    fn inet_checksum_known_vector() {
+        // Empty → 0xffff (all ones after one's complement of zero sum).
+        assert_eq!(inet_checksum(&[]), 0xffff);
+        // Two zero bytes → same.
+        assert_eq!(inet_checksum(&[0, 0]), 0xffff);
+    }
+
+    #[test]
+    fn icmp_frag_needed_wire_shape() {
+        let src = Ipv4Addr::new(172, 24, 0, 1);
+        let dst = Ipv4Addr::new(172, 24, 0, 2);
+        let gw = Ipv4Addr::new(172, 24, 0, 1);
+        let orig = sample_ipv4_tcp(src, dst, 1280);
+        let pkt = build_icmp_frag_needed(&orig, 1162, gw).expect("build");
+
+        assert_eq!(pkt[0] >> 4, 4);
+        assert_eq!(pkt[0] & 0x0f, 5);
+        assert_eq!(pkt[9], 1); // ICMP
+        assert_eq!(&pkt[12..16], &gw.octets());
+        assert_eq!(&pkt[16..20], &src.octets());
+
+        let icmp = &pkt[20..];
+        assert_eq!(icmp[0], 3); // Dest Unreachable
+        assert_eq!(icmp[1], 4); // Frag Needed
+        assert_eq!(u16::from_be_bytes([icmp[4], icmp[5]]), 0); // unused
+        assert_eq!(u16::from_be_bytes([icmp[6], icmp[7]]), 1162); // Next-Hop MTU
+        // Quoted original: IP header (20) + 8 bytes
+        assert_eq!(&icmp[8..28], &orig[..20]);
+        assert_eq!(&icmp[28..36], &orig[20..28]);
+
+        // Checksums must verify to 0 when recomputed including the field
+        // (RFC 1071: sum including the stored checksum folds to 0xffff, then
+        // one's complement yields 0).
+        assert_eq!(inet_checksum(&pkt[..20]), 0);
+        assert_eq!(inet_checksum(icmp), 0);
+    }
+
+    #[test]
+    fn icmp_frag_needed_skips_icmp_and_bad_src() {
+        let gw = Ipv4Addr::new(172, 24, 0, 1);
+        let mut icmp_orig = sample_ipv4_tcp(
+            Ipv4Addr::new(172, 24, 0, 1),
+            Ipv4Addr::new(172, 24, 0, 2),
+            40,
+        );
+        icmp_orig[9] = 1; // rewrite as ICMP
+        assert!(build_icmp_frag_needed(&icmp_orig, 1162, gw).is_none());
+
+        let mcast = sample_ipv4_tcp(Ipv4Addr::new(224, 0, 0, 1), Ipv4Addr::new(172, 24, 0, 2), 40);
+        assert!(build_icmp_frag_needed(&mcast, 1162, gw).is_none());
+
+        assert!(build_icmp_frag_needed(&[], 1162, gw).is_none());
+        assert!(build_icmp_frag_needed(&[0x45; 10], 1162, gw).is_none());
+    }
 }

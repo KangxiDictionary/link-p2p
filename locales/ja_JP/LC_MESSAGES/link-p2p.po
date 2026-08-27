@@ -518,8 +518,11 @@ msgstr "バージョンを表示"
 msgid "path datagram ceiling dropped to {0}; lowered TUN interface MTU and dropped one packet"
 msgstr "パスのデータグラム上限が {0} に低下しました。TUNインターフェースのMTUを下げ、1パケットを破棄しました"
 
-msgid "dropped {0} oversized packets in the last 2s (interface MTU is {1})"
-msgstr "直近2秒で {0} 個の超過パケットを破棄しました（インターフェースMTU: {1}）"
+msgid "dropped {0} oversized packets in the last 2s (interface MTU is {1}; injected {2} ICMP Fragmentation Needed)"
+msgstr "直近2秒で {0} 個の超過パケットを破棄しました（インターフェースMTU: {1}；ICMP Fragmentation Needed を {2} 回注入）"
+
+msgid "failed to inject ICMP Fragmentation Needed into TUN"
+msgstr "TUN への ICMP Fragmentation Needed の注入に失敗しました"
 
 msgid "QUIC keepalive interval in seconds (default 5). Keeps NAT UDP mappings alive; the typical home-router mapping expires after 20-30s of idle. Raise it on high-latency links, lower it where NAT timeouts are aggressive."
 msgstr "QUIC キープアライブ間隔（秒、デフォルト 5）。NAT の UDP マッピングを維持します。家庭用ルーターのマッピングは通常 20〜30 秒のアイドルで失効します。高遅延リンクでは上げ、NAT タイムアウトが短いネットワークでは下げてください。"

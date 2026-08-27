@@ -515,8 +515,11 @@ msgstr "打印版本"
 msgid "path datagram ceiling dropped to {0}; lowered TUN interface MTU and dropped one packet"
 msgstr "路径数据报上限降至 {0}，已下调 TUN 接口 MTU 并丢弃一个数据包"
 
-msgid "dropped {0} oversized packets in the last 2s (interface MTU is {1})"
-msgstr "最近 2 秒内丢弃了 {0} 个超限数据包（接口 MTU 为 {1}）"
+msgid "dropped {0} oversized packets in the last 2s (interface MTU is {1}; injected {2} ICMP Fragmentation Needed)"
+msgstr "最近 2 秒内丢弃了 {0} 个超限数据包（接口 MTU 为 {1}；已注入 {2} 个 ICMP Fragmentation Needed）"
+
+msgid "failed to inject ICMP Fragmentation Needed into TUN"
+msgstr "向 TUN 注入 ICMP Fragmentation Needed 失败"
 
 msgid "QUIC keepalive interval in seconds (default 5). Keeps NAT UDP mappings alive; the typical home-router mapping expires after 20-30s of idle. Raise it on high-latency links, lower it where NAT timeouts are aggressive."
 msgstr "QUIC 保活间隔（秒，默认 5）。用于维持 NAT 的 UDP 映射；家庭路由器的映射通常在空闲 20-30 秒后过期。高延迟链路上可调大，NAT 超时激进的网络可调小。"

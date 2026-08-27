@@ -523,8 +523,11 @@ msgstr "Muestra la versión"
 msgid "path datagram ceiling dropped to {0}; lowered TUN interface MTU and dropped one packet"
 msgstr "el límite de datagramas de la ruta bajó a {0}; se redujo el MTU de la interfaz TUN y se descartó un paquete"
 
-msgid "dropped {0} oversized packets in the last 2s (interface MTU is {1})"
-msgstr "se descartaron {0} paquetes sobredimensionados en los últimos 2s (MTU de la interfaz: {1})"
+msgid "dropped {0} oversized packets in the last 2s (interface MTU is {1}; injected {2} ICMP Fragmentation Needed)"
+msgstr "se descartaron {0} paquetes sobredimensionados en los últimos 2s (MTU de la interfaz: {1}; se inyectaron {2} ICMP Fragmentation Needed)"
+
+msgid "failed to inject ICMP Fragmentation Needed into TUN"
+msgstr "no se pudo inyectar ICMP Fragmentation Needed en el TUN"
 
 msgid "QUIC keepalive interval in seconds (default 5). Keeps NAT UDP mappings alive; the typical home-router mapping expires after 20-30s of idle. Raise it on high-latency links, lower it where NAT timeouts are aggressive."
 msgstr "Intervalo de keepalive QUIC en segundos (por defecto 5). Mantiene vivas las asignaciones UDP de NAT; la asignación típica de un router doméstico caduca tras 20-30s de inactividad. Súbelo en enlaces de alta latencia, bájalo donde los tiempos de NAT sean agresivos."
