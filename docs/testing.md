@@ -45,6 +45,38 @@ to read it; e2e parses the same format. Human-facing banner text stays
 translated. The e2e harness also clears `LANGUAGE` when spawning binaries
 (belt-and-suspenders on older builds that lack the machine line).
 
+## Long-lived stream stability (two machines, no root)
+
+Single-shot benches over a fresh direct path often look fine; real use needs a
+session that stays up. `scripts/long-stability-test.sh` keeps a stream-mode
+tunnel alive and samples every 15s (default 10 minutes):
+
+| Role | Command |
+|---|---|
+| Server | `DURATION=600 ./scripts/long-stability-test.sh serve` |
+| Client | `PEER=<EndpointId> DURATION=600 ./scripts/long-stability-test.sh client` |
+
+The client logs HTTP success/latency through the tunnel, `ping` RTT/path, and
+whether `connect` stayed alive. Logs land in a temp dir (`samples.tsv`).
+
+Before a run on a machine that may still have an old session:
+
+```bash
+./scripts/remote-cleanup-link-p2p.sh   # kills tmux session `link-p2p` + link-p2p binaries only
+```
+
+Does **not** touch Tailscale or unrelated tmux sessions (`minecraft`, etc.).
+
+Recorded 2026-08-27: 5-minute cross-network run (local client → `kangxi@server`)
+— 16/16 HTTP probes OK, `connect` alive, path `direct (UDP)`.
+
+## TUN / MTU (Linux, root)
+
+TUN ICMP PMTUD feedback (inject Fragmentation Needed on oversize drop) and the
+15s MTU raise hold-off are documented in [`docs/tun-design.md`](tun-design.md).
+Validate with two Linux machines + `tcpdump -i <tun> icmp` after a path ceiling
+shrink. Ops workaround: pin `--mtu` to the flicker floor (e.g. 1162).
+
 ## Real-machine phase tests (two machines)
 
 `scripts/phase*-{server,client}.sh` are the harness for the real-network

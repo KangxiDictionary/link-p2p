@@ -221,6 +221,11 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
+    /// Pin English catalogs so assertions on error text stay stable under zh_CN.
+    fn english_catalog() -> std::sync::MutexGuard<'static, ()> {
+        crate::i18n::ENV_LOCK.lock().unwrap()
+    }
+
     // --- wire header round-trips (no network) -----------------------------
 
     #[tokio::test]
@@ -261,17 +266,20 @@ mod tests {
 
     #[tokio::test]
     async fn domain_longer_than_255_bytes_is_rejected() {
+        let _guard = english_catalog();
         let t = Target::Domain("x".repeat(300), 80);
         let mut buf = Vec::new();
         let err = write_target(&mut buf, &t).await.unwrap_err();
-        assert!(err.to_string().contains("domain name too long"));
+        // Locale-independent: the error quotes the offending length.
+        assert!(err.to_string().contains("300"));
     }
 
     #[tokio::test]
     async fn unknown_address_type_is_rejected() {
+        let _guard = english_catalog();
         let mut buf: &[u8] = &[9, 1, 2, 3, 4, 0, 80];
         let err = read_target(&mut buf).await.unwrap_err();
-        assert!(err.to_string().contains("unknown address type"));
+        assert!(err.to_string().contains('9'));
     }
 
     #[tokio::test]

@@ -398,13 +398,13 @@ fn platform_after_help() -> &'static str {
 }
 
 #[cfg(unix)]
-fn peer_to_help() -> &'static str {
-    "The remote node's EndpointId (printed by `serve` on startup). Use `-` to read one line from stdin. Also `LINK_P2P_TO`."
+fn peer_to_help() -> String {
+    tr!("The remote node's EndpointId (printed by `serve` on startup). Use `-` to read one line from stdin. Also `LINK_P2P_TO`.")
 }
 
 #[cfg(not(unix))]
-fn peer_to_help() -> &'static str {
-    "The remote node's EndpointId (printed by `serve` on startup). Also `LINK_P2P_TO`."
+fn peer_to_help() -> String {
+    tr!("The remote node's EndpointId (printed by `serve` on startup). Also `LINK_P2P_TO`.")
 }
 
 fn localized_command() -> clap::Command {
@@ -504,7 +504,7 @@ fn localized_command() -> clap::Command {
                 .disable_help_flag(true)
                 .arg(help_arg())
                 .about(tr!("Dial a remote node and expose it as a local TCP listener."))
-                .mut_arg("to", |a| a.help(i18n::lookup(peer_to_help())))
+                .mut_arg("to", |a| a.help(peer_to_help()))
                 .mut_arg(
                     "listen",
                     |a| a.help(tr!("Local address to listen on, e.g. 127.0.0.1:9090")),
@@ -558,7 +558,7 @@ fn localized_command() -> clap::Command {
                         .about(tr!("Dial a peer and bridge this machine to it at the IP layer."))
                         .mut_arg(
                             "to",
-                            |a| a.help(tr!("The remote node's EndpointId (printed by `tun serve` on startup). Use - to read one line from stdin. Also LINK_P2P_TO.")),
+                            |a| a.help(peer_to_help()),
                         )
                         .mut_arg(
                             "tun_ip",
@@ -580,7 +580,7 @@ fn localized_command() -> clap::Command {
                 .about(tr!("Measure RTT to a remote node over the P2P network."))
                 .mut_arg(
                     "to",
-                    |a| a.help(i18n::lookup(peer_to_help())),
+                    |a| a.help(peer_to_help()),
                 )
                 .mut_arg(
                     "to_addr",
@@ -2518,8 +2518,11 @@ mod tests {
         let _guard = crate::i18n::ENV_LOCK.lock().unwrap();
         std::env::set_var("LANGUAGE", "zh_CN");
         crate::i18n::init();
-        std::env::remove_var("LANGUAGE");
         check_cmd(&Cli::command(), &localized_command(), "<root>");
+        std::env::remove_var("LANGUAGE");
+        std::env::set_var("LANG", "C");
+        std::env::set_var("LC_ALL", "C");
+        crate::i18n::init();
     }
 
     fn check_cmd(raw: &clap::Command, loc: &clap::Command, path: &str) {
