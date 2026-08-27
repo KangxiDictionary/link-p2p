@@ -1855,6 +1855,7 @@ dependencies = [
  "clap_complete",
  "console",
  "iroh",
+ "noq-proto",
  "tokio",
  "tracing",
  "tracing-subscriber",

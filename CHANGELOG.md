@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Unix-style UX** (`docs/unix.md`): `connect --stdio`, `--to -` (EndpointId
+  from stdin), `ping --format json`, stable exit codes (0–5), `-q`/`-v`/`-vv`
+  alongside `RUST_LOG`, `LINK_P2P_*` env defaults (flags win), completions +
+  `link-p2p man`.
+- **Transport tune** env/flags: `LINK_P2P_CC` / `--cc`,
+  `LINK_P2P_SEND_WINDOW` / `--send-window`,
+  `LINK_P2P_STREAM_RECV_WINDOW` / `--stream-recv-window` (see
+  `docs/performance.md`).
+- `scripts/bench-transport-matrix.sh`: one-session loopback matrix
+  (baseline | sysctl | bbr3 | bbr3+windows) for config exclusion before
+  protocol-wall claims.
 - `contrib/systemd/iroh-relay.service` template unit to run a self-hosted
   relay as a service. Pointing both ends at `--relay http://<your-relay>:3340`
   replaces n0's public relay — the source of the recurring
@@ -44,6 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- SOCKS5 `write_target` batches the header into one `write_all` and omits
+  `.flush()` so callers can keep an unbuffered iroh QUIC `SendStream`
+  (BufWriter without flush would hang; documented in `docs/performance.md`).
 - Reconnect wakeups are event-driven (`tokio::sync::watch`) instead of
   200ms polling: a local client arriving during a reconnect window is
   served the instant the new connection lands, not up to 200ms later.
