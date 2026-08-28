@@ -1,10 +1,10 @@
-//! Compiles .po translation catalogs into .mo at build time.
+//! Compiles `.po` translation catalogs into `.mo` at build time.
 //!
-//! Source:  locales/<lang>/LC_MESSAGES/link-p2p.po
-//! Output:  $OUT_DIR/locales/<lang>/LC_MESSAGES/link-p2p.mo
+//! Source: `locales/<lang>/LC_MESSAGES/link-p2p.po`
+//! Output: `$OUT_DIR/locales/<lang>/LC_MESSAGES/link-p2p.mo`
 //!
 //! The runtime locates these via `env!("OUT_DIR")/locales` (see
-//! src/i18n.rs). If `msgfmt` isn't installed, translation is skipped and
+//! `src/i18n.rs`). If `msgfmt` isn't installed, translation is skipped and
 //! the program falls back to the English msgids at runtime — the build
 //! still succeeds.
 

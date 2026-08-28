@@ -327,11 +327,11 @@ const ICMP_PTB_RATE_PER_SEC: u32 = 20;
 /// treated as a high-order octet paired with a zero low octet.
 fn inet_checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
-    let mut chunks = data.chunks_exact(2);
-    for chunk in chunks.by_ref() {
+    let (chunks, remainder) = data.as_chunks::<2>();
+    for chunk in chunks {
         sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
     }
-    if let Some(&b) = chunks.remainder().first() {
+    if let Some(&b) = remainder.first() {
         sum += u16::from_be_bytes([b, 0]) as u32;
     }
     while sum > 0xffff {

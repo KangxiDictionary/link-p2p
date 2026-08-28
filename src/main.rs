@@ -16,13 +16,15 @@
 
 mod exit;
 mod i18n;
+mod pipe;
 mod socks5;
+mod ssrf;
 mod style;
 mod tun;
 
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -35,17 +37,15 @@ use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, SecretKey,
 };
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-#[allow(unused_imports)]
-use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
-use tracing::{info, warn, Instrument};
+use tracing::{info, warn};
 use zeroize::Zeroize;
 
 use crate::i18n::{tr, tr_fmt};
+use crate::ssrf::check_proxy_target;
 use crate::style::{ColorMode, Styler};
 
 /// ALPN identifies this application protocol during the QUIC/TLS handshake.
@@ -57,15 +57,6 @@ const ALPN: &[u8] = b"link-p2p/tcp-forward/0";
 /// also serving streams — the Router accepts both. Also registered on TUN
 /// nodes (see tun.rs) so `ping` works against `tun serve` too.
 pub(crate) const PING_ALPN: &[u8] = b"link-p2p/ping/0";
-
-/// How long Ctrl+C waits for in-flight forwarded streams to flush before
-/// cutting them off (used by both `serve` and `connect`).
-const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Error code sent when we abort a QUIC stream mid-transfer (one direction
-/// of a pipe failed): the peer sees an immediate reset/stop instead of
-/// waiting for the idle timeout to notice the dead stream.
-const STREAM_ABORT_CODE: VarInt = VarInt::from_u32(1);
 
 #[derive(Parser)]
 #[command(
@@ -213,6 +204,23 @@ impl Ui {
             println!("{}", s.as_ref());
         }
     }
+}
+
+/// Serve mode — exactly one of fixed forward or proxy. Encoded as an enum so
+/// "neither / both" cannot be represented after CLI validation.
+#[derive(Clone, Copy, Debug)]
+enum ServeMode {
+    Forward(SocketAddr),
+    Proxy { allow_private: bool },
+}
+
+/// Connect local side — listen, SOCKS5, or (Unix) stdio.
+#[derive(Clone, Copy, Debug)]
+enum ConnectMode {
+    Listen(SocketAddr),
+    Socks5(SocketAddr),
+    #[cfg(unix)]
+    Stdio,
 }
 
 #[derive(Subcommand)]
@@ -795,15 +803,16 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             allow,
             allow_private,
         } => {
-            if !proxy && forward.is_none() {
-                return Err(exit::coded(
-                    exit::USAGE,
-                    anyhow::anyhow!(tr!("serve requires either --forward or --proxy")),
-                ));
-            }
-            // Parse the --allow whitelist up front so a typo'd EndpointId
-            // fails before we bind and wait for the network. Empty CLI list
-            // falls back to LINK_P2P_ALLOW (comma-separated).
+            let mode = match (forward, proxy) {
+                (Some(addr), false) => ServeMode::Forward(addr),
+                (None, true) => ServeMode::Proxy { allow_private },
+                (Some(_), true) | (None, false) => {
+                    return Err(exit::coded(
+                        exit::USAGE,
+                        anyhow::anyhow!(tr!("serve requires either --forward or --proxy")),
+                    ));
+                }
+            };
             let allow = merge_allow_list(allow);
             let allowed = allow
                 .iter()
@@ -821,16 +830,13 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                 .collect::<Result<Vec<_>>>()?;
             run_serve(
                 secret_key,
-                forward,
-                proxy,
+                mode,
                 allowed,
-                allow_private,
                 cli.relay.as_deref(),
                 cli.max_conns,
                 Duration::from_secs(cli.keepalive),
                 Duration::from_secs(cli.idle_timeout),
                 tune,
-                ui,
                 styler,
             )
             .await
@@ -843,19 +849,37 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             stdio,
             to_addr,
         } => {
+            #[cfg(unix)]
+            let mode = match (listen, socks5_listen, stdio) {
+                (Some(a), None, false) => ConnectMode::Listen(a),
+                (None, Some(a), false) => ConnectMode::Socks5(a),
+                (None, None, true) => ConnectMode::Stdio,
+                _ => {
+                    return Err(exit::coded(
+                        exit::USAGE,
+                        anyhow::anyhow!(tr!(
+                            "connect requires exactly one of --listen, --socks5-listen, or --stdio"
+                        )),
+                    ));
+                }
+            };
+            #[cfg(not(unix))]
+            let mode = match (listen, socks5_listen) {
+                (Some(a), None) => ConnectMode::Listen(a),
+                (None, Some(a)) => ConnectMode::Socks5(a),
+                _ => {
+                    return Err(exit::coded(
+                        exit::USAGE,
+                        anyhow::anyhow!(tr!(
+                            "connect requires exactly one of --listen or --socks5-listen"
+                        )),
+                    ));
+                }
+            };
+            #[cfg(unix)]
+            let stdio = matches!(mode, ConnectMode::Stdio);
             #[cfg(not(unix))]
             let stdio = false;
-            let modes = u8::from(listen.is_some()) + u8::from(socks5_listen.is_some());
-            #[cfg(unix)]
-            let modes = modes + u8::from(stdio);
-            if modes != 1 {
-                let msg = if cfg!(unix) {
-                    tr!("connect requires exactly one of --listen, --socks5-listen, or --stdio")
-                } else {
-                    tr!("connect requires exactly one of --listen or --socks5-listen")
-                };
-                return Err(exit::coded(exit::USAGE, anyhow::anyhow!(msg)));
-            }
             let to = resolve_peer_to(to, stdio)?;
             let ui = Ui {
                 quiet: ui.quiet,
@@ -864,9 +888,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             run_connect(
                 secret_key,
                 &to,
-                listen,
-                socks5_listen,
-                stdio,
+                mode,
                 cli.relay.as_deref(),
                 to_addr,
                 cli.max_conns,
@@ -947,7 +969,10 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             .await
         }
         Command::Completions { .. } | Command::Man | Command::Help { .. } => {
-            unreachable!("handled before identity/logging setup")
+            // Completions / man / help return before identity setup.
+            Err(anyhow::anyhow!(
+                "internal: meta-command should have returned earlier"
+            ))
         }
     }
 }
@@ -1490,19 +1515,15 @@ fn transport_config(
 #[allow(clippy::too_many_arguments)] // CLI entry point; explicit config beats a grab-bag struct
 async fn run_serve(
     secret_key: SecretKey,
-    forward: Option<SocketAddr>,
-    proxy: bool,
+    mode: ServeMode,
     allowed: Vec<EndpointId>,
-    allow_private: bool,
     relay: Option<&str>,
     max_conns: usize,
     keepalive: Duration,
     idle_timeout: Duration,
     tune: TransportTune,
-    ui: Ui,
     styler: Styler,
 ) -> Result<()> {
-    let _ = ui; // banners still use println for ENDPOINT_ID machine line compat
     let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune)?
         .alpns(vec![ALPN.to_vec(), PING_ALPN.to_vec()])
         .bind()
@@ -1512,17 +1533,27 @@ async fn run_serve(
     wait_online(&endpoint).await?;
 
     println!("{}", styler.banner("link-p2p serve"));
-    match forward {
-        Some(target) => println!(
+    match mode {
+        ServeMode::Forward(target) => println!(
             "  {}",
             tr_fmt!("forwarding P2P connections to: {0}", target)
         ),
-        None => println!(
-            "  {}",
-            styler.info(&tr!(
-                "proxy mode: dialing the target address from each stream's header"
-            ))
-        ),
+        ServeMode::Proxy { allow_private } => {
+            println!(
+                "  {}",
+                styler.info(&tr!(
+                    "proxy mode: dialing the target address from each stream's header"
+                ))
+            );
+            if !allow_private {
+                println!(
+                    "  {}",
+                    styler.warn(&tr!(
+                        "proxy targets in private/loopback ranges are blocked (use --allow-private to permit)"
+                    ))
+                );
+            }
+        }
     }
     // The whitelist is an important security property; surface it in the
     // banner instead of hiding it in --help.
@@ -1532,14 +1563,6 @@ async fn run_serve(
             styler.info(&tr_fmt!(
                 "only accepting connections from {0} allowed peer(s)",
                 allowed.len()
-            ))
-        );
-    }
-    if proxy && !allow_private {
-        println!(
-            "  {}",
-            styler.warn(&tr!(
-                "proxy targets in private/loopback ranges are blocked (use --allow-private to permit)"
             ))
         );
     }
@@ -1560,9 +1583,7 @@ async fn run_serve(
     // drain on shutdown.
     let tasks: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
     let handler = ForwardHandler {
-        target: forward,
-        proxy,
-        allow_private,
+        mode,
         allowed: if allowed.is_empty() {
             None
         } else {
@@ -1595,15 +1616,8 @@ async fn run_serve(
     // router.shutdown() only stops the router's own accept loop — the
     // per-stream forwarders are our tasks, so give them the same bounded
     // drain window as run_connect.
-    let pending = std::mem::take(&mut *tasks.lock().unwrap());
-    let drain_deadline = tokio::time::sleep(DRAIN_TIMEOUT);
-    tokio::pin!(drain_deadline);
-    for task in pending {
-        tokio::select! {
-            _ = task => {}
-            _ = &mut drain_deadline => break,
-        }
-    }
+    let pending = std::mem::take(&mut *tasks.lock().unwrap_or_else(|e| e.into_inner()));
+    pipe::drain_tasks(pending).await;
     Ok(())
 }
 
@@ -1617,14 +1631,7 @@ fn reject_connection(connection: &Connection, peer: EndpointId) {
 
 #[derive(Debug)]
 struct ForwardHandler {
-    /// Fixed `--forward` target; `None` means `--proxy` mode where the
-    /// destination comes from each stream's header.
-    target: Option<SocketAddr>,
-    /// True when running in `--proxy` mode (target comes from the header).
-    proxy: bool,
-    /// In proxy mode, allow targets in private/loopback/link-local ranges
-    /// (blocked by default — SSRF guard, see check_proxy_target).
-    allow_private: bool,
+    mode: ServeMode,
     /// Peer whitelist: `None` accepts anyone (`serve` without `--allow`),
     /// `Some(set)` rejects every connection whose EndpointId is not in it.
     allowed: Option<Arc<HashSet<EndpointId>>>,
@@ -1689,20 +1696,19 @@ impl ProtocolHandler for ForwardHandler {
                     break;
                 }
             };
-            let target = self.target;
-            let proxy = self.proxy;
-            let allow_private = self.allow_private;
+            let mode = self.mode;
             let task = tokio::spawn(async move {
                 // The permit lives as long as this stream does; dropping it
                 // after handle_forward_stream frees the slot.
                 let _permit = permit;
-                if let Err(e) =
-                    handle_forward_stream(target, proxy, allow_private, send, recv).await
-                {
+                if let Err(e) = handle_forward_stream(mode, send, recv).await {
                     warn!(%peer, error = %e, "{}", tr!("stream error"));
                 }
             });
-            self.tasks.lock().unwrap().push(task);
+            match self.tasks.lock() {
+                Ok(mut g) => g.push(task),
+                Err(poisoned) => poisoned.into_inner().push(task),
+            }
         }
 
         connection.closed().await;
@@ -1738,24 +1744,14 @@ impl ProtocolHandler for PingHandler {
 }
 
 /// Dial the target and pipe bytes between it and the given QUIC stream.
-///
-/// With a fixed `--forward` target, dial it directly (backwards compatible
-/// with plain `connect --listen`). In `--proxy` mode (`proxy: true`) read
-/// the target header off the stream first — the header was written by the
-/// peer's `connect --socks5-listen`.
 async fn handle_forward_stream(
-    forward: Option<SocketAddr>,
-    proxy: bool,
-    allow_private: bool,
+    mode: ServeMode,
     send: SendStream,
     mut recv: RecvStream,
 ) -> Result<()> {
-    let target = match forward {
-        Some(addr) => addr,
-        None => {
-            if !proxy {
-                unreachable!("called without a target and not in proxy mode");
-            }
+    let target = match mode {
+        ServeMode::Forward(addr) => addr,
+        ServeMode::Proxy { allow_private } => {
             let target = socks5::read_target(&mut recv).await?.resolve().await?;
             check_proxy_target(target, allow_private)?;
             target
@@ -1764,46 +1760,7 @@ async fn handle_forward_stream(
     let tcp = TcpStream::connect(target)
         .await
         .with_context(|| tr_fmt!("connecting to {0}", target))?;
-    pipe_streams(tcp, send, recv).await
-}
-
-/// SSRF guard for `--proxy` mode: a remote peer must not be able to make
-/// this node reach into private networks (the whole point of the guard —
-/// 169.254.169.254 cloud metadata, LAN services, loopback). The check runs
-/// on the *resolved* address so domain names can't smuggle a private IP in.
-/// `--allow-private` lifts it for trusted setups.
-fn check_proxy_target(target: SocketAddr, allow_private: bool) -> Result<()> {
-    if !allow_private && is_blocked_target(target) {
-        bail!(tr_fmt!(
-            "target {0} is in a private/loopback/link-local range; blocked in proxy mode (use --allow-private to permit)",
-            target
-        ));
-    }
-    Ok(())
-}
-
-/// Whether an address is in a range a proxy must not dial by default:
-/// loopback, private (RFC 1918), link-local, unspecified, multicast and
-/// broadcast for IPv4; loopback, unspecified, multicast, ULA and link-local
-/// for IPv6.
-fn is_blocked_target(addr: SocketAddr) -> bool {
-    match addr.ip() {
-        IpAddr::V4(ip) => {
-            ip.is_loopback()
-                || ip.is_private()
-                || ip.is_link_local()
-                || ip.is_unspecified()
-                || ip.is_multicast()
-                || ip.is_broadcast()
-        }
-        IpAddr::V6(ip) => {
-            ip.is_loopback()
-                || ip.is_unspecified()
-                || ip.is_multicast()
-                || (ip.segments()[0] & 0xfe00) == 0xfc00 // ULA fc00::/7
-                || (ip.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
-        }
-    }
+    pipe::pipe_streams(tcp, send, recv).await
 }
 
 /// Log the connection's path quality every 30s until it closes, so a
@@ -1990,9 +1947,7 @@ fn spawn_reconnect_watcher(
 async fn run_connect(
     secret_key: SecretKey,
     to: &str,
-    listen: Option<SocketAddr>,
-    socks5_listen: Option<SocketAddr>,
-    stdio: bool,
+    mode: ConnectMode,
     relay: Option<&str>,
     to_addr: Vec<SocketAddr>,
     max_conns: usize,
@@ -2039,25 +1994,30 @@ async fn run_connect(
         "dial completed"
     );
 
-    if stdio {
-        #[cfg(unix)]
-        {
-            ui.line(styler.ok(&tr!("connected. piping stdin/stdout to the remote peer.")));
-            let (send, recv) = connection
-                .open_bi()
-                .await
-                .context(tr!("opening stream"))?;
-            let result = pipe_stdio(send, recv).await;
-            endpoint.close().await;
-            return result;
-        }
-        #[cfg(not(unix))]
-        unreachable!("stdio validated only on Unix builds");
+    #[cfg(unix)]
+    if matches!(mode, ConnectMode::Stdio) {
+        ui.line(styler.ok(&tr!("connected. piping stdin/stdout to the remote peer.")));
+        let (send, recv) = connection
+            .open_bi()
+            .await
+            .context(tr!("opening stream"))?;
+        let result = pipe::pipe_stdio(send, recv).await;
+        endpoint.close().await;
+        return result;
     }
 
-    // Exactly one of --listen / --socks5-listen was validated by the caller.
-    let local_addr = socks5_listen.or(listen).expect("validated");
-    let is_socks5 = socks5_listen.is_some();
+    let (local_addr, is_socks5) = match mode {
+        ConnectMode::Listen(a) => (a, false),
+        ConnectMode::Socks5(a) => (a, true),
+        #[cfg(unix)]
+        ConnectMode::Stdio => {
+            // Stdio returns above after open_bi; this arm is unreachable by
+            // construction. Keep a typed error instead of panic.
+            return Err(anyhow::anyhow!(
+                "internal: ConnectMode::Stdio should have returned earlier"
+            ));
+        }
+    };
 
     let slot = ConnSlot::new(Some(connection.clone()));
     spawn_reconnect_watcher(&slot, &endpoint, dial_addr, remote_id);
@@ -2092,11 +2052,11 @@ async fn run_connect(
                             let _permit = semaphore.acquire_owned().await?;
                             let (mut send, recv) = open_stream_wait(&slot).await?;
                             socks5::write_target(&mut send, &target).await?;
-                            pipe_streams(tcp_stream, send, recv).await
+                            pipe::pipe_streams(tcp_stream, send, recv).await
                         } else {
                             let _permit = semaphore.acquire_owned().await?;
                             let (send, recv) = open_stream_wait(&slot).await?;
-                            pipe_streams(tcp_stream, send, recv).await
+                            pipe::pipe_streams(tcp_stream, send, recv).await
                         }
                     }
                     .await;
@@ -2112,14 +2072,7 @@ async fn run_connect(
         }
     }
 
-    let drain_deadline = tokio::time::sleep(DRAIN_TIMEOUT);
-    tokio::pin!(drain_deadline);
-    for task in tasks {
-        tokio::select! {
-            _ = task => {}
-            _ = &mut drain_deadline => break,
-        }
-    }
+    pipe::drain_tasks(tasks).await;
     endpoint.close().await;
     Ok(())
 }
@@ -2214,158 +2167,6 @@ async fn run_ping(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// shared: bidirectional copy between a TCP socket and a QUIC stream pair.
-// ---------------------------------------------------------------------------
-
-async fn pipe_streams(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
-    let span = tracing::debug_span!(
-        "pipe",
-        sent_bytes = tracing::field::Empty,
-        recv_bytes = tracing::field::Empty
-    );
-    let record_span = span.clone();
-    let fut = async move {
-        let (mut tcp_read, mut tcp_write) = tcp.into_split();
-
-        let client_to_remote = async {
-            let n = copy(&mut tcp_read, &mut send).await?;
-            // Signal "no more data" on the QUIC send side so the peer's
-            // tokio::io::copy on its end returns instead of hanging forever.
-            send.finish().context(tr!("finishing send stream"))?;
-            Ok::<_, anyhow::Error>(n)
-        };
-        let remote_to_client = async {
-            let r = copy(&mut recv, &mut tcp_write).await;
-            // The stream side is done (EOF or error): signal EOF to the local TCP
-            // peer explicitly. Relying on the write half being dropped at function
-            // exit would delay the FIN until *both* directions finish, which
-            // never happens when the peer keeps the connection open.
-            let _ = tcp_write.shutdown().await;
-            r
-        };
-
-        // Run both directions concurrently. A half-closed TCP connection (client
-        // stops writing but still reads, or vice versa) is common and shouldn't be
-        // treated as an error on its own, so a *clean* completion of one direction
-        // must not cancel the other. An *error* in either direction, however,
-        // should abort the whole pipe promptly rather than waiting for the other
-        // side to give up on its own.
-        let mut client_to_remote = Box::pin(client_to_remote);
-        let mut remote_to_client = Box::pin(remote_to_client);
-        let (mut res_client, mut res_remote) = (None, None);
-        while res_client.is_none() || res_remote.is_none() {
-            tokio::select! {
-                r = &mut client_to_remote, if res_client.is_none() => {
-                    res_client = Some(r);
-                    if res_client.as_ref().unwrap().is_err() { break; }
-                }
-                r = &mut remote_to_client, if res_remote.is_none() => {
-                    res_remote = Some(r);
-                    if res_remote.as_ref().unwrap().is_err() { break; }
-                }
-            }
-        }
-        // The futures above hold `&mut` borrows of send/recv; drop them to
-        // release the borrows before the error path touches those streams.
-        drop(client_to_remote);
-        drop(remote_to_client);
-        match (res_client, res_remote) {
-            (Some(a), Some(b)) => {
-                let sent = a?;
-                let recvd = b?;
-                record_span.record("sent_bytes", sent);
-                record_span.record("recv_bytes", recvd);
-                Ok(())
-            }
-            // One direction errored; the other was cancelled by the select! drop.
-            // Tell the peer explicitly instead of letting the stream half just
-            // drop: a RESET/STOP propagates immediately, whereas a silently
-            // dropped stream only becomes visible to the peer once the idle
-            // timeout fires (which is the point of task 1's keepalive work —
-            // the reset makes abnormal teardown cheap). Best-effort: if the
-            // stream is already closed, there's nothing to signal.
-            (Some(a), None) => {
-                // client→remote copy failed (send side broke): stop reading
-                // from the peer so it doesn't keep pushing data into a dead pipe.
-                let _ = recv.stop(STREAM_ABORT_CODE);
-                a.map(|_| ())
-            }
-            (None, Some(b)) => {
-                // remote→client copy failed (recv side broke): reset our send
-                // half so the peer's read fails immediately instead of hanging.
-                let _ = send.reset(STREAM_ABORT_CODE);
-                b.map(|_| ())
-            }
-            (None, None) => unreachable!("loop exits only when both complete or one errors"),
-        }
-    };
-    fut.instrument(span).await
-}
-
-
-/// stdin/stdout ↔ QUIC bidi stream (`connect --stdio`). Unix builds only.
-#[cfg(unix)]
-async fn pipe_stdio(mut send: SendStream, mut recv: RecvStream) -> Result<()> {
-    let mut stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
-
-    let client_to_remote = async {
-        let n = copy(&mut stdin, &mut send).await?;
-        send.finish().context(tr!("finishing send stream"))?;
-        Ok::<_, anyhow::Error>(n)
-    };
-    let remote_to_client = async {
-        let r = copy(&mut recv, &mut stdout).await;
-        let _ = stdout.flush().await;
-        r
-    };
-
-    let mut client_to_remote = Box::pin(client_to_remote);
-    let mut remote_to_client = Box::pin(remote_to_client);
-    let (mut res_client, mut res_remote) = (None, None);
-    while res_client.is_none() || res_remote.is_none() {
-        tokio::select! {
-            r = &mut client_to_remote, if res_client.is_none() => {
-                res_client = Some(r);
-                if res_client.as_ref().unwrap().is_err() { break; }
-            }
-            r = &mut remote_to_client, if res_remote.is_none() => {
-                res_remote = Some(r);
-                if res_remote.as_ref().unwrap().is_err() { break; }
-            }
-        }
-    }
-    drop(client_to_remote);
-    drop(remote_to_client);
-    match (res_client, res_remote) {
-        (Some(a), Some(b)) => {
-            a?;
-            b?;
-            Ok(())
-        }
-        (Some(a), None) => {
-            let _ = recv.stop(STREAM_ABORT_CODE);
-            a.map(|_| ())
-        }
-        (None, Some(b)) => {
-            let _ = send.reset(STREAM_ABORT_CODE);
-            b.map(|_| ())
-        }
-        (None, None) => unreachable!("loop exits only when both complete or one errors"),
-    }
-}
-
-async fn copy<R, W>(reader: &mut R, writer: &mut W) -> Result<u64>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    tokio::io::copy(reader, writer)
-        .await
-        .context(tr!("copying stream data"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2392,53 +2193,6 @@ mod tests {
         // reset() restarts from the base.
         b.reset();
         assert_eq!(b.next(), Duration::from_secs(1));
-    }
-
-    /// SSRF guard: private, loopback and link-local targets are blocked;
-    /// public addresses pass.
-    #[test]
-    fn proxy_target_ssrf_guard() {
-        use std::net::Ipv6Addr;
-        // Blocked: loopback, RFC 1918, link-local, unspecified, multicast.
-        for ip in [
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            IpAddr::V4("10.1.2.3".parse().unwrap()),
-            IpAddr::V4("172.16.0.1".parse().unwrap()),
-            IpAddr::V4("172.31.255.255".parse().unwrap()),
-            IpAddr::V4("192.168.1.1".parse().unwrap()),
-            IpAddr::V4("169.254.169.254".parse().unwrap()),
-            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            IpAddr::V4("224.0.0.1".parse().unwrap()),
-            IpAddr::V6(Ipv6Addr::LOCALHOST),
-            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            IpAddr::V6("fc00::1".parse().unwrap()),
-            IpAddr::V6("fd12:3456::1".parse().unwrap()),
-            IpAddr::V6("fe80::1".parse().unwrap()),
-            IpAddr::V6("ff02::1".parse().unwrap()),
-        ] {
-            assert!(
-                is_blocked_target(SocketAddr::new(ip, 80)),
-                "{ip} should be blocked"
-            );
-        }
-        // Allowed: public addresses.
-        for ip in [
-            IpAddr::V4("8.8.8.8".parse().unwrap()),
-            IpAddr::V4("203.0.113.7".parse().unwrap()),
-            IpAddr::V6("2606:4700:4700::1111".parse().unwrap()),
-            IpAddr::V6("2001:db8::1".parse().unwrap()),
-        ] {
-            assert!(
-                !is_blocked_target(SocketAddr::new(ip, 80)),
-                "{ip} should pass"
-            );
-        }
-        // The guard itself: a blocked target errors, a public one doesn't.
-        assert!(check_proxy_target("127.0.0.1:80".parse().unwrap(), false).is_err());
-        assert!(check_proxy_target("10.0.0.1:80".parse().unwrap(), false).is_err());
-        assert!(check_proxy_target("8.8.8.8:80".parse().unwrap(), false).is_ok());
-        // --allow-private lifts the block.
-        assert!(check_proxy_target("127.0.0.1:80".parse().unwrap(), true).is_ok());
     }
 
     /// Passphrase encryption: round-trip, wrong passphrase, tampering, and

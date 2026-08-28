@@ -299,18 +299,22 @@ forces it on/off for scripts and pipes (`auto` is the default and respects
 
 ## Testing
 
-- `scripts/local-test.sh` — full stream-mode pipeline on localhost against a
-  self-hosted relay (HTTP get + 100KB byte-identical echo).
+```bash
+./scripts/test.sh          # unit + smoke + socks5 (default)
+./scripts/test.sh unit     # cargo test only
+./scripts/test.sh smoke    # localhost stream pipeline vs self-hosted relay
+./scripts/test.sh socks5   # SOCKS5 proxy smoke
+```
+
 - `sudo scripts/tun-loopback-test.sh` — TUN startup, MTU negotiation and
   route lifecycle on one machine (does **not** exercise the datagram data
   path; that needs two machines).
 - `cargo test -- --ignored` — e2e tests against a local relay (byte-identical
   round trip, SIGINT drain, listener port release).
-- `scripts/phase*-{server,client}.sh` — the two-machine real-network harness
-  for NAT traversal, relay throughput, and WiFi↔4G migration (the tables and
-  the force-relay instructions live in the testing doc).
+- `scripts/phase*-{server,client}.sh` — optional two-machine real-network
+  harness (NAT / relay / migration); see `docs/testing.md`.
 
-Prerequisites, caveats and full instructions: `docs/testing.md`.
+Prerequisites and full instructions: `docs/testing.md`.
 
 Commit, versioning and release conventions for contributors:
 `docs/development.md`.

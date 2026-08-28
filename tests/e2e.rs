@@ -119,7 +119,7 @@ fn serve_log_has_endpoint_id(log: &Path) -> bool {
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs release binary + local relay; run: cargo test -- --ignored"]
 fn e2e_forward_roundtrip_and_clean_shutdown() {
     let Some(bin) = binary() else {
         eprintln!("skipping: target/release/link-p2p not built (run: cargo build --release)");
@@ -309,7 +309,7 @@ fn socks5_connect_and_echo(addr: &str, target: ([u8; 4], u16), payload: &[u8]) -
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs release binary + local relay; run: cargo test -- --ignored"]
 fn e2e_proxy_socks5_roundtrip_and_clean_shutdown() {
     let Some(bin) = binary() else {
         eprintln!("skipping: target/release/link-p2p not built (run: cargo build --release)");

@@ -85,7 +85,7 @@ pub struct Styler {
 }
 
 impl Styler {
-    fn apply(&self, text: &str, style: Style) -> String {
+    fn apply(&self, text: &str, style: &Style) -> String {
         if self.enabled {
             style.apply_to(text).to_string()
         } else {
@@ -95,36 +95,36 @@ impl Styler {
 
     /// Section headers / program banner (bold cyan).
     pub fn banner(&self, text: &str) -> String {
-        self.apply(text, Style::new().bold().cyan())
+        self.apply(text, &Style::new().bold().cyan())
     }
 
     /// Important values, e.g. the EndpointId (bold, extra bright).
     pub fn highlight(&self, text: &str) -> String {
-        self.apply(text, Style::new().bold().bright().white())
+        self.apply(text, &Style::new().bold().bright().white())
     }
 
     /// Success messages (bold green).
     pub fn ok(&self, text: &str) -> String {
-        self.apply(text, Style::new().bold().green())
+        self.apply(text, &Style::new().bold().green())
     }
 
     /// Warnings (yellow).
     pub fn warn(&self, text: &str) -> String {
-        self.apply(text, Style::new().yellow())
+        self.apply(text, &Style::new().yellow())
     }
 
     /// Errors (bold red).
     pub fn err(&self, text: &str) -> String {
-        self.apply(text, Style::new().bold().red())
+        self.apply(text, &Style::new().bold().red())
     }
 
     /// Neutral status (cyan).
     pub fn info(&self, text: &str) -> String {
-        self.apply(text, Style::new().cyan())
+        self.apply(text, &Style::new().cyan())
     }
 
     /// Secondary / hints (dim).
     pub fn dim(&self, text: &str) -> String {
-        self.apply(text, Style::new().dim())
+        self.apply(text, &Style::new().dim())
     }
 }

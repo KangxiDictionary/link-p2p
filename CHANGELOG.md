@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Unified test entry `./scripts/test.sh` (`unit`/`smoke`/`socks5`/`all`) with
+  shared `scripts/lib.sh` for readable PASS/FAIL output; removed one-off
+  `fin-test.sh` / `raw-multi.py`.
+- Split SSRF and bidirectional pipe helpers into `ssrf` / `pipe` modules;
+  CLI serve/connect modes encoded as enums so illegal flag combos are not
+  representable after validation.
+- Clippy: `unsafe_code` forbidden; correctness/suspicious denied; pedantic
+  noise allow-listed where intentional (wire casts, clap/i18n docs).
+
 ### Added
 
 - **Unix-style UX** (`docs/unix.md`, **`cfg(unix)` builds only**):
