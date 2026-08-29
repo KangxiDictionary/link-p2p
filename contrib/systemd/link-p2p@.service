@@ -25,7 +25,9 @@ Wants=network-online.target
 Type=simple
 # Per-instance arguments come from /etc/link-p2p/%i.conf (one line).
 # systemd's ExecStart has no shell, so expand the file via sh.
-ExecStart=/bin/sh -c 'exec /usr/bin/link-p2p $(cat /etc/link-p2p/%i.conf)'
+# Match the README install path (`/usr/local/bin`). Distro packages that
+# put the binary in /usr/bin should edit this line accordingly.
+ExecStart=/bin/sh -c 'exec /usr/local/bin/link-p2p $(cat /etc/link-p2p/%i.conf)'
 Restart=on-failure
 RestartSec=5
 # TUN mode (tun serve/connect) needs CAP_NET_ADMIN; harmless for stream modes.

@@ -243,8 +243,19 @@ sudo cp -r link-p2p-x86_64-unknown-linux-gnu/locales /usr/local/bin/
 Verify with `link-p2p --version`. For running tunnels as services,
 `contrib/systemd/link-p2p@.service` (see "Running as a service" below).
 
-**From source**: `cargo build --release` (see Build) or
-`cargo install --path .` to put it on your PATH via cargo.
+**From source**: `cargo build --release` (see Build), then either copy
+`target/release/link-p2p` **and** `target/release/locales/` next to each
+other onto your PATH (same layout as the prebuilt tarball), or:
+
+```bash
+cargo install --path .
+# cargo only installs the binary — copy catalogs next to it for i18n:
+cp -a target/release/locales ~/.cargo/bin/
+# or: export LINK_P2P_LOCALEDIR=/path/to/locales
+```
+
+Without `locales/` beside the binary (or `LINK_P2P_LOCALEDIR`), the UI
+falls back to English after the build tree is gone.
 
 ## Build
 

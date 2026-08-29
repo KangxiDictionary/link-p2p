@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Install path consistency: systemd unit now matches README
+  (`/usr/local/bin/link-p2p`); `build.rs` mirrors `.mo` catalogs to
+  `target/<profile>/locales` for packaging; README documents that
+  `cargo install` does not install locales by itself.
+
 ### Changed
 
 - Unified test entry `./scripts/test.sh` (`unit`/`smoke`/`socks5`/`all`) with

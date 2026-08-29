@@ -30,10 +30,15 @@ jobs:
           pkg="link-p2p-x86_64-unknown-linux-gnu"
           mkdir -p "$pkg/locales"
           cp target/release/link-p2p "$pkg/"
-          # Compiled catalogs from the build output ($OUT_DIR/locales); the
-          # i18n candidates include <dir of the binary>/locales.
-          out_locales="$(ls -dt target/release/build/link-p2p-*/out/locales | head -1)"
-          cp -r "$out_locales"/. "$pkg/locales/"
+          # build.rs mirrors compiled .mo catalogs to target/release/locales
+          # (next to the binary). Fall back to hashed OUT_DIR if missing.
+          if [ -d target/release/locales ]; then
+            cp -r target/release/locales/. "$pkg/locales/"
+          else
+            out_locales="$(ls -dt target/release/build/link-p2p-*/out/locales | head -1)"
+            cp -r "$out_locales"/. "$pkg/locales/"
+          fi
+          test -f "$pkg/locales/zh_CN/LC_MESSAGES/link-p2p.mo"
           tar -czf "$pkg.tar.gz" "$pkg"
           sha256sum "$pkg.tar.gz" > SHA256SUMS
           ls -la "$pkg.tar.gz" SHA256SUMS
