@@ -474,6 +474,9 @@ msgstr "ヘルプの表示"
 msgid "Print help"
 msgstr "ヘルプを表示"
 
+msgid "Print help. `-h` lists commands and examples; `--help` shows full option details."
+msgstr "ヘルプを表示します。`-h` はコマンドと例のみ、`--help` は詳細なオプション説明です。"
+
 msgid "Print version"
 msgstr "バージョンを表示"
 
@@ -641,3 +644,13 @@ msgstr "出力形式: text（既定）または json（jq 向け）。"
 
 msgid "Print a man page (troff) for link-p2p to stdout."
 msgstr "link-p2p の man ページ（troff）を stdout に出力します。"
+
+msgid "gathering entropy for identity salt"
+msgstr "アイデンティティ用ソルトのエントロピー取得に失敗しました"
+
+msgid "gathering entropy for identity nonce"
+msgstr "アイデンティティ用 nonce のエントロピー取得に失敗しました"
+
+msgid "identity file is truncated"
+msgstr "アイデンティティファイルが切り詰められています"
+

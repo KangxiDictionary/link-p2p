@@ -1,6 +1,6 @@
 [package]
 name = "link-p2p"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Minimal TCP-over-QUIC forwarder on iroh, with a point-to-point TUN mode for whole-machine IP reachability"
 license = "GPL-3.0-or-later"
@@ -15,15 +15,14 @@ categories = ["network-programming", "command-line-utilities"]
 iroh = "1"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 # Generates shell completion scripts (`link-p2p completions fish`, etc).
 # Version must track clap's major version.
 clap_complete = "4"
-# Must match the version iroh 1.0.3 locks (see Cargo.lock) so
+# Must match the noq-proto line iroh locks so
 # `congestion_controller_factory(Bbr3Config)` type-checks against one crate.
-# Keep `default-features = false` aligned with iroh's dependency line to avoid
-# resolver churn on older toolchains.
-noq-proto = { version = "=1.1.1", default-features = false }
+# Keep `default-features = false` aligned with iroh's dependency line.
+noq-proto = { version = "1", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # i18n: build.rs compiles locales/*.po into .mo with msgfmt; the runtime
@@ -44,8 +43,10 @@ socket2 = "0.6"
 zeroize = "1"
 # Optional passphrase encryption for the identity file (--identity-passphrase
 # / LINK_P2P_PASSPHRASE): Argon2id key derivation + XChaCha20-Poly1305 AEAD.
-argon2 = "0.5"
-chacha20poly1305 = "0.10"
+argon2 = { version = "0.6", features = ["password-hash"] }
+chacha20poly1305 = "0.11"
+# OS entropy for identity-file salt/nonce (argon2 0.6 no longer re-exports OsRng).
+getrandom = "0.4"
 
 [[bin]]
 name = "link-p2p"

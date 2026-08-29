@@ -15,6 +15,7 @@
 //! `cargo doc -p iroh --open` rather than assuming the overall approach is wrong.
 
 mod exit;
+mod helptext;
 mod i18n;
 mod pipe;
 mod socks5;
@@ -368,12 +369,19 @@ enum TunCommand {
 /// "Print help..." text is hardcoded English and can't be localized).
 /// Applied to the top command and every subcommand, alongside
 /// `disable_help_flag(true)`.
+///
+/// clap's `ArgAction::Help` already chooses short vs long help from whether
+/// the user typed `-h` or `--help`.
 fn help_arg() -> clap::Arg {
     clap::Arg::new("help")
         .short('h')
         .long("help")
         .action(clap::ArgAction::Help)
         .help(tr!("Print help"))
+        .long_help(tr!(
+            "Print help. `-h` lists commands and examples; `--help` shows full option details."
+        ))
+        .hide_short_help(true)
 }
 
 /// Localized `-V/--version` argument, same story as [`help_arg`]. Top level
@@ -384,6 +392,7 @@ fn version_arg() -> clap::Arg {
         .long("version")
         .action(clap::ArgAction::Version)
         .help(tr!("Print version"))
+        .hide_short_help(true)
 }
 
 /// The `Command` from derive, with all display strings overridden at runtime
@@ -425,66 +434,69 @@ fn localized_command() -> clap::Command {
         .disable_help_subcommand(true)
         .disable_help_flag(true)
         .disable_version_flag(true)
+        // wrap_help: detect terminal width; cap so ultra-wide terminals stay readable.
+        // Indentation of wrapped option text is preserved by clap.
+        .max_term_width(100)
         .about(tr!("Minimal TCP-over-QUIC forwarder on iroh"))
-        .long_about(tr!(
+        .long_about(helptext::hard_wrap_help(&tr!(
             "link-p2p exposes a local TCP service to a P2P network (or dials one) over a direct, end-to-end encrypted QUIC connection. No TUN device, no root/admin privileges — just a persistent EndpointId and a QUIC hop."
-        ))
+        )))
         .after_help(i18n::lookup(platform_after_help()))
         .mut_arg(
             "identity",
-            |a| a.help(tr!("Path to store/load this node's persistent secret key. If it doesn't exist yet, a new one is generated and saved there. Default: the XDG config dir, $XDG_CONFIG_HOME/link-p2p/identity.key (usually ~/.config/link-p2p/identity.key); a legacy ./identity.key in the working directory is migrated there once. Keep this stable if you want your EndpointId to stay the same across restarts.")),
+            |a| helptext::set_help(a, &tr!("Path to store/load this node's persistent secret key. If it doesn't exist yet, a new one is generated and saved there. Default: the XDG config dir, $XDG_CONFIG_HOME/link-p2p/identity.key (usually ~/.config/link-p2p/identity.key); a legacy ./identity.key in the working directory is migrated there once. Keep this stable if you want your EndpointId to stay the same across restarts.")),
         )
         .mut_arg(
             "ephemeral",
-            |a| a.help(tr!("Use a temporary identity that is never written to disk: the EndpointId changes every start. Conflicts with --identity.")),
+            |a| helptext::set_help(a, &tr!("Use a temporary identity that is never written to disk: the EndpointId changes every start. Conflicts with --identity.")),
         )
         .mut_arg(
             "identity_passphrase",
-            |a| a.help(tr!("Passphrase protecting the identity key file. When set, the key is stored encrypted (Argon2id + XChaCha20-Poly1305) instead of plaintext hex, so a disk/backup leak doesn't expose the key. Prefer the LINK_P2P_PASSPHRASE environment variable over passing it inline — the flag value is visible in `ps` and shell history. Conflicts with --ephemeral.")),
+            |a| helptext::set_help(a, &tr!("Passphrase protecting the identity key file. When set, the key is stored encrypted (Argon2id + XChaCha20-Poly1305) instead of plaintext hex, so a disk/backup leak doesn't expose the key. Prefer the LINK_P2P_PASSPHRASE environment variable over passing it inline — the flag value is visible in `ps` and shell history. Conflicts with --ephemeral.")),
         )
         .mut_arg(
             "relay",
-            |a| a.help(tr!("Use a custom relay server instead of n0's public one, e.g. http://127.0.0.1:3340 (run `iroh-relay --dev` locally). With this set, address discovery is skipped entirely: `connect` dials the peer directly through this relay, so no DNS/pkarr lookup to iroh.link is needed. Useful for self-hosted relays and for offline/local testing.")),
+            |a| helptext::set_help(a, &tr!("Use a custom relay server instead of n0's public one, e.g. http://127.0.0.1:3340 (run `iroh-relay --dev` locally). With this set, address discovery is skipped entirely: `connect` dials the peer directly through this relay, so no DNS/pkarr lookup to iroh.link is needed. Useful for self-hosted relays and for offline/local testing.")),
         )
         .mut_arg(
             "color",
-            |a| a.help(tr!("Control colored output: auto (colors on TTY only), always, or never.")),
+            |a| helptext::set_help(a, &tr!("Control colored output: auto (colors on TTY only), always, or never.")),
         )
         .mut_arg(
             "max_conns",
-            |a| a.help(tr!("Maximum number of concurrent forwarded connections. 0 means unlimited. Prevents resource exhaustion on endpoints exposed to the network.")),
+            |a| helptext::set_help(a, &tr!("Maximum number of concurrent forwarded connections. 0 means unlimited. Prevents resource exhaustion on endpoints exposed to the network.")),
         )
         .mut_arg(
             "log_format",
-            |a| a.help(tr!("Log output format: text (human-readable) or json (structured, for jq/CI pipelines).")),
+            |a| helptext::set_help(a, &tr!("Log output format: text (human-readable) or json (structured, for jq/CI pipelines).")),
         )
         .mut_arg(
             "quiet",
-            |a| a.help(tr!("Quiet user-facing banners (errors still print). Independent of RUST_LOG / -v.")),
+            |a| helptext::set_help(a, &tr!("Quiet user-facing banners (errors still print). Independent of RUST_LOG / -v.")),
         )
         .mut_arg(
             "verbose",
-            |a| a.help(tr!("Increase tracing detail (-v, -vv). Ignored when RUST_LOG is set.")),
+            |a| helptext::set_help(a, &tr!("Increase tracing detail (-v, -vv). Ignored when RUST_LOG is set.")),
         )
         .mut_arg(
             "cc",
-            |a| a.help(tr!("QUIC congestion controller: cubic (default) or bbr3. Also LINK_P2P_CC. See docs/performance.md.")),
+            |a| helptext::set_help(a, &tr!("QUIC congestion controller: cubic (default) or bbr3. Also LINK_P2P_CC. See docs/performance.md.")),
         )
         .mut_arg(
             "send_window",
-            |a| a.help(tr!("QUIC connection send window in bytes. Also LINK_P2P_SEND_WINDOW.")),
+            |a| helptext::set_help(a, &tr!("QUIC connection send window in bytes. Also LINK_P2P_SEND_WINDOW.")),
         )
         .mut_arg(
             "stream_recv_window",
-            |a| a.help(tr!("QUIC per-stream receive window in bytes. Also LINK_P2P_STREAM_RECV_WINDOW.")),
+            |a| helptext::set_help(a, &tr!("QUIC per-stream receive window in bytes. Also LINK_P2P_STREAM_RECV_WINDOW.")),
         )
         .mut_arg(
             "keepalive",
-            |a| a.help(tr!("QUIC keepalive interval in seconds (default 5). Keeps NAT UDP mappings alive; the typical home-router mapping expires after 20-30s of idle. Raise it on high-latency links, lower it where NAT timeouts are aggressive.")),
+            |a| helptext::set_help(a, &tr!("QUIC keepalive interval in seconds (default 5). Keeps NAT UDP mappings alive; the typical home-router mapping expires after 20-30s of idle. Raise it on high-latency links, lower it where NAT timeouts are aggressive.")),
         )
         .mut_arg(
             "idle_timeout",
-            |a| a.help(tr!("QUIC max idle timeout in seconds (default 30). After this long without traffic the peer is declared dead and the connection re-dialed. Raise it for lossy / high-latency links so a brief outage doesn't tear the connection down.")),
+            |a| helptext::set_help(a, &tr!("QUIC max idle timeout in seconds (default 30). After this long without traffic the peer is declared dead and the connection re-dialed. Raise it for lossy / high-latency links so a brief outage doesn't tear the connection down.")),
         )
         .mut_subcommand("serve", |s| {
             s.disable_help_flag(true)
@@ -492,19 +504,19 @@ fn localized_command() -> clap::Command {
                 .about(tr!("Expose a local TCP service to the P2P network."))
                 .mut_arg(
                     "forward",
-                    |a| a.help(tr!("Local address to forward incoming P2P streams to, e.g. 127.0.0.1:8080")),
+                    |a| helptext::set_help(a, &tr!("Local address to forward incoming P2P streams to, e.g. 127.0.0.1:8080")),
                 )
                 .mut_arg(
                     "proxy",
-                    |a| a.help(tr!("Generic proxy mode: dial the address from each stream's header instead of a fixed --forward target. Pairs with `connect --socks5-listen`.")),
+                    |a| helptext::set_help(a, &tr!("Generic proxy mode: dial the address from each stream's header instead of a fixed --forward target. Pairs with `connect --socks5-listen`.")),
                 )
                 .mut_arg(
                     "allow",
-                    |a| a.help(tr!("Only accept P2P connections from these EndpointIds (repeatable). Default: accept anyone who knows this node's EndpointId. Strongly recommended when the node is reachable from untrusted networks.")),
+                    |a| helptext::set_help(a, &tr!("Only accept P2P connections from these EndpointIds (repeatable). Default: accept anyone who knows this node's EndpointId. Strongly recommended when the node is reachable from untrusted networks.")),
                 )
                 .mut_arg(
                     "allow_private",
-                    |a| a.help(tr!("In proxy mode, allow forwarding to private/loopback/link-local addresses (blocked by default to prevent SSRF — a malicious peer could otherwise make this node reach into your LAN or cloud metadata endpoints such as 169.254.169.254).")),
+                    |a| helptext::set_help(a, &tr!("In proxy mode, allow forwarding to private/loopback/link-local addresses (blocked by default to prevent SSRF — a malicious peer could otherwise make this node reach into your LAN or cloud metadata endpoints such as 169.254.169.254).")),
                 )
         })
         .mut_subcommand("connect", |s| {
@@ -512,27 +524,27 @@ fn localized_command() -> clap::Command {
                 .disable_help_flag(true)
                 .arg(help_arg())
                 .about(tr!("Dial a remote node and expose it as a local TCP listener."))
-                .mut_arg("to", |a| a.help(peer_to_help()))
+                .mut_arg("to", |a| helptext::set_help(a, &peer_to_help()))
                 .mut_arg(
                     "listen",
-                    |a| a.help(tr!("Local address to listen on, e.g. 127.0.0.1:9090")),
+                    |a| helptext::set_help(a, &tr!("Local address to listen on, e.g. 127.0.0.1:9090")),
                 )
                 .mut_arg(
                     "socks5_listen",
-                    |a| a.help(tr!("Speak SOCKS5 (no-auth, CONNECT only) on this local address; local clients can then reach any destination through the remote `serve --proxy`.")),
+                    |a| helptext::set_help(a, &tr!("Speak SOCKS5 (no-auth, CONNECT only) on this local address; local clients can then reach any destination through the remote `serve --proxy`.")),
                 );
             #[cfg(unix)]
             {
                 s = s.mut_arg(
                     "stdio",
-                    |a| a.help(tr!(
+                    |a| helptext::set_help(a, &tr!(
                         "Pipe stdin/stdout to one QUIC stream (ssh ProxyCommand / rsync -e). Status banners go to stderr."
                     )),
                 );
             }
             s.mut_arg(
                 "to_addr",
-                |a| a.help(tr!(
+                |a| helptext::set_help(a, &tr!(
                     "Direct address hint(s) for the peer (repeatable), e.g. its public ip:port or a LAN address. Dialed directly, skipping discovery — use it when you exchanged addresses out-of-band and want no DNS/pkarr lookup (also faster reconnects). May be combined with --relay, which then stays as the fallback path."
                 )),
             )
@@ -541,23 +553,23 @@ fn localized_command() -> clap::Command {
             s.disable_help_flag(true)
                 .arg(help_arg())
                 .about(tr!("Make two machines reachable at the IP layer over QUIC datagrams."))
-                .long_about(tr!(
+                .long_about(helptext::hard_wrap_help(&tr!(
                     "Make two machines reachable at the IP layer over QUIC datagrams.\n\nCreates a TUN interface (needs root / CAP_NET_ADMIN) and routes the peer's virtual IP through it. Unlike `serve`/`connect`, which forward one TCP port, this bridges the whole machine: TCP, UDP and ICMP all work on the peer's virtual IP, with no per-port setup. Point-to-point only in v1 — see docs/tun-design.md."
-                ))
+                )))
                 .mut_subcommand("serve", |ss| {
                     ss.disable_help_flag(true)
                         .arg(help_arg())
                         .about(tr!("Exposed side: accept a peer and bridge this machine to it at the IP layer."))
-                        .long_about(tr!(
+                        .long_about(helptext::hard_wrap_help(&tr!(
                             "Exposed side: accept a peer and bridge this machine to it at the IP layer. Prints this node's virtual IP and EndpointId, then forwards all packets to the first peer that dials."
-                        ))
+                        )))
                         .mut_arg(
                             "tun_ip",
-                            |a| a.help(tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16).")),
+                            |a| helptext::set_help(a, &tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16).")),
                         )
                         .mut_arg(
                             "mtu",
-                            |a| a.help(tr!("Upper bound for the TUN interface MTU (default 1280). The final MTU is min(this, the negotiated QUIC datagram max); values above 1280 are refused.")),
+                            |a| helptext::set_help(a, &tr!("Upper bound for the TUN interface MTU (default 1280). The final MTU is min(this, the negotiated QUIC datagram max); values above 1280 are refused.")),
                         )
                 })
                 .mut_subcommand("connect", |ss| {
@@ -566,19 +578,19 @@ fn localized_command() -> clap::Command {
                         .about(tr!("Dial a peer and bridge this machine to it at the IP layer."))
                         .mut_arg(
                             "to",
-                            |a| a.help(peer_to_help()),
+                            |a| helptext::set_help(a, &peer_to_help()),
                         )
                         .mut_arg(
                             "tun_ip",
-                            |a| a.help(tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16).")),
+                            |a| helptext::set_help(a, &tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16).")),
                         )
                         .mut_arg(
                             "mtu",
-                            |a| a.help(tr!("Upper bound for the TUN interface MTU (default 1280). The final MTU is min(this, the negotiated QUIC datagram max); values above 1280 are refused.")),
+                            |a| helptext::set_help(a, &tr!("Upper bound for the TUN interface MTU (default 1280). The final MTU is min(this, the negotiated QUIC datagram max); values above 1280 are refused.")),
                         )
                         .mut_arg(
                             "to_addr",
-                            |a| a.help(tr!("Direct address hint(s) for the peer (repeatable) — see `connect --to-addr`. Dialed directly, skipping discovery.")),
+                            |a| helptext::set_help(a, &tr!("Direct address hint(s) for the peer (repeatable) — see `connect --to-addr`. Dialed directly, skipping discovery.")),
                         )
                 })
         })
@@ -588,27 +600,27 @@ fn localized_command() -> clap::Command {
                 .about(tr!("Measure RTT to a remote node over the P2P network."))
                 .mut_arg(
                     "to",
-                    |a| a.help(peer_to_help()),
+                    |a| helptext::set_help(a, &peer_to_help()),
                 )
                 .mut_arg(
                     "to_addr",
-                    |a| a.help(tr!("Direct address hint(s) for the peer (repeatable) — see `connect --to-addr`. Dialed directly, skipping discovery.")),
+                    |a| helptext::set_help(a, &tr!("Direct address hint(s) for the peer (repeatable) — see `connect --to-addr`. Dialed directly, skipping discovery.")),
                 )
                 .mut_arg(
                     "format",
-                    |a| a.help(tr!("Output format: text (default) or json (for jq).")),
+                    |a| helptext::set_help(a, &tr!("Output format: text (default) or json (for jq).")),
                 )
         })
         .mut_subcommand("completions", |s| {
             s.disable_help_flag(true)
                 .arg(help_arg())
                 .about(tr!("Print a shell completion script to stdout."))
-                .long_about(tr!(
+                .long_about(helptext::hard_wrap_help(&tr!(
                     "Print a shell completion script to stdout.\n\nRedirect it to wherever your shell loads completions from, e.g. `link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish`."
-                ))
+                )))
                 .mut_arg(
                     "shell",
-                    |a| a.help(tr!("Which shell to generate a completion script for.")),
+                    |a| helptext::set_help(a, &tr!("Which shell to generate a completion script for.")),
                 )
         })
         ;
@@ -628,7 +640,7 @@ fn localized_command() -> clap::Command {
                 .about(tr!("Print this message or the help of the given subcommand(s)"))
                 .mut_arg(
                     "sub",
-                    |a| a.help(tr!("Print help for the subcommand(s)")),
+                    |a| helptext::set_help(a, &tr!("Print help for the subcommand(s)")),
                 )
         })
         .arg(help_arg())
@@ -1149,18 +1161,23 @@ fn is_encrypted_key(data: &[u8]) -> bool {
 /// Argon2id key derivation from the passphrase + per-file salt.
 /// OWASP-recommended interactive-login parameters (19 MiB, t=2, p=1); the
 /// salt is random per file, so the derived key is fresh on every write.
+///
+/// The KDF salt input is the PHC "B64" encoding of the on-disk salt bytes
+/// (same as argon2 0.5 `SaltString::encode_b64`), so existing encrypted
+/// identity files keep decrypting after the 0.6 upgrade.
 fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; 32]> {
-    use argon2::password_hash::SaltString;
+    use argon2::password_hash::phc::Salt;
     use argon2::{Algorithm, Argon2, Params, Version};
 
-    let salt_str = SaltString::encode_b64(salt)
-        .map_err(|_| anyhow::anyhow!(tr!("encoding the passphrase salt")))?;
+    let salt_b64 = Salt::new(salt)
+        .map_err(|_| anyhow::anyhow!(tr!("encoding the passphrase salt")))?
+        .to_salt_string();
     let params = Params::new(19 * 1024, 2, 1, Some(32))
         .map_err(|_| anyhow::anyhow!(tr!("invalid Argon2 parameters")))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut dk = [0u8; 32];
     argon2
-        .hash_password_into(passphrase.as_bytes(), salt_str.as_str().as_bytes(), &mut dk)
+        .hash_password_into(passphrase.as_bytes(), salt_b64.as_bytes(), &mut dk)
         .map_err(|_| anyhow::anyhow!(tr!("deriving key from passphrase")))?;
     Ok(dk)
 }
@@ -1169,21 +1186,22 @@ fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; 32]> {
 /// ciphertext). XChaCha20-Poly1305 with the file magic as AAD, so a header
 /// can't be swapped between files. The derived key is zeroized on return.
 fn encrypt_key_hex(hex: &str, passphrase: &str) -> Result<Vec<u8>> {
-    use argon2::password_hash::rand_core::{OsRng, RngCore};
-    use chacha20poly1305::aead::generic_array::GenericArray;
     use chacha20poly1305::aead::{Aead, Payload};
-    use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
+    use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce};
 
     let mut salt = [0u8; KEY_FILE_SALT_LEN];
-    OsRng.fill_bytes(&mut salt);
-    let mut nonce = [0u8; KEY_FILE_NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce);
+    getrandom::fill(&mut salt)
+        .map_err(|_| anyhow::anyhow!(tr!("gathering entropy for identity salt")))?;
+    let mut nonce_bytes = [0u8; KEY_FILE_NONCE_LEN];
+    getrandom::fill(&mut nonce_bytes)
+        .map_err(|_| anyhow::anyhow!(tr!("gathering entropy for identity nonce")))?;
 
     let mut dk = derive_key(passphrase, &salt)?;
-    let cipher = XChaCha20Poly1305::new((&dk).into());
+    let cipher = XChaCha20Poly1305::new(&Key::from(dk));
+    let nonce = XNonce::from(nonce_bytes);
     let ciphertext = cipher
         .encrypt(
-            GenericArray::from_slice(&nonce),
+            &nonce,
             Payload {
                 msg: hex.as_bytes(),
                 aad: KEY_FILE_MAGIC,
@@ -1195,7 +1213,7 @@ fn encrypt_key_hex(hex: &str, passphrase: &str) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(KEY_FILE_OVERHEAD + hex.len());
     out.extend_from_slice(KEY_FILE_MAGIC);
     out.extend_from_slice(&salt);
-    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&nonce_bytes);
     out.extend_from_slice(&ciphertext);
     Ok(out)
 }
@@ -1204,23 +1222,25 @@ fn encrypt_key_hex(hex: &str, passphrase: &str) -> Result<Vec<u8>> {
 /// hex. A wrong passphrase or any tampering fails the AEAD tag check and
 /// errors here.
 fn decrypt_key_hex(data: &[u8], passphrase: &str) -> Result<String> {
-    use chacha20poly1305::aead::generic_array::GenericArray;
     use chacha20poly1305::aead::{Aead, Payload};
-    use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
+    use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce};
 
     if !is_encrypted_key(data) {
         bail!(tr!("identity file is not passphrase-encrypted"));
     }
     let salt = &data[KEY_FILE_MAGIC.len()..KEY_FILE_MAGIC.len() + KEY_FILE_SALT_LEN];
-    let nonce = &data[KEY_FILE_MAGIC.len() + KEY_FILE_SALT_LEN
-        ..KEY_FILE_MAGIC.len() + KEY_FILE_SALT_LEN + KEY_FILE_NONCE_LEN];
-    let ciphertext = &data[KEY_FILE_MAGIC.len() + KEY_FILE_SALT_LEN + KEY_FILE_NONCE_LEN..];
+    let nonce_off = KEY_FILE_MAGIC.len() + KEY_FILE_SALT_LEN;
+    let nonce_bytes: [u8; KEY_FILE_NONCE_LEN] = data[nonce_off..nonce_off + KEY_FILE_NONCE_LEN]
+        .try_into()
+        .map_err(|_| anyhow::anyhow!(tr!("identity file is truncated")))?;
+    let ciphertext = &data[nonce_off + KEY_FILE_NONCE_LEN..];
 
     let mut dk = derive_key(passphrase, salt)?;
-    let cipher = XChaCha20Poly1305::new((&dk).into());
+    let cipher = XChaCha20Poly1305::new(&Key::from(dk));
+    let nonce = XNonce::from(nonce_bytes);
     let plaintext = cipher
         .decrypt(
-            GenericArray::from_slice(nonce),
+            &nonce,
             Payload {
                 msg: ciphertext,
                 aad: KEY_FILE_MAGIC,
@@ -2318,6 +2338,15 @@ mod tests {
                 "{path}: arg --{} help was not localized",
                 arg.get_id()
             );
+            // `--help` uses long_help when present; it must also be translated.
+            if let Some(llh) = l.get_long_help() {
+                assert_ne!(
+                    rh.to_string(),
+                    llh.to_string(),
+                    "{path}: arg --{} long_help was not localized",
+                    arg.get_id()
+                );
+            }
         }
 
         // Recurse into subcommands, matched by name.

@@ -60,3 +60,7 @@ link-p2p man | gzip -c > /usr/local/share/man/man1/link-p2p.1.gz   # example ins
 `link-p2p man` prints a lightweight troff page built from the same localized
 clap `Command` tree as `--help` (no extra man-generator crate). Shell
 completion install paths are the same as in the README.
+
+Help: `-h` lists commands and quick-start examples only; `--help` shows full
+option details with hard newlines at sentence/clause boundaries (so breaks are
+stable across terminal widths). clap still caps leftover soft-wrap at 100 cols.

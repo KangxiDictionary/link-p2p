@@ -7,23 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- Install path consistency: systemd unit now matches README
-  (`/usr/local/bin/link-p2p`); `build.rs` mirrors `.mo` catalogs to
-  `target/<profile>/locales` for packaging; README documents that
-  `cargo install` does not install locales by itself.
-
-### Changed
-
-- Unified test entry `./scripts/test.sh` (`unit`/`smoke`/`socks5`/`all`) with
-  shared `scripts/lib.sh` for readable PASS/FAIL output; removed one-off
-  `fin-test.sh` / `raw-multi.py`.
-- Split SSRF and bidirectional pipe helpers into `ssrf` / `pipe` modules;
-  CLI serve/connect modes encoded as enums so illegal flag combos are not
-  representable after validation.
-- Clippy: `unsafe_code` forbidden; correctness/suspicious denied; pedantic
-  noise allow-listed where intentional (wire casts, clap/i18n docs).
+## [0.2.0] - 2026-08-29
 
 ### Added
 
@@ -71,18 +55,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Periodic `path stats` debug logging (30s interval): cumulative UDP
   datagram counters + loss per connection, so a running tunnel's path
   quality is diagnosable without waiting for a failure.
+- Unified test entry `./scripts/test.sh` (`unit`/`smoke`/`socks5`/`all`) with
+  shared `scripts/lib.sh` for readable PASS/FAIL output.
 
 ### Changed
 
+- `-h` vs `--help`: `-h` lists commands and the quick-start examples only
+  (options use `hide_short_help`); `--help` shows full option text with
+  **hard** newlines at sentence/clause boundaries (not terminal soft-wrap).
+  clap `wrap_help` + `max_term_width(100)` remains a safety net for leftovers.
+- Dependencies: iroh/noq 1.1/1.2, argon2 0.6, chacha20poly1305 0.11; identity
+  KDF keeps PHC-B64 salt encoding so existing encrypted keys still open.
+- Split SSRF and bidirectional pipe helpers into `ssrf` / `pipe` modules;
+  CLI serve/connect modes encoded as enums so illegal flag combos are not
+  representable after validation.
+- Clippy: `unsafe_code` forbidden; correctness/suspicious denied; pedantic
+  noise allow-listed where intentional (wire casts, clap/i18n docs).
 - SOCKS5 `write_target` batches the header into one `write_all` and omits
   `.flush()` so callers can keep an unbuffered iroh QUIC `SendStream`
   (BufWriter without flush would hang; documented in `docs/performance.md`).
 - Reconnect wakeups are event-driven (`tokio::sync::watch`) instead of
   200ms polling: a local client arriving during a reconnect window is
   served the instant the new connection lands, not up to 200ms later.
+- Removed one-off `scripts/fin-test.sh` / `scripts/raw-multi.py`.
 
 ### Fixed
 
+- Install path consistency: systemd unit now matches README
+  (`/usr/local/bin/link-p2p`); `build.rs` mirrors `.mo` catalogs to
+  `target/<profile>/locales` for packaging; README documents that
+  `cargo install` does not install locales by itself.
 - `ping` to a `tun serve` node now works: `run_tun_serve` only registered
   `TUN_ALPN` on its endpoint, and iroh rejects connections whose ALPN is not
   in `Builder::alpns` at TLS negotiation — so the ping dispatch was dead

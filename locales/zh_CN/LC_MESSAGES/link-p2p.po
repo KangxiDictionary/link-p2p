@@ -471,6 +471,9 @@ msgstr "打印帮助"
 msgid "Print help"
 msgstr "打印帮助"
 
+msgid "Print help. `-h` lists commands and examples; `--help` shows full option details."
+msgstr "打印帮助。`-h` 只列命令与示例；`--help` 显示完整选项说明。"
+
 msgid "Print version"
 msgstr "打印版本"
 
@@ -638,3 +641,13 @@ msgstr "输出格式：text（默认）或 json（供 jq 使用）。"
 
 msgid "Print a man page (troff) for link-p2p to stdout."
 msgstr "将 link-p2p 的 man 页（troff）打印到 stdout。"
+
+msgid "gathering entropy for identity salt"
+msgstr "收集身份盐值的熵失败"
+
+msgid "gathering entropy for identity nonce"
+msgstr "收集身份 nonce 的熵失败"
+
+msgid "identity file is truncated"
+msgstr "身份文件被截断"
+

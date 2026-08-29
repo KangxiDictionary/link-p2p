@@ -479,6 +479,9 @@ msgstr "mostrando la ayuda"
 msgid "Print help"
 msgstr "Muestra la ayuda"
 
+msgid "Print help. `-h` lists commands and examples; `--help` shows full option details."
+msgstr "Muestra la ayuda. `-h` lista comandos y ejemplos; `--help` muestra los detalles de las opciones."
+
 msgid "Print version"
 msgstr "Muestra la versión"
 
@@ -646,3 +649,13 @@ msgstr "Formato de salida: text (por defecto) o json (para jq)."
 
 msgid "Print a man page (troff) for link-p2p to stdout."
 msgstr "Imprime la página man (troff) de link-p2p en stdout."
+
+msgid "gathering entropy for identity salt"
+msgstr "fallo al obtener entropía para la sal de identidad"
+
+msgid "gathering entropy for identity nonce"
+msgstr "fallo al obtener entropía para el nonce de identidad"
+
+msgid "identity file is truncated"
+msgstr "el archivo de identidad está truncado"
+
