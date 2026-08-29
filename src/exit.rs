@@ -1,6 +1,11 @@
 //! Process exit codes for shell / systemd / PowerShell scripting.
 //!
 //! On Unix, see `docs/unix.md`. Stable codes are enabled on all platforms.
+//!
+//! Prefer wrapping failures with [`coded`] at the call site (locale-safe).
+//! [`code_from`]'s English substring fallback is a last resort for errors that
+//! never went through `coded` — do not rely on it for new code, especially
+//! anything that uses `tr!()` (translated context strings will not match).
 
 use std::fmt;
 
@@ -53,19 +58,40 @@ pub fn code_from(err: &anyhow::Error) -> i32 {
             return c.code;
         }
     }
+    // Last-resort English heuristics for legacy / uncoded paths.
+    // `--allow` rejection intentionally uses a non-translated reason
+    // (`peer not allowed`) so DENIED still works under any locale.
     let s = format!("{err:#}").to_ascii_lowercase();
     if s.contains("peer not allowed") || s.contains("not in the --allow") {
         return DENIED;
     }
-    if s.contains("timed out") || s.contains("idle timeout") || s.contains("timeout") {
-        return TIMEOUT;
-    }
-    if s.contains("connecting to remote")
-        || s.contains("connection refused")
-        || s.contains("failed to connect")
-        || s.contains("dial")
-    {
-        return CONNECT;
-    }
     OTHER
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::anyhow;
+
+    #[test]
+    fn coded_wins_over_message_text() {
+        let err = coded(CONNECT, anyhow!("完全不相关的中文"));
+        assert_eq!(code_from(&err), CONNECT);
+        let err = coded(TIMEOUT, anyhow!("binding endpoint"));
+        assert_eq!(code_from(&err), TIMEOUT);
+    }
+
+    #[test]
+    fn denied_heuristic_for_allow_list() {
+        let err = anyhow!("peer not allowed");
+        assert_eq!(code_from(&err), DENIED);
+    }
+
+    #[test]
+    fn uncoded_translated_connect_is_other() {
+        // Documents why tun/stream must use `coded`: translated contexts
+        // must not be expected to match English substrings.
+        let err = anyhow!("正在连接到远程端点");
+        assert_eq!(code_from(&err), OTHER);
+    }
 }

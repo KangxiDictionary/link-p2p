@@ -9,13 +9,13 @@
 //! catalogs use Rust-style `{0}` placeholders (not printf `%`).
 //!
 //! Language selection is ours, not gettext's: the environment variables are
-//! read directly (LANGUAGE > LC_ALL > LC_MESSAGES > LANG) and the matching
-//! catalog is loaded from the `.mo` files compiled by build.rs. This works
-//! regardless of which locales the OS has installed — `LANG=ja_JP.UTF-8`
-//! gives Japanese even on a system that only knows `zh_CN.utf8`, and
-//! `LANGUAGE=es_ES` overrides anything (GNU gettext semantics: LANGUAGE is
-//! the highest-priority override). `C`/`POSIX`/unknown languages fall back
-//! to the English msgids.
+//! read directly (LANGUAGE > LC_ALL > LC_MESSAGES > LANG). When those are
+//! unset (typical on Windows), the OS UI language list from `sys-locale` is
+//! used instead. The matching catalog is loaded from the `.mo` files compiled
+//! by build.rs — `LANG=ja_JP.UTF-8` gives Japanese even on a system that only
+//! knows `zh_CN.utf8`, and `LANGUAGE=es_ES` overrides anything (GNU gettext
+//! semantics: LANGUAGE is the highest-priority override). `C`/`POSIX`/unknown
+//! languages fall back to the English msgids.
 //!
 //! Catalogs are searched for in this order:
 //!   1. `LINK_P2P_LOCALEDIR` environment variable
@@ -207,14 +207,27 @@ fn find_mo_path(lang: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// Resolve the language for this run: walk the environment setting (which
-/// may be a colon-separated list) and pick the first language we have a
-/// catalog for.
+/// Preferred language tags for this run: env vars first (GNU gettext order),
+/// then the OS UI language list when those are unset (Windows typically has
+/// no LANG).
+fn language_prefs() -> Vec<String> {
+    if let Some(raw) = env_lang() {
+        return raw
+            .split(':')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
+    sys_locale::get_locales().collect()
+}
+
+/// Resolve the language for this run: walk the preference list and pick the
+/// first language we have a catalog for.
 fn resolve_lang() -> Option<&'static str> {
-    let raw = env_lang()?;
-    for part in raw.split(':') {
+    for part in language_prefs() {
         // Skip empty / C / POSIX / unsupported parts; keep looking.
-        if let Some(dir) = normalize_lang(part) {
+        if let Some(dir) = normalize_lang(&part) {
             if find_mo_path(dir).is_some() {
                 return Some(dir);
             }

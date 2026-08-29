@@ -33,6 +33,8 @@ console = "0.16"
 # TUN device support (TUN mode: whole-machine IP reachability, needs root).
 # The `async` feature is off by default; AsyncDevice is what we drive with tokio.
 tun2 = { version = "4", features = ["async"] }
+# OS UI language when LANGUAGE/LANG are unset (typical on Windows).
+sys-locale = "0.3"
 # Address derivation for TUN mode (blake3 already in the tree via iroh).
 blake3 = "1"
 # QUIC datagram payload type for TUN mode.

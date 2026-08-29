@@ -9,6 +9,11 @@ in only on Unix targets (`cfg(unix)`). Windows builds keep stream/proxy/ping,
 JSON output, env vars, exit codes, and PowerShell completions — see
 [`docs/windows.md`](docs/windows.md).
 
+TUN mode (`tun serve` / `tun connect`) works on Linux and macOS with root /
+`CAP_NET_ADMIN` (macOS uses `utun`). macOS is best-effort without dedicated CI —
+open an issue if create/route/MTU misbehaves. Windows TUN notes are in
+`docs/windows.md`.
+
 | Flag / mode | Behavior |
 |---|---|
 | `connect --stdio` | Bidirectional stdio ↔ QUIC stream (e.g. `ssh -o ProxyCommand=…`, `rsync -e`). Human banners go to **stderr** so stdout stays clean. |

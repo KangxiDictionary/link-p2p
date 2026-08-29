@@ -1,7 +1,7 @@
 # link-p2p (MVP)
 
 A minimal TCP-over-QUIC port forwarder on top of [iroh](https://github.com/n0-computer/iroh) 1.0,
-with a point-to-point TUN mode for whole-machine IP reachability.
+with a hub-and-spoke TUN mode for whole-machine IP mesh reachability.
 This is step 1 of the roadmap discussed earlier — get one real P2P hop working
 and measured before adding SOCKS5, QoS policy, LD_PRELOAD interception, GSO/io_uring, etc.
 
@@ -16,34 +16,42 @@ and measured before adding SOCKS5, QoS policy, LD_PRELOAD interception, GSO/io_u
   connection (so NAT traversal / relay negotiation only happens once). It
   exposes either a plain forward (`--listen`) or a SOCKS5 server
   (`--socks5-listen`).
-- `tun` (needs root / CAP_NET_ADMIN, Linux) bridges two entire machines at
-  the IP layer over unreliable QUIC datagrams — one TUN interface, one /32
-  route, any protocol, no per-port setup. See below.
+- `tun` (privileged: root / CAP_NET_ADMIN, or Administrator + `wintun.dll`
+  on Windows) joins machines into a `172.24.0.0/16` virtual IP mesh over
+  unreliable QUIC datagrams — one hub (`tun serve`), many spokes
+  (`tun connect`), hub-forwarded spoke↔spoke traffic. Linux, macOS, and
+  Windows. See below.
 
 ### Whole-machine TUN mode (`tun serve` / `tun connect`)
 
-The stream modes forward one TCP port. `tun` instead bridges two entire
-machines at the IP layer: a TUN interface is created on each side, the peer's
-virtual IP is routed into it, and every packet (TCP/UDP/ICMP) crosses the
-tunnel as an *unreliable* QUIC datagram (reliability is the inner protocol's
-job — carrying inner TCP over a reliable stream would stack a second
-retransmission layer underneath and reintroduce head-of-line blocking).
+The stream modes forward one TCP port. `tun` bridges whole machines at the IP
+layer: each side gets a TUN interface and a virtual IP in `172.24.0.0/16`.
+`tun serve` is the **hub** (many concurrent peers); `tun connect` dials it.
+Spokes route the whole `/16` into the tunnel; the hub demuxes by destination
+VIP and forwards spoke↔spoke so every virtual IP can reach every other.
+Packets cross as *unreliable* QUIC datagrams (inner TCP/UDP keep their own
+reliability — carrying inner TCP over a reliable stream would stack
+retransmission and reintroduce head-of-line blocking).
 
 ```bash
-# machine A (needs root / CAP_NET_ADMIN)
+# hub (needs root / CAP_NET_ADMIN)
 sudo link-p2p tun serve
 # -> prints your virtual IP and EndpointId, e.g. 172.24.0.21
 
-# machine B
-sudo link-p2p tun connect --to <EndpointId from A>
+# spoke B
+sudo link-p2p tun connect --to <EndpointId from hub>
 
-# now, on either machine:
-ping 172.24.x.y        # the other side's virtual IP
-ssh user@172.24.x.y    # any service, any port — the whole machine is there
+# spoke C (same hub — both stay connected)
+sudo link-p2p tun connect --to <EndpointId from hub>
+
+# on any machine:
+ping 172.24.x.y        # hub or another spoke's virtual IP
+ssh user@172.24.x.y    # any service, any port
 ```
 
 Each side's virtual IP defaults to a deterministic BLAKE3 derivation from
-its EndpointId (`172.24.0.0/16`), and the two sides exchange the address
+its EndpointId (`172.24.0.0/16`, **IPv4 only** — there is no IPv6 VIP in this
+mode), and peers exchange the address
 each one actually bound during the handshake — so routes always point at
 the peer's real VIP, including `--tun-ip` overrides. The range deliberately
 avoids RFC 6598's `100.64.0.0/10`: Tailscale's netfilter rules drop any
@@ -58,27 +66,30 @@ max)`, and a connection that didn't negotiate datagrams is refused outright
 rather than silently falling back to streams.
 
 **TUN mode is a privileged mode**: creating the interface and installing the
-route needs `root` / `CAP_NET_ADMIN`, and v1 is Linux-only (macOS/Windows
-return a clear "Linux only" error). The stream modes remain unprivileged;
-the two coexist and don't replace each other. If you want `tun` without full
-root, `sudo setcap cap_net_admin+ep $(which link-p2p)` covers the network
-bits. Full design rationale and the real-hardware acceptance checklist live
-in `docs/tun-design.md`.
+route needs `root` / `CAP_NET_ADMIN` (Linux, macOS) or an elevated process plus
+`wintun.dll` next to the binary (Windows). Stream modes remain unprivileged;
+the two coexist and don't replace each other. Desktop backends are Linux
+(`/dev/net/tun` + `ip`), macOS (`utun`), and Windows (Wintun). macOS/Windows
+are best-effort until reported on real hardware — open an issue if something
+breaks. Before releases that touch TUN, run `docs/tun-acceptance.md`. On Linux,
+`sudo setcap cap_net_admin+ep $(which link-p2p)` covers the
+network bits without a full root shell. Full design rationale and the
+acceptance checklist live in `docs/tun-design.md`.
 
 Two operational behaviors worth knowing:
 
 - **`tun connect` reconnects automatically.** When the session ends (peer
   went away, network blip, or the serve side restarted), it re-dials with the
   same exponential backoff the stream mode uses (1s → 30s cap) instead of
-  exiting — the TUN interface and the peer route survive across sessions, so
-  once the peer is back the tunnel resumes without restarting the process.
+  exiting — the TUN interface and the mesh `/16` route survive across sessions, so
+  once the hub is back the tunnel resumes without restarting the process.
   Ctrl+C during a backoff wait exits cleanly.
 - **`ping` works against TUN nodes too.** `tun serve` answers `link-p2p ping`
-  probes alongside its tunnel duty, so you can measure RTT/path to a TUN
-  node without needing a separate `serve`.
-- **`--max-conns` does not apply to TUN mode** — a tunnel is a single
-  point-to-point session, not a stream fan-out; the flag is ignored there
-  (with a notice on startup if you set it).
+  probes alongside its tunnel duty (and while other peers are connected), so
+  you can measure RTT/path to a TUN node without needing a separate `serve`.
+- **`--max-conns` does not apply to TUN mode** — the hub accepts peers until
+  you stop it; the flag only caps stream-mode fan-out (with a notice on
+  startup if you set it).
 
 ### SOCKS5 proxy (`serve --proxy` + `connect --socks5-listen`)
 
@@ -193,10 +204,11 @@ Also supports `powershell` and `elvish`. Re-run after upgrading if flags change.
   ASSOCIATE, no bind. Only CONNECT over 127.0.0.1.
 - No LD_PRELOAD-style transparent interception — clients must speak SOCKS5,
   use the fixed-port modes, or use TUN mode.
-- TUN mode is point-to-point and Linux-only in v1: no mesh / address books /
-  discovery / ACLs. Datagram behavior over a *relay* path is unmeasured so
-  far (the sandbox can't force a relay-only path); the design doc treats
-  direct-path behavior as assumed and relay-path as a real-hardware follow-up.
+- TUN mode is hub-and-spoke mesh (Linux / macOS / Windows): no full peer-to-peer
+  dial mesh / gossip discovery / ACLs yet. Datagram behavior over a *relay*
+  path is unmeasured so far (the sandbox can't force a relay-only path); the
+  design doc treats direct-path behavior as assumed and relay-path as a
+  real-hardware follow-up.
 - No per-stream QoS / datagram mode for "unreliable" traffic in the stream
   modes — every stream is a reliable QUIC stream (bidi, ordered). TUN mode
   does use unreliable datagrams, but that's a separate path.
@@ -206,7 +218,8 @@ Also supports `powershell` and `elvish`. Re-run after upgrading if flags change.
   this machine it's active. That's different from the app-level GSO/io_uring
   work that a benchmark would tell you whether to pursue. Measure first, then
   decide if that's actually your bottleneck.
-- No "full mesh" — every mode is one dialer, one listener, one peer.
+- No "full peer-to-peer dial mesh" — TUN is hub-and-spoke (one `tun serve`,
+  many `tun connect`); stream modes remain one dialer / one listener.
 - **No tokio runtime/scheduling tuning** — `#[tokio::main]` uses the default
   multi-thread runtime (one OS thread per core), and it's one spawned task
   per stream. That's the right default for an I/O-bound forwarder and there's
@@ -217,10 +230,17 @@ Also supports `powershell` and `elvish`. Re-run after upgrading if flags change.
 
 ## Unix-style CLI, Windows notes, and transport tuning
 
+Windows stream notes and TUN/Wintun setup (signed `wintun.dll`, translations):
+[`docs/windows.md`](docs/windows.md). Preferred Linux→Windows build:
+
+```bash
+cargo build --release --target x86_64-pc-windows-gnu
+# then copy link-p2p.exe + locales/ (+ official wintun.dll for TUN)
+```
+
 Unix-only shell plumbing (`connect --stdio`, `--to -`, `link-p2p man`) is behind
-`cfg(unix)`; see [`docs/unix.md`](docs/unix.md). Windows stream/proxy usage:
-[`docs/windows.md`](docs/windows.md). Cross-platform: `ping --format json`, exit
-codes, `-q`/`-v`, `LINK_P2P_*` env defaults, shell completions.
+`cfg(unix)`; see [`docs/unix.md`](docs/unix.md). Cross-platform: `ping --format json`,
+exit codes, `-q`/`-v`, `LINK_P2P_*` env defaults, shell completions.
 
 Before treating loopback benches as a QUIC “protocol wall”, run the one-session
 config matrix in [`scripts/bench-transport-matrix.sh`](scripts/bench-transport-matrix.sh)
@@ -422,8 +442,8 @@ to the network: without a cap, a peer flooding streams could exhaust file
 descriptors/CPU. When at capacity, extra streams/connections queue up
 instead of being dropped.
 
-TUN mode is a single point-to-point QUIC connection and is not affected by
-`--max-conns`.
+TUN mode is a hub with many QUIC peer sessions and is not affected by
+`--max-conns` (the flag only caps stream-mode fan-out).
 
 ### Security
 

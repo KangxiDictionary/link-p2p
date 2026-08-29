@@ -67,7 +67,7 @@ whereas TUN backends and edge cases can be bolted on incrementally forever.
 |---|---|
 | Stream mode: TCP-over-QUIC port forwarding (`serve --forward` / `connect --listen`) | done |
 | SOCKS5 proxy mode (`serve --proxy` / `connect --socks5-listen`) | done |
-| TUN mode: point-to-point whole-machine IP bridging over QUIC datagrams, Linux only | done |
+| TUN mode: hub-and-spoke whole-machine IP mesh over QUIC datagrams (Linux; macOS/Windows backends) | done (macOS/Windows unverified on maintainer hardware) |
 | Persistent identity (per-machine secret key → stable `EndpointId`) | done |
 | Self-hosted relay (`--relay`) | done |
 | iroh presets::N0 (n0's public relay + DNS/pkarr discovery) | done |
@@ -285,8 +285,8 @@ behind the much larger trust-model project in gap #5.
 
 | area | current | needed |
 |---|---|---|
-| TUN mode — macOS | Linux only | futun / utun backend |
-| TUN mode — Windows | Linux only | wintun / tap-windows adapter |
+| TUN mode — macOS | utun backend (best-effort; report issues) | real-hardware CI / polish |
+| TUN mode — Windows | Wintun backend (best-effort; report issues) | ship wintun.dll with releases; CI |
 | Mobile clients | none | Android/iOS with appropriate VPN APIs, battery-aware |
 | GUI / TUI | CLI only | at minimum a TUI status dashboard; longer term a system tray app |
 | MagicDNS | manual IPs | local DNS resolver mapping peer hostnames → VIPs |

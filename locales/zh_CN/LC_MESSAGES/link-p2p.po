@@ -256,18 +256,20 @@ msgstr "通过 QUIC datagram 让两台机器在 IP 层互相可达。"
 msgid ""
 "Make two machines reachable at the IP layer over QUIC datagrams.\n"
 "\n"
-"Creates a TUN interface (needs root / CAP_NET_ADMIN) and routes the peer's "
-"virtual IP through it. Unlike `serve`/`connect`, which forward one TCP "
-"port, this bridges the whole machine: TCP, UDP and ICMP all work on the "
-"peer's virtual IP, with no per-port setup. Point-to-point only in v1 — see "
-"docs/tun-design.md."
+"Creates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or "
+"Administrator + wintun.dll on Windows) and routes the peer's virtual IP "
+"through it. Unlike `serve`/`connect`, which forward one TCP port, this "
+"bridges the whole machine: TCP, UDP and ICMP all work on the peer's "
+"virtual IP, with no per-port setup. Virtual IPs are IPv4 only. "
+"Point-to-point only — see docs/tun-design.md."
 msgstr ""
 "通过 QUIC datagram 让两台机器在 IP 层互相可达。\n"
 "\n"
-"创建一个 TUN 接口（需要 root / CAP_NET_ADMIN），并把对端的虚拟 IP 路由到它。"
+"创建一个 TUN 接口（Linux/macOS 需要 root / CAP_NET_ADMIN；Windows 需要管理员"
+"权限且二进制旁有 wintun.dll），并把对端的虚拟 IP 路由到它。"
 "与只转发单个 TCP 端口的 `serve`/`connect` 不同，本模式桥接整台机器：TCP、"
-"UDP、ICMP 都能通过对端虚拟 IP 访问，无需逐个端口配置。v1 仅支持点对点——"
-"见 docs/tun-design.md。"
+"UDP、ICMP 都能通过对端虚拟 IP 访问，无需逐个端口配置。虚拟 IP 仅为 IPv4。"
+"仅支持点对点——见 docs/tun-design.md。"
 
 msgid "Exposed side: accept a peer and bridge this machine to it at the IP layer."
 msgstr "被访问侧：接受对端连接，并在 IP 层桥接本机与对端。"
@@ -330,8 +332,58 @@ msgstr ""
 msgid "TUN mode currently supports Linux only"
 msgstr "TUN 模式目前仅支持 Linux"
 
+msgid "TUN mode supports Linux, macOS, and Windows only on this build"
+msgstr "当前构建的 TUN 模式仅支持 Linux、macOS 与 Windows"
+
 msgid "creating TUN device (needs root / CAP_NET_ADMIN)"
 msgstr "创建 TUN 设备（需要 root / CAP_NET_ADMIN）"
+
+msgid "creating TUN device (needs root; macOS uses utun)"
+msgstr "创建 TUN 设备（需要 root；macOS 使用 utun）"
+
+msgid "creating TUN device (needs Administrator and wintun.dll next to the binary)"
+msgstr "创建 TUN 设备（需要管理员权限，且二进制旁需有 wintun.dll）"
+
+msgid ""
+"creating TUN device failed (needs Administrator).\n"
+"Use the official signed wintun.dll from https://www.wintun.net/ (amd64 for "
+"64-bit), placed next to this executable:\n"
+"  {0}\n"
+"\"The file is not signed\" means Windows rejected the DLL signature — replace "
+"a wrong/unsigned/PATH-shadowed copy with the official one."
+msgstr ""
+"创建 TUN 设备失败（需要管理员权限）。\n"
+"请从 https://www.wintun.net/ 下载官方已签名的 wintun.dll（64 位用 amd64），"
+"放到本程序同目录：\n"
+"  {0}\n"
+"若提示 \"The file is not signed\"，说明 DLL 签名校验失败——请用官方文件替换"
+"错误/未签名/被 PATH 抢先加载的副本。"
+
+msgid ""
+"wintun.dll not found next to this executable:\n"
+"  {0}\n"
+"Download the official signed build from https://www.wintun.net/ (use the "
+"amd64 folder on 64-bit Windows) and copy wintun.dll here."
+msgstr ""
+"本程序同目录未找到 wintun.dll：\n"
+"  {0}\n"
+"请从 https://www.wintun.net/ 下载官方已签名版本（64 位 Windows 用 amd64 目录）"
+"并将 wintun.dll 复制到此处。"
+
+msgid "resolving path to this executable"
+msgstr "解析本程序路径"
+
+msgid "resolving directory of this executable"
+msgstr "解析本程序所在目录"
+
+msgid "could not set Windows interface MTU via netsh; relying on ICMP PMTUD injection"
+msgstr "无法通过 netsh 设置 Windows 接口 MTU；将依赖 ICMP PMTUD 注入"
+
+msgid "running `{0} {1}`"
+msgstr "执行 `{0} {1}`"
+
+msgid "command `{0} {1}` failed: {2}"
+msgstr "命令 `{0} {1}` 失败：{2}"
 
 msgid "reading TUN interface name"
 msgstr "读取 TUN 接口名称"
@@ -650,4 +702,35 @@ msgstr "收集身份 nonce 的熵失败"
 
 msgid "identity file is truncated"
 msgstr "身份文件被截断"
+
+msgid "hub mode: multiple peers can connect; traffic between peers is forwarded"
+msgstr "枢纽模式：可同时接入多个对端，并对端之间的流量由本机转发"
+
+msgid "peer {0} joined at {1}"
+msgstr "对端 {0} 已加入，虚拟 IP {1}"
+
+msgid "peer left the mesh"
+msgstr "对端已离开组网"
+
+msgid "virtual IP {0} is already claimed by another peer"
+msgstr "虚拟 IP {0} 已被另一对端占用"
+
+msgid "hub {0} is at {1}; other peers in {2} are reachable via the hub"
+msgstr "枢纽 {0} 位于 {1}；{2} 内其他对端经枢纽可达"
+
+msgid "note: --max-conns is not used by TUN mode (hub accepts peers until stopped)"
+msgstr "提示：TUN 模式不使用 --max-conns（枢纽会持续接受对端直至退出）"
+
+msgid "Make machines reachable at the IP layer over QUIC datagrams (hub-and-spoke mesh)."
+msgstr "通过 QUIC datagram 在 IP 层组网（星型枢纽拓扑）。"
+
+msgid "Hub: accept many peers and forward traffic between them."
+msgstr "枢纽：接受多个对端，并转发对端之间的流量。"
+
+msgid "Dial a hub and join its virtual IP mesh."
+msgstr "拨号连接枢纽并加入其虚拟 IP 组网。"
+
+msgid "Dial a hub (`tun serve`) and join its virtual IP mesh at the IP layer."
+msgstr "拨号连接 `tun serve` 枢纽，在 IP 层加入虚拟组网。"
+
 

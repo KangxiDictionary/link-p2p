@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **TUN mode on macOS and Windows** (alongside Linux): `utun` / Wintun backends
+  for device I/O, with platform-specific address/route/MTU setup. Windows needs
+  Administrator + `wintun.dll` next to the binary (`docs/windows.md`). macOS and
+  Windows are best-effort without dedicated CI — please open issues for host
+  failures. Manual release checklist: `docs/tun-acceptance.md`.
+
+- **TUN hub mesh**: `tun serve` accepts many concurrent peers, demuxes by
+  destination VIP, and forwards spoke↔spoke so every `172.24.0.0/16` virtual IP
+  can reach every other. Spokes install a `/16` route (not only the hub `/32`).
+  See `docs/tun-design.md`.
+
+### Fixed
+
+- **Proxy SSRF**: IPv4-mapped IPv6 (`::ffff:…`), deprecated IPv4-compatible
+  (`::a.b.c.d`), NAT64 well-known, 6to4, and Teredo no longer bypass the
+  private/loopback blocklist in `serve --proxy`.
+- **Exit codes**: `wait_online`, TUN bind/connect, and TUN VIP-exchange timeout
+  use `exit::coded` so codes 3/4 stay correct under non-English locales.
+  Windows TUN VIP collision check uses `Get-NetIPAddress` when it returns at
+  least one address (empty success falls back to `netsh`), not raw `ipconfig`
+  substring search. Windows interface MTU updates via `netsh` when possible;
+  macOS/Windows peer routes prefer add-then-replace to avoid a delete gap.
+- **Windows TUN**: load `wintun.dll` only from beside the exe (not PATH); clearer
+  errors for missing/unsigned DLL; `Endpoint::close` on early TUN failures
+  (stops the ungraceful-drop log). Peer VIP routes use
+  `netsh interface ipv4 add route …` on-link via the Wintun adapter (not
+  `route add` with the local VIP as gateway, which blackholed ICMP).
+- **i18n on Windows**: fall back to the OS UI language via `sys-locale` when
+  `LANG`/`LANGUAGE` are unset; document that `locales/` must ship next to the exe.
+
 ## [0.2.0] - 2026-08-29
 
 ### Added

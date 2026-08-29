@@ -278,11 +278,11 @@ enum Command {
     },
     /// Make two machines reachable at the IP layer over QUIC datagrams.
     ///
-    /// Creates a TUN interface (needs root / CAP_NET_ADMIN) and routes the
-    /// peer's virtual IP through it. Unlike `serve`/`connect`, which forward
-    /// one TCP port, this bridges the whole machine: TCP, UDP and ICMP all
-    /// work on the peer's virtual IP, with no per-port setup. Point-to-point
-    /// only in v1 — see docs/tun-design.md.
+    /// Creates a TUN interface (needs root / CAP_NET_ADMIN, or Administrator
+    /// and wintun.dll on Windows) and routes `172.24.0.0/16` through it.
+    /// Unlike `serve`/`connect`, which forward one TCP port, this bridges the
+    /// whole machine: TCP, UDP and ICMP on mesh virtual IPs, with no per-port
+    /// setup. Hub-and-spoke mesh — see docs/tun-design.md.
     Tun {
         #[command(subcommand)]
         command: TunCommand,
@@ -329,9 +329,9 @@ enum Command {
 /// Subcommands of `link-p2p tun`.
 #[derive(Subcommand)]
 enum TunCommand {
-    /// Exposed side: accept a peer and bridge this machine to it at the IP
-    /// layer. Prints this node's virtual IP and EndpointId, then forwards all
-    /// packets to the first peer that dials.
+    /// Exposed side: hub for a virtual IP mesh. Accepts many concurrent
+    /// peers, bridges this machine to each, and forwards traffic between
+    /// peers so every virtual IP can reach every other.
     Serve {
         /// Override this node's virtual IP (default: derived from its
         /// EndpointId, inside 172.24.0.0/16).
@@ -343,7 +343,7 @@ enum TunCommand {
         #[arg(long, default_value_t = 1280)]
         mtu: u16,
     },
-    /// Dial a peer and bridge this machine to it at the IP layer.
+    /// Dial a hub (`tun serve`) and join its virtual IP mesh at the IP layer.
     Connect {
         /// The remote node's EndpointId (printed by `tun serve` on startup).
         /// Use `-` to read one line from stdin. Also `LINK_P2P_TO`.
@@ -406,12 +406,12 @@ fn platform_after_help() -> &'static str {
 
 #[cfg(windows)]
 fn platform_after_help() -> &'static str {
-    "QUICK START:\n    link-p2p serve --forward 127.0.0.1:3389\n    link-p2p connect --to <EndpointId> --listen 127.0.0.1:13389\n\nCOMPLETIONS:\n    link-p2p completions powershell | Out-File $PROFILE\\link-p2p.ps1\n\nTUN mode is Linux-only. See docs/windows.md and README.md."
+    "QUICK START:\n    link-p2p serve --forward 127.0.0.1:3389\n    link-p2p connect --to <EndpointId> --listen 127.0.0.1:13389\n\nCOMPLETIONS:\n    link-p2p completions powershell | Out-File $PROFILE\\link-p2p.ps1\n\nTUN mode needs Administrator + wintun.dll beside the binary. See docs/windows.md and README.md."
 }
 
 #[cfg(not(any(unix, windows)))]
 fn platform_after_help() -> &'static str {
-    "See README.md. TUN mode requires Linux."
+    "See README.md. TUN mode supports Linux, macOS, and Windows."
 }
 
 #[cfg(unix)]
@@ -425,7 +425,7 @@ fn peer_to_help() -> String {
 }
 
 fn localized_command() -> clap::Command {
-    let mut cmd = Cli::command()
+    let cmd = Cli::command()
         // clap's built-in `help` subcommand hardcodes English text that
         // cannot be localized; disable it and localize the derived Help
         // variant instead (see the Command::Help doc). Same for the
@@ -520,7 +520,7 @@ fn localized_command() -> clap::Command {
                 )
         })
         .mut_subcommand("connect", |s| {
-            let mut s = s
+            let s = s
                 .disable_help_flag(true)
                 .arg(help_arg())
                 .about(tr!("Dial a remote node and expose it as a local TCP listener."))
@@ -534,14 +534,12 @@ fn localized_command() -> clap::Command {
                     |a| helptext::set_help(a, &tr!("Speak SOCKS5 (no-auth, CONNECT only) on this local address; local clients can then reach any destination through the remote `serve --proxy`.")),
                 );
             #[cfg(unix)]
-            {
-                s = s.mut_arg(
-                    "stdio",
-                    |a| helptext::set_help(a, &tr!(
-                        "Pipe stdin/stdout to one QUIC stream (ssh ProxyCommand / rsync -e). Status banners go to stderr."
-                    )),
-                );
-            }
+            let s = s.mut_arg(
+                "stdio",
+                |a| helptext::set_help(a, &tr!(
+                    "Pipe stdin/stdout to one QUIC stream (ssh ProxyCommand / rsync -e). Status banners go to stderr."
+                )),
+            );
             s.mut_arg(
                 "to_addr",
                 |a| helptext::set_help(a, &tr!(
@@ -552,16 +550,16 @@ fn localized_command() -> clap::Command {
         .mut_subcommand("tun", |s| {
             s.disable_help_flag(true)
                 .arg(help_arg())
-                .about(tr!("Make two machines reachable at the IP layer over QUIC datagrams."))
+                .about(tr!("Make machines reachable at the IP layer over QUIC datagrams (hub-and-spoke mesh)."))
                 .long_about(helptext::hard_wrap_help(&tr!(
-                    "Make two machines reachable at the IP layer over QUIC datagrams.\n\nCreates a TUN interface (needs root / CAP_NET_ADMIN) and routes the peer's virtual IP through it. Unlike `serve`/`connect`, which forward one TCP port, this bridges the whole machine: TCP, UDP and ICMP all work on the peer's virtual IP, with no per-port setup. Point-to-point only in v1 — see docs/tun-design.md."
+                    "Make machines reachable at the IP layer over QUIC datagrams (hub-and-spoke mesh).\n\nCreates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). `tun serve` is the hub (many concurrent peers); `tun connect` dials it. Spokes route 172.24.0.0/16 into the tunnel; the hub forwards traffic between peers so every virtual IP can reach every other. Virtual IPs are IPv4 only — see docs/tun-design.md."
                 )))
                 .mut_subcommand("serve", |ss| {
                     ss.disable_help_flag(true)
                         .arg(help_arg())
-                        .about(tr!("Exposed side: accept a peer and bridge this machine to it at the IP layer."))
+                        .about(tr!("Hub: accept many peers and forward traffic between them."))
                         .long_about(helptext::hard_wrap_help(&tr!(
-                            "Exposed side: accept a peer and bridge this machine to it at the IP layer. Prints this node's virtual IP and EndpointId, then forwards all packets to the first peer that dials."
+                            "Hub: accept many concurrent peers, bridge this machine to each at the IP layer, and forward traffic between peers so every virtual IP can reach every other. Prints this node's virtual IP and EndpointId."
                         )))
                         .mut_arg(
                             "tun_ip",
@@ -575,7 +573,10 @@ fn localized_command() -> clap::Command {
                 .mut_subcommand("connect", |ss| {
                     ss.disable_help_flag(true)
                         .arg(help_arg())
-                        .about(tr!("Dial a peer and bridge this machine to it at the IP layer."))
+                        .about(tr!("Dial a hub and join its virtual IP mesh."))
+                        .long_about(helptext::hard_wrap_help(&tr!(
+                            "Dial a `tun serve` hub and join its virtual IP mesh. Installs a route for 172.24.0.0/16 on the TUN so other spokes are reachable via the hub."
+                        )))
                         .mut_arg(
                             "to",
                             |a| helptext::set_help(a, &peer_to_help()),
@@ -625,13 +626,11 @@ fn localized_command() -> clap::Command {
         })
         ;
     #[cfg(unix)]
-    {
-        cmd = cmd.mut_subcommand("man", |s| {
-            s.disable_help_flag(true)
-                .arg(help_arg())
-                .about(tr!("Print a man page (troff) for link-p2p to stdout."))
-        });
-    }
+    let cmd = cmd.mut_subcommand("man", |s| {
+        s.disable_help_flag(true)
+            .arg(help_arg())
+            .about(tr!("Print a man page (troff) for link-p2p to stdout."))
+    });
     cmd.mut_subcommand("help", |s| {
             // Our derived Help variant replaces clap's built-in one (disabled
             // above); this is the only way to localize its description.
@@ -913,12 +912,10 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             .await
         }
         Command::Tun { command } => {
-            // TUN mode is a single point-to-point session; the stream-mode
-            // concurrency cap doesn't apply. Surface that instead of letting
-            // the flag silently do nothing.
+            // TUN hub accepts many peers; --max-conns only applies to stream serve.
             if cli.max_conns != 1024 {
                 ui.line(styler.warn(&tr!(
-                    "note: --max-conns is not used by TUN mode (single point-to-point session)"
+                    "note: --max-conns is not used by TUN mode (hub accepts peers until stopped)"
                 )));
             }
             match command {
@@ -980,8 +977,14 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             )
             .await
         }
-        Command::Completions { .. } | Command::Man | Command::Help { .. } => {
-            // Completions / man / help return before identity setup.
+        Command::Completions { .. } | Command::Help { .. } => {
+            // Completions / help return before identity setup.
+            Err(anyhow::anyhow!(
+                "internal: meta-command should have returned earlier"
+            ))
+        }
+        #[cfg(unix)]
+        Command::Man => {
             Err(anyhow::anyhow!(
                 "internal: meta-command should have returned earlier"
             ))
@@ -1004,6 +1007,7 @@ fn resolve_peer_to(to: Option<String>, stdio: bool) -> Result<String> {
     if raw == "-" {
         #[cfg(not(unix))]
         {
+            let _ = stdio;
             return Err(exit::coded(
                 exit::USAGE,
                 anyhow::anyhow!(tr!("--to - (read EndpointId from stdin) is only available on Unix builds")),
@@ -1404,20 +1408,23 @@ fn harden_key_permissions(_path: &Path) -> Result<()> {
 /// hangs or is refused, UDP outbound is blocked.
 async fn wait_online(endpoint: &Endpoint) -> Result<()> {
     const ONLINE_TIMEOUT: Duration = Duration::from_secs(30);
-    time::timeout(ONLINE_TIMEOUT, endpoint.online())
-        .await
-        .context(tr_fmt!(
-            "endpoint did not come online within {0}.\n\
-             \n\
-             The most likely cause: outgoing UDP is blocked by a firewall.\n\
-             iroh/QUIC relies on UDP for both direct hole-punching and\n\
-             relay connections. Try:\n\
-               nc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\n\
-               RUST_LOG=iroh=debug {1}     # see exactly where it's stuck",
-            format!("{ONLINE_TIMEOUT:?}"),
-            std::env::args().next().unwrap_or_else(|| "link-p2p".into())
-        ))?;
-    Ok(())
+    match time::timeout(ONLINE_TIMEOUT, endpoint.online()).await {
+        Ok(()) => Ok(()),
+        Err(_elapsed) => Err(exit::coded(
+            exit::TIMEOUT,
+            anyhow::anyhow!(tr_fmt!(
+                "endpoint did not come online within {0}.\n\
+                 \n\
+                 The most likely cause: outgoing UDP is blocked by a firewall.\n\
+                 iroh/QUIC relies on UDP for both direct hole-punching and\n\
+                 relay connections. Try:\n\
+                   nc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\n\
+                   RUST_LOG=iroh=debug {1}     # see exactly where it's stuck",
+                format!("{ONLINE_TIMEOUT:?}"),
+                std::env::args().next().unwrap_or_else(|| "link-p2p".into())
+            )),
+        )),
+    }
 }
 
 /// Build an endpoint with the given identity.

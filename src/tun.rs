@@ -1,27 +1,35 @@
 //! TUN mode: whole-machine IP reachability over QUIC datagrams.
 //!
-//! `serve`/`connect` forward one TCP port. This module instead bridges two
-//! entire machines at the IP layer: one TUN interface, one /32 route to the
-//! peer, and every packet (TCP/UDP/ICMP) crossing the tunnel as an
-//! *unreliable* QUIC datagram — reliability is the inner protocol's job.
+//! Stream `serve`/`connect` forward one TCP port. This module bridges machines
+//! at the IP layer over *unreliable* QUIC datagrams (inner TCP/UDP/ICMP keep
+//! their own reliability).
 //!
-//! Implements v1 of docs/tun-design.md: point-to-point, Linux only,
-//! no mesh/ACL/discovery, `serve`/`connect` untouched. Requires root /
-//! CAP_NET_ADMIN (unlike the stream modes).
+//! Topology is **hub-and-spoke**: `tun serve` is the hub (many concurrent
+//! peers); `tun connect` dials the hub. Spokes install `172.24.0.0/16` on the
+//! TUN so any mesh VIP enters the tunnel; the hub demuxes by destination VIP
+//! and **forwards spoke→spoke** so every virtual IP can reach every other.
+//! Full peer-to-peer mesh (no hub) is out of scope for now — see
+//! `docs/tun-design.md`.
+//!
+//! Desktop backends: Linux (`/dev/net/tun` + `ip`), macOS (`utun` +
+//! `route`/`ifconfig`), Windows (Wintun + `netsh`/`route`). Privileged
+//! (root / CAP_NET_ADMIN / Administrator) unlike stream modes.
 
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Instant;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use iroh::endpoint::Connection;
 use iroh::protocol::ProtocolHandler;
 use iroh::{EndpointId, SecretKey};
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::{self, Duration};
 use tracing::{info, warn};
-#[cfg(target_os = "linux")]
 use tun2::AbstractDevice;
 
 use crate::i18n::{tr, tr_fmt};
@@ -46,6 +54,27 @@ pub const TUN_ALPN: &[u8] = b"link-p2p/tun/1";
 const VIP_BASE: u32 = 0xAC18_0000; // 172.24.0.0
 /// Low 16 bits of the hash — one /16's worth of host bits.
 const VIP_HOST_BITS: u32 = 0x0000_FFFF;
+/// Whole mesh prefix spokes install on the TUN (hub keeps per-peer /32s).
+const VIP_PREFIX: &str = "172.24.0.0/16";
+
+fn vip_in_mesh(ip: Ipv4Addr) -> bool {
+    u32::from(ip) & !VIP_HOST_BITS == VIP_BASE
+}
+
+/// IPv4 destination from a raw L3 packet (no Ethernet header on our TUN).
+fn ipv4_dst(pkt: &[u8]) -> Option<Ipv4Addr> {
+    if pkt.len() < 20 || pkt[0] >> 4 != 4 {
+        return None;
+    }
+    Some(Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]))
+}
+
+fn ipv4_src(pkt: &[u8]) -> Option<Ipv4Addr> {
+    if pkt.len() < 20 || pkt[0] >> 4 != 4 {
+        return None;
+    }
+    Some(Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]))
+}
 
 /// Derive this node's *default* virtual IP from its EndpointId, used when
 /// `--tun-ip` isn't given.
@@ -107,11 +136,22 @@ fn choose_mtu(user_mtu: u16, conn: &Connection) -> Result<u16> {
 }
 
 // ---------------------------------------------------------------------------
-// Local interface setup (Linux). tun2 only opens /dev/net/tun; everything
-// else goes through the `ip` command so failures produce readable errors.
-// Dropping the AsyncDevice deletes the interface (and its addresses/routes),
-// so there's no explicit cleanup path.
+// Local interface setup (Linux / macOS / Windows).
+//
+// Packet I/O goes through tun2::AsyncDevice on every desktop OS. Address,
+// MTU and peer routes are OS-specific: Linux uses `ip`; macOS uses
+// `ifconfig`/`route` (and tun2's create-time alias); Windows uses Wintun
+// config + `route`. Dropping the AsyncDevice tears the interface down.
 // ---------------------------------------------------------------------------
+
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+fn vip_already_taken_msg(vip: Ipv4Addr) -> String {
+    tr_fmt!(
+        "virtual IP {0} is already assigned to a local interface.\n\
+         Pick a different one with --tun-ip.",
+        vip
+    )
+}
 
 /// Run `ip` with the given args, erroring with its stderr on failure.
 #[cfg(target_os = "linux")]
@@ -125,6 +165,50 @@ fn run_ip(args: &[&str]) -> Result<()> {
             "command `ip {0}` failed: {1}",
             args.join(" "),
             String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn run_cmd(bin: &str, args: &[&str]) -> Result<()> {
+    let out = Command::new(bin)
+        .args(args)
+        .output()
+        .with_context(|| tr_fmt!("running `{0} {1}`", bin, args.join(" ")))?;
+    if !out.status.success() {
+        let err = if out.stderr.is_empty() {
+            String::from_utf8_lossy(&out.stdout)
+        } else {
+            String::from_utf8_lossy(&out.stderr)
+        };
+        bail!(tr_fmt!(
+            "command `{0} {1}` failed: {2}",
+            bin,
+            args.join(" "),
+            err.trim()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn run_cmd(bin: &str, args: &[&str]) -> Result<()> {
+    let out = Command::new(bin)
+        .args(args)
+        .output()
+        .with_context(|| tr_fmt!("running `{0} {1}`", bin, args.join(" ")))?;
+    if !out.status.success() {
+        let err = if out.stderr.is_empty() {
+            String::from_utf8_lossy(&out.stdout)
+        } else {
+            String::from_utf8_lossy(&out.stderr)
+        };
+        bail!(tr_fmt!(
+            "command `{0} {1}` failed: {2}",
+            bin,
+            args.join(" "),
+            err.trim()
         ));
     }
     Ok(())
@@ -145,27 +229,98 @@ fn ensure_vip_free(vip: Ipv4Addr) -> Result<()> {
     // 172.24.0.2 from false-positiving on 172.24.0.20.
     let needle = format!(" inet {vip}/");
     if text.contains(&needle) {
-        bail!(tr_fmt!(
-            "virtual IP {0} is already assigned to a local interface.\n\
-             Pick a different one with --tun-ip.",
-            vip
-        ));
+        bail!(vip_already_taken_msg(vip));
     }
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn ensure_vip_free(vip: Ipv4Addr) -> Result<()> {
+    let out = Command::new("ifconfig")
+        .arg("-a")
+        .output()
+        .context(tr!("checking local interfaces for the virtual IP"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    // ifconfig: "inet 172.24.0.1 netmask ..."
+    let needle = format!("inet {vip} ");
+    if text.contains(&needle) {
+        bail!(vip_already_taken_msg(vip));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn ensure_vip_free(vip: Ipv4Addr) -> Result<()> {
+    let vip_s = vip.to_string();
+    // Prefer one-IP-per-line from Get-NetIPAddress (no gateway/DNS false hits).
+    // Only trust a successful run that listed at least one address: SilentlyContinue
+    // can yield exit 0 with empty stdout when the cmdlet fails, which would
+    // otherwise look like "no conflict".
+    if let Ok(out) = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.IPAddress }",
+        ])
+        .output()
+    {
+        if out.status.success() {
+            // Own the lossy conversion so line slices can live past the statement.
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            let ips: Vec<&str> = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            if !ips.is_empty() {
+                if ips.iter().any(|ip| *ip == vip_s) {
+                    bail!(vip_already_taken_msg(vip));
+                }
+                return Ok(());
+            }
+        }
+    }
+    // Fallback: only parse "IP Address" value fields from netsh (not gateways).
+    let out = Command::new("netsh")
+        .args(["interface", "ipv4", "show", "addresses"])
+        .output()
+        .context(tr!("checking local interfaces for the virtual IP"))?;
+    let taken = String::from_utf8_lossy(&out.stdout).lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        // English netsh: "IP Address:                 192.168.1.1"
+        if !lower.contains("ip address") {
+            return false;
+        }
+        line.rsplit(':')
+            .next()
+            .is_some_and(|v| v.trim() == vip_s)
+    });
+    if taken {
+        bail!(vip_already_taken_msg(vip));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn ensure_vip_free(_vip: Ipv4Addr) -> Result<()> {
-    bail!(tr!("TUN mode currently supports Linux only"))
+    bail!(tr!(
+        "TUN mode supports Linux, macOS, and Windows only on this build"
+    ))
 }
 
 /// Create the TUN interface, assign `vip`, set MTU and bring it up.
 ///
-/// tun2 only does TUNSETIFF with IFF_TUN|IFF_NO_PI (raw IP packets); with
-/// `ensure_root_privileges` off it skips its own ioctl configure, so address/
-/// MTU/up go through `ip` — one code path, readable errors. Returns the
-/// device (keep it alive: dropping it deletes the interface) and its
-/// kernel-assigned name (needed for the later `ip route` calls).
+/// Contract across platforms: L3 device, address = `vip`/32, up, MTU set.
+/// Peer host routes are installed later via [`add_peer_route`] (not at create
+/// time — the peer VIP is learned in the handshake).
+///
+/// Linux keeps address/MTU/`up` on `ip` so failures stay readable and match
+/// the long-tested path (`ensure_root_privileges(false)`). macOS needs
+/// tun2's point-to-point alias (`destination` = self) at create time.
+/// Windows configures address/netmask/MTU via Wintun; `destination` is
+/// omitted (Wintun treats it as a default gateway, which we do not want for
+/// a /32 VIP — peer routes use `route add` instead).
 #[cfg(target_os = "linux")]
 fn create_tun_device(vip: Ipv4Addr, mtu: u16) -> Result<(tun2::AsyncDevice, String)> {
     let mut config = tun2::configure();
@@ -186,15 +341,93 @@ fn create_tun_device(vip: Ipv4Addr, mtu: u16) -> Result<(tun2::AsyncDevice, Stri
     Ok((device, name))
 }
 
-#[cfg(not(target_os = "linux"))]
-fn create_tun_device(_vip: Ipv4Addr, _mtu: u16) -> Result<(tun2::AsyncDevice, String)> {
-    bail!(tr!("TUN mode currently supports Linux only"))
+#[cfg(target_os = "macos")]
+fn create_tun_device(vip: Ipv4Addr, mtu: u16) -> Result<(tun2::AsyncDevice, String)> {
+    // Leave tun_name unset so the kernel allocates the next free utunN.
+    // destination=vip + /32 is the BSD point-to-point alias; peer host
+    // routes are installed later via `route -n add -host`.
+    let mut config = tun2::configure();
+    config
+        .address(vip)
+        .destination(vip)
+        .netmask(Ipv4Addr::new(255, 255, 255, 255))
+        .mtu(mtu)
+        .up()
+        .layer(tun2::Layer::L3);
+    let device = tun2::create_as_async(&config).with_context(|| {
+        tr!("creating TUN device (needs root; macOS uses utun)")
+    })?;
+    let name = device
+        .tun_name()
+        .context(tr!("reading TUN interface name"))?;
+    Ok((device, name))
 }
 
-/// Point the peer's virtual IP at the tunnel. `replace` (not `add`) so a
-/// reconnecting peer updates the route instead of erroring on "exists".
+#[cfg(windows)]
+fn create_tun_device(vip: Ipv4Addr, mtu: u16) -> Result<(tun2::AsyncDevice, String)> {
+    // Always load the DLL next to this exe — relative "wintun.dll" would
+    // search PATH and can pick up an unsigned copy (→ "The file is not signed").
+    let dll = wintun_dll_beside_exe()?;
+    let mut config = tun2::configure();
+    config
+        .tun_name("link-p2p")
+        .address(vip)
+        .netmask(Ipv4Addr::new(255, 255, 255, 255))
+        .mtu(mtu)
+        .up()
+        .layer(tun2::Layer::L3)
+        .platform_config(|p| {
+            p.wintun_file(&dll);
+        });
+    let device = tun2::create_as_async(&config).with_context(|| {
+        tr_fmt!(
+            "creating TUN device failed (needs Administrator).\n\
+             Use the official signed wintun.dll from https://www.wintun.net/ \
+             (amd64 for 64-bit), placed next to this executable:\n\
+               {0}\n\
+             \"The file is not signed\" means Windows rejected the DLL signature — \
+             replace a wrong/unsigned/PATH-shadowed copy with the official one.",
+            dll.display()
+        )
+    })?;
+    let name = device
+        .tun_name()
+        .context(tr!("reading TUN interface name"))?;
+    Ok((device, name))
+}
+
+/// Resolve `wintun.dll` beside `link-p2p.exe` (not via PATH).
+#[cfg(windows)]
+fn wintun_dll_beside_exe() -> Result<std::path::PathBuf> {
+    let exe = std::env::current_exe().context(tr!("resolving path to this executable"))?;
+    let dir = exe
+        .parent()
+        .context(tr!("resolving directory of this executable"))?;
+    let dll = dir.join("wintun.dll");
+    if !dll.is_file() {
+        bail!(tr_fmt!(
+            "wintun.dll not found next to this executable:\n\
+               {0}\n\
+             Download the official signed build from https://www.wintun.net/ \
+             (use the amd64 folder on 64-bit Windows) and copy wintun.dll here.",
+            dll.display()
+        ));
+    }
+    Ok(dll)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn create_tun_device(_vip: Ipv4Addr, _mtu: u16) -> Result<(tun2::AsyncDevice, String)> {
+    bail!(tr!(
+        "TUN mode supports Linux, macOS, and Windows only on this build"
+    ))
+}
+
+/// Point the peer's virtual IP at the tunnel.
 #[cfg(target_os = "linux")]
-fn add_peer_route(tun_name: &str, peer_vip: Ipv4Addr) -> Result<()> {
+fn add_peer_route(tun_name: &str, peer_vip: Ipv4Addr, _own_vip: Ipv4Addr) -> Result<()> {
+    // `replace` (not `add`) so a reconnecting peer updates the route instead
+    // of erroring on "exists".
     run_ip(&[
         "route",
         "replace",
@@ -204,9 +437,87 @@ fn add_peer_route(tun_name: &str, peer_vip: Ipv4Addr) -> Result<()> {
     ])
 }
 
-#[cfg(not(target_os = "linux"))]
-fn add_peer_route(_tun_name: &str, _peer_vip: Ipv4Addr) -> Result<()> {
-    bail!(tr!("TUN mode currently supports Linux only"))
+#[cfg(target_os = "macos")]
+fn add_peer_route(tun_name: &str, peer_vip: Ipv4Addr, _own_vip: Ipv4Addr) -> Result<()> {
+    // Prefer add-only so a clean first install has no delete→add gap. If the
+    // host route already exists (reconnect), delete then re-add.
+    let peer = peer_vip.to_string();
+    let add_args = [
+        "-n",
+        "add",
+        "-host",
+        peer.as_str(),
+        "-interface",
+        tun_name,
+    ];
+    if run_cmd("route", &add_args).is_ok() {
+        return Ok(());
+    }
+    let _ = run_cmd("route", &["-n", "delete", "-host", peer.as_str()]);
+    run_cmd("route", &add_args)
+}
+
+#[cfg(windows)]
+fn add_peer_route(tun_name: &str, peer_vip: Ipv4Addr, _own_vip: Ipv4Addr) -> Result<()> {
+    // Prefer netsh on-link route via the Wintun interface name. Using the local
+    // VIP as a `route add` gateway often installs a route that never selects
+    // the Wintun adapter — ICMP then blackholes even though the session is up.
+    let peer = format!("{peer_vip}/32");
+    let add_netsh = || {
+        run_cmd(
+            "netsh",
+            &[
+                "interface",
+                "ipv4",
+                "add",
+                "route",
+                peer.as_str(),
+                tun_name,
+                "store=active",
+            ],
+        )
+    };
+    if add_netsh().is_ok() {
+        return Ok(());
+    }
+    let _ = run_cmd(
+        "netsh",
+        &[
+            "interface",
+            "ipv4",
+            "delete",
+            "route",
+            peer.as_str(),
+            tun_name,
+        ],
+    );
+    add_netsh()
+}
+
+#[cfg(windows)]
+fn del_peer_route(tun_name: &str, peer_vip: Ipv4Addr) -> Result<()> {
+    run_cmd(
+        "netsh",
+        &[
+            "interface",
+            "ipv4",
+            "delete",
+            "route",
+            &format!("{peer_vip}/32"),
+            tun_name,
+        ],
+    )
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn add_peer_route(
+    _tun_name: &str,
+    _peer_vip: Ipv4Addr,
+    _own_vip: Ipv4Addr,
+) -> Result<()> {
+    bail!(tr!(
+        "TUN mode supports Linux, macOS, and Windows only on this build"
+    ))
 }
 
 /// Remove the peer's route when a session ends, so a later peer with a
@@ -218,17 +529,147 @@ fn del_peer_route(tun_name: &str, peer_vip: Ipv4Addr) -> Result<()> {
     run_ip(&["route", "del", &format!("{peer_vip}/32"), "dev", tun_name])
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn del_peer_route(_tun_name: &str, peer_vip: Ipv4Addr) -> Result<()> {
+    run_cmd("route", &["-n", "delete", "-host", &peer_vip.to_string()])
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn del_peer_route(_tun_name: &str, _peer_vip: Ipv4Addr) -> Result<()> {
     Ok(())
 }
 
-/// Lower the interface MTU to the connection's datagram ceiling. `serve`
-/// creates the device before the connection exists, so it clamps down here
-/// once the peer's negotiated max is known.
+/// Spoke-side: send the whole VIP /16 into the TUN so traffic for *any*
+/// mesh peer (not only the hub) is captured and sent to the hub for
+/// forwarding.
+#[cfg(target_os = "linux")]
+fn add_mesh_route(tun_name: &str) -> Result<()> {
+    run_ip(&["route", "replace", VIP_PREFIX, "dev", tun_name])
+}
+
+#[cfg(target_os = "macos")]
+fn add_mesh_route(tun_name: &str) -> Result<()> {
+    let _ = run_cmd("route", &["-n", "delete", "-net", VIP_PREFIX]);
+    run_cmd(
+        "route",
+        &["-n", "add", "-net", VIP_PREFIX, "-interface", tun_name],
+    )
+}
+
+#[cfg(windows)]
+fn add_mesh_route(tun_name: &str) -> Result<()> {
+    let add = || {
+        run_cmd(
+            "netsh",
+            &[
+                "interface",
+                "ipv4",
+                "add",
+                "route",
+                VIP_PREFIX,
+                tun_name,
+                "store=active",
+            ],
+        )
+    };
+    if add().is_ok() {
+        return Ok(());
+    }
+    let _ = run_cmd(
+        "netsh",
+        &[
+            "interface",
+            "ipv4",
+            "delete",
+            "route",
+            VIP_PREFIX,
+            tun_name,
+        ],
+    );
+    add()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn add_mesh_route(_tun_name: &str) -> Result<()> {
+    bail!(tr!(
+        "TUN mode supports Linux, macOS, and Windows only on this build"
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn del_mesh_route(tun_name: &str) -> Result<()> {
+    run_ip(&["route", "del", VIP_PREFIX, "dev", tun_name])
+}
+
+#[cfg(target_os = "macos")]
+fn del_mesh_route(_tun_name: &str) -> Result<()> {
+    run_cmd("route", &["-n", "delete", "-net", VIP_PREFIX])
+}
+
+#[cfg(windows)]
+fn del_mesh_route(tun_name: &str) -> Result<()> {
+    run_cmd(
+        "netsh",
+        &[
+            "interface",
+            "ipv4",
+            "delete",
+            "route",
+            VIP_PREFIX,
+            tun_name,
+        ],
+    )
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn del_mesh_route(_tun_name: &str) -> Result<()> {
+    Ok(())
+}
+
+/// Lower/raise the interface MTU to the connection's datagram ceiling.
 #[cfg(target_os = "linux")]
 fn set_tun_mtu(tun_name: &str, mtu: u16) -> Result<()> {
     run_ip(&["link", "set", "dev", tun_name, "mtu", &mtu.to_string()])
+}
+
+#[cfg(target_os = "macos")]
+fn set_tun_mtu(tun_name: &str, mtu: u16) -> Result<()> {
+    run_cmd("ifconfig", &[tun_name, "mtu", &mtu.to_string()])
+}
+
+#[cfg(windows)]
+fn set_tun_mtu(tun_name: &str, mtu: u16) -> Result<()> {
+    // Wintun's ring accepts huge packets; ask the IPv4 stack to advertise a
+    // lower interface MTU so local TCP can learn without relying solely on
+    // ICMP Frag Needed (Windows firewalls sometimes drop injected ICMP).
+    // Best-effort: failure must not tear the tunnel down.
+    let mtu_arg = format!("mtu={mtu}");
+    if let Err(e) = run_cmd(
+        "netsh",
+        &[
+            "interface",
+            "ipv4",
+            "set",
+            "subinterface",
+            tun_name,
+            &mtu_arg,
+            "store=active",
+        ],
+    ) {
+        warn!(
+            error = %e,
+            "{}",
+            tr!("could not set Windows interface MTU via netsh; relying on ICMP PMTUD injection")
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn set_tun_mtu(_tun_name: &str, _mtu: u16) -> Result<()> {
+    bail!(tr!(
+        "TUN mode supports Linux, macOS, and Windows only on this build"
+    ))
 }
 
 /// Raise the TUN interface MTU when the connection's datagram ceiling has
@@ -246,7 +687,6 @@ fn set_tun_mtu(tun_name: &str, mtu: u16) -> Result<()> {
 /// `max_datagram_size()` is the max payload `send_datagram` will accept
 /// (QUIC framing already subtracted), so the interface MTU can be set to
 /// it directly.
-#[cfg(target_os = "linux")]
 fn refresh_tun_mtu(
     tun_name: &str,
     user_mtu: u16,
@@ -277,7 +717,6 @@ fn refresh_tun_mtu(
 /// really supports more. Takes the already-fetched ceiling (the caller
 /// queried `max_datagram_size()` for its own check) instead of querying it
 /// again. Returns whether the MTU was lowered.
-#[cfg(target_os = "linux")]
 fn shrink_tun_mtu(tun_name: &str, ceiling: usize, mtu: &mut u16) -> Result<bool> {
     let ceiling = u16::try_from(ceiling).unwrap_or(u16::MAX);
     if ceiling < *mtu {
@@ -286,27 +725,6 @@ fn shrink_tun_mtu(tun_name: &str, ceiling: usize, mtu: &mut u16) -> Result<bool>
         return Ok(true);
     }
     Ok(false)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn shrink_tun_mtu(_tun_name: &str, _ceiling: usize, _mtu: &mut u16) -> Result<bool> {
-    Ok(false)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn refresh_tun_mtu(
-    _tun_name: &str,
-    _user_mtu: u16,
-    _conn: &Connection,
-    _mtu: &mut u16,
-    _raise_after: Instant,
-) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn set_tun_mtu(_tun_name: &str, _mtu: u16) -> Result<()> {
-    bail!(tr!("TUN mode currently supports Linux only"))
 }
 
 // ---------------------------------------------------------------------------
@@ -451,9 +869,16 @@ async fn exchange_peer_vip(conn: &Connection, own_vip: Ipv4Addr, dialer: bool) -
         send.finish()?;
         Ok::<_, anyhow::Error>(Ipv4Addr::from(buf))
     };
-    let peer_vip = time::timeout(VIP_EXCHANGE_TIMEOUT, exchange)
-        .await
-        .context(tr!("peer did not complete the TUN address exchange"))??;
+    let peer_vip = match time::timeout(VIP_EXCHANGE_TIMEOUT, exchange).await {
+        Ok(Ok(vip)) => vip,
+        Ok(Err(e)) => return Err(e),
+        Err(_elapsed) => {
+            return Err(crate::exit::coded(
+                crate::exit::TIMEOUT,
+                anyhow::anyhow!(tr!("peer did not complete the TUN address exchange")),
+            ));
+        }
+    };
     if peer_vip.is_unspecified() || peer_vip.is_broadcast() || peer_vip.is_multicast() {
         bail!(tr_fmt!(
             "peer announced an unusable virtual IP {0}",
@@ -651,10 +1076,171 @@ fn handle_ping_probe(conn: Connection) {
     });
 }
 
-/// Exposed side (`tun serve`): accept one peer at a time and bridge this
-/// machine to it. The collision check and device creation happen before we
-/// accept anything, so a startup problem is reported immediately rather than
-/// after a peer has already dialed.
+/// One spoke currently attached to the hub.
+#[derive(Clone)]
+struct HubPeer {
+    id: EndpointId,
+    conn: Connection,
+}
+
+type HubPeers = Arc<RwLock<HashMap<Ipv4Addr, HubPeer>>>;
+type SharedTun = Arc<Mutex<tun2::AsyncDevice>>;
+
+/// Send one inner IP packet as a QUIC datagram, shrinking/ICMP on oversize.
+async fn hub_send_datagram(
+    tun: &SharedTun,
+    tun_name: &str,
+    conn: &Connection,
+    own_vip: Ipv4Addr,
+    peer: EndpointId,
+    pkt: Bytes,
+    iface_mtu: &mut u16,
+) {
+    let n = pkt.len();
+    let ceiling = conn.max_datagram_size().unwrap_or(usize::MAX);
+    if n > ceiling {
+        let next_hop = u16::try_from(ceiling).unwrap_or(u16::MAX);
+        if let Ok(true) = shrink_tun_mtu(tun_name, ceiling, iface_mtu) {
+            warn!(%peer, "{}", tr_fmt!(
+                "path datagram ceiling dropped to {0}; lowered TUN interface MTU and dropped one packet",
+                *iface_mtu
+            ));
+        }
+        if let Some(icmp) = build_icmp_frag_needed(&pkt, next_hop, own_vip) {
+            let guard = tun.lock().await;
+            if let Err(e) = guard.send(&icmp).await {
+                warn!(%peer, error = %e, "{}", tr!("failed to inject ICMP Fragmentation Needed into TUN"));
+            }
+        }
+        return;
+    }
+    if let Err(e) = conn.send_datagram_wait(pkt).await {
+        warn!(%peer, error = %e, "{}", tr!("datagram error; assuming transient path switch (iroh may be migrating the connection)"));
+    }
+}
+
+/// Hub: packets from the local TUN → spoke (by destination VIP).
+async fn hub_tun_to_peers(
+    tun: SharedTun,
+    tun_name: String,
+    own_vip: Ipv4Addr,
+    peers: HubPeers,
+    user_mtu: u16,
+) {
+    let mut buf = vec![0u8; user_mtu as usize + 64];
+    let mut send_buf = BytesMut::with_capacity(user_mtu as usize + 64);
+    let mut iface_mtu = user_mtu;
+    loop {
+        let n = {
+            let guard = tun.lock().await;
+            match guard.recv(&mut buf).await {
+                Ok(n) => n,
+                Err(e) => {
+                    warn!(error = %e, "{}", tr!("reading packet from TUN device"));
+                    break;
+                }
+            }
+        };
+        let Some(dst) = ipv4_dst(&buf[..n]) else {
+            continue;
+        };
+        if dst == own_vip || !vip_in_mesh(dst) {
+            continue;
+        }
+        let peer = {
+            let map = peers.read().await;
+            map.get(&dst).cloned()
+        };
+        let Some(peer) = peer else {
+            tracing::debug!(%dst, "no hub peer for destination VIP; dropping");
+            continue;
+        };
+        send_buf.clear();
+        send_buf.extend_from_slice(&buf[..n]);
+        let pkt = send_buf.split().freeze();
+        hub_send_datagram(
+            &tun,
+            &tun_name,
+            &peer.conn,
+            own_vip,
+            peer.id,
+            pkt,
+            &mut iface_mtu,
+        )
+        .await;
+    }
+}
+
+/// Hub: packets from one spoke → local TUN and/or another spoke.
+async fn hub_peer_to_mesh(
+    tun: SharedTun,
+    tun_name: String,
+    own_vip: Ipv4Addr,
+    peers: HubPeers,
+    peer_vip: Ipv4Addr,
+    peer: HubPeer,
+    user_mtu: u16,
+) {
+    let mut iface_mtu = user_mtu;
+    loop {
+        tokio::select! {
+            _ = peer.conn.closed() => {
+                info!(peer = %peer.id, %peer_vip, "{}", tr!("peer disconnected"));
+                break;
+            }
+            r = peer.conn.read_datagram() => {
+                match r {
+                    Ok(data) => {
+                        let Some(src) = ipv4_src(&data) else { continue };
+                        // Drop spoofed sources so one spoke cannot inject
+                        // another VIP's address into the mesh.
+                        if src != peer_vip {
+                            tracing::debug!(%peer_vip, %src, "dropping spoofed source VIP");
+                            continue;
+                        }
+                        let Some(dst) = ipv4_dst(&data) else { continue };
+                        if dst == own_vip {
+                            let guard = tun.lock().await;
+                            if let Err(e) = guard.send(&data[..]).await {
+                                warn!(peer = %peer.id, error = %e, "{}", tr!("writing packet to TUN device"));
+                                break;
+                            }
+                            continue;
+                        }
+                        if !vip_in_mesh(dst) || dst == peer_vip {
+                            continue;
+                        }
+                        let other = {
+                            let map = peers.read().await;
+                            map.get(&dst).cloned()
+                        };
+                        let Some(other) = other else {
+                            tracing::debug!(%dst, "no hub peer for forwarded VIP; dropping");
+                            continue;
+                        };
+                        hub_send_datagram(
+                            &tun,
+                            &tun_name,
+                            &other.conn,
+                            own_vip,
+                            other.id,
+                            data,
+                            &mut iface_mtu,
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        warn!(peer = %peer.id, error = %e, "{}", tr!("datagram error; assuming transient path switch (iroh may be migrating the connection)"));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Exposed side (`tun serve`): hub for many concurrent spokes. Keeps accepting
+/// while sessions run; demuxes local TUN traffic by destination VIP and
+/// forwards spoke→spoke so every virtual IP can reach every other.
 pub async fn run_tun_serve(
     secret_key: SecretKey,
     tun_ip: Option<Ipv4Addr>,
@@ -672,15 +1258,43 @@ pub async fn run_tun_serve(
         .alpns(vec![TUN_ALPN.to_vec(), crate::PING_ALPN.to_vec()])
         .bind()
         .await
-        .context(tr!("binding endpoint"))?;
+        .map_err(|e| {
+            crate::exit::coded(
+                crate::exit::CONNECT,
+                anyhow::Error::new(e).context(tr!("binding endpoint")),
+            )
+        })?;
 
     let own_id = endpoint.id();
     let own_vip = tun_ip.unwrap_or_else(|| derive_vip(own_id));
     // Collision check first (needs no network): a taken address should be
     // reported before we spend up to 30s waiting to come online.
-    ensure_vip_free(own_vip)?;
-    crate::wait_online(&endpoint).await?;
-    let (tun, tun_name) = create_tun_device(own_vip, mtu)?;
+    if let Err(e) = ensure_vip_free(own_vip) {
+        endpoint.close().await;
+        return Err(e);
+    }
+    if let Err(e) = crate::wait_online(&endpoint).await {
+        endpoint.close().await;
+        return Err(e);
+    }
+    let (tun, tun_name) = match create_tun_device(own_vip, mtu) {
+        Ok(x) => x,
+        Err(e) => {
+            endpoint.close().await;
+            return Err(e);
+        }
+    };
+    let tun: SharedTun = Arc::new(Mutex::new(tun));
+    let peers: HubPeers = Arc::new(RwLock::new(HashMap::new()));
+
+    // Capture local→mesh packets for as long as the hub lives.
+    tokio::spawn(hub_tun_to_peers(
+        Arc::clone(&tun),
+        tun_name.clone(),
+        own_vip,
+        Arc::clone(&peers),
+        mtu,
+    ));
 
     println!("{}", styler.banner("link-p2p tun serve"));
     println!(
@@ -697,6 +1311,12 @@ pub async fn run_tun_serve(
     let ep_hex = own_id.to_string();
     println!("    {}", styler.highlight(&ep_hex));
     println!("ENDPOINT_ID={ep_hex}");
+    println!(
+        "  {}",
+        styler.dim(&tr!(
+            "hub mode: multiple peers can connect; traffic between peers is forwarded"
+        ))
+    );
     println!();
     println!("{}", styler.dim(&tr!("Press Ctrl+C to stop.")));
 
@@ -715,9 +1335,13 @@ pub async fn run_tun_serve(
                         continue;
                     }
                 };
-                let conn = accepting
-                    .await
-                    .context(tr!("completing connection handshake"))?;
+                let conn = match accepting.await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!(error = %e, "{}", tr!("completing connection handshake"));
+                        continue;
+                    }
+                };
 
                 // `link-p2p ping` probes arrive on their own ALPN; answer
                 // them on a dedicated task so the tunnel keeps accepting
@@ -727,59 +1351,20 @@ pub async fn run_tun_serve(
                     continue;
                 }
 
-                let peer = conn.remote_id();
-                info!(%peer, "{}", tr!("TUN session established"));
-
-                // The peer's real VIP — its derived default or its --tun-ip
-                // override — announced during the handshake. Kept outside the
-                // session block so it survives for route cleanup below.
-                let peer_vip = match exchange_peer_vip(&conn, own_vip, false).await {
-                    Ok(vip) => vip,
-                    Err(e) => {
-                        warn!(%peer, error = %e, "{}", tr!("TUN session error"));
-                        continue;
-                    }
-                };
-
-                let result = async {
-                    add_peer_route(&tun_name, peer_vip)?;
-                    let user_mtu = mtu;
-                    let mut mtu = choose_mtu(user_mtu, &conn)?;
-                    set_tun_mtu(&tun_name, mtu)?;
-                    // Observability for the MTU-symmetry question: max_datagram_size
-                    // is a per-end value (local path MTU estimate + peer-advertised
-                    // limit), so the two sides' numbers may legitimately differ —
-                    // e.g. different egress interface MTUs. That alone is harmless:
-                    // both sides' tun MTU is capped at the same 1280. The dangerous
-                    // signal is either side BELOW 1280 — that side's tun MTU is
-                    // smaller than the peer's, and the peer's oversize sends get
-                    // silently dropped at this side's tun write (this side's own
-                    // sends are fine, they're clamped to its own smaller max).
-                    info!(%peer, "{}", tr_fmt!(
-                        "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}",
-                        conn.max_datagram_size().unwrap_or_default(),
-                        mtu
-                    ));
-                    run_datagram_loop(
-                        &tun, &tun_name, &conn, user_mtu, &mut mtu, own_vip, peer, styler,
+                let peer_id = conn.remote_id();
+                let tun = Arc::clone(&tun);
+                let peers = Arc::clone(&peers);
+                let tun_name = tun_name.clone();
+                let user_mtu = mtu;
+                tokio::spawn(async move {
+                    if let Err(e) = hub_run_spoke(
+                        tun, tun_name, own_vip, peers, peer_id, conn, user_mtu,
                     )
                     .await
-                }
-                .await;
-
-                // Session over (peer gone, error, or Ctrl+C): drop the peer's
-                // route so a later peer with a different VIP doesn't leave a
-                // stale route on the TUN interface. Best-effort, but never
-                // silent — a failure here is how zombie routes get diagnosed.
-                if let Err(e) = del_peer_route(&tun_name, peer_vip) {
-                    warn!(%peer, error = %e, "{}", tr!("could not remove peer route"));
-                }
-
-                match result {
-                    Ok(SessionEnd::CtrlC) => break,
-                    Ok(SessionEnd::PeerGone) => { /* keep accepting */ }
-                    Err(e) => warn!(%peer, error = %e, "{}", tr!("TUN session error")),
-                }
+                    {
+                        warn!(peer = %peer_id, error = format!("{e:#}"), "{}", tr!("TUN session error"));
+                    }
+                });
             }
             _ = tokio::signal::ctrl_c() => {
                 println!("{}", styler.warn(&tr!("shutting down...")));
@@ -787,10 +1372,86 @@ pub async fn run_tun_serve(
             }
         }
     }
-    // Close gracefully: send close frames to any connected peer instead of
-    // dropping the socket, so the peer's session (and route cleanup) ends
-    // immediately.
+    // Close gracefully: send close frames to every spoke so their sessions
+    // (and route cleanup) end immediately.
     endpoint.close().await;
+    Ok(())
+}
+
+async fn hub_run_spoke(
+    tun: SharedTun,
+    tun_name: String,
+    own_vip: Ipv4Addr,
+    peers: HubPeers,
+    peer_id: EndpointId,
+    conn: Connection,
+    user_mtu: u16,
+) -> Result<()> {
+    let peer_vip = exchange_peer_vip(&conn, own_vip, false).await?;
+    if peer_vip == own_vip || !vip_in_mesh(peer_vip) {
+        bail!(tr_fmt!(
+            "peer announced an unusable virtual IP {0}",
+            peer_vip
+        ));
+    }
+
+    {
+        let mut map = peers.write().await;
+        if map.contains_key(&peer_vip) {
+            bail!(tr_fmt!(
+                "virtual IP {0} is already claimed by another peer",
+                peer_vip
+            ));
+        }
+        map.insert(
+            peer_vip,
+            HubPeer {
+                id: peer_id,
+                conn: conn.clone(),
+            },
+        );
+    }
+
+    if let Err(e) = add_peer_route(&tun_name, peer_vip, own_vip) {
+        peers.write().await.remove(&peer_vip);
+        return Err(e);
+    }
+
+    let session_mtu = choose_mtu(user_mtu, &conn).unwrap_or(user_mtu);
+    info!(%peer_id, %peer_vip, "{}", tr!("TUN session established"));
+    info!(%peer_id, "{}", tr_fmt!(
+        "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}",
+        conn.max_datagram_size().unwrap_or_default(),
+        session_mtu
+    ));
+    println!(
+        "{}",
+        tr_fmt!(
+            "peer {0} joined at {1}",
+            peer_id.fmt_short(),
+            peer_vip
+        )
+    );
+
+    hub_peer_to_mesh(
+        tun,
+        tun_name.clone(),
+        own_vip,
+        Arc::clone(&peers),
+        peer_vip,
+        HubPeer {
+            id: peer_id,
+            conn,
+        },
+        user_mtu,
+    )
+    .await;
+
+    peers.write().await.remove(&peer_vip);
+    if let Err(e) = del_peer_route(&tun_name, peer_vip) {
+        warn!(%peer_id, error = %e, "{}", tr!("could not remove peer route"));
+    }
+    info!(%peer_id, %peer_vip, "{}", tr!("peer left the mesh"));
     Ok(())
 }
 
@@ -812,18 +1473,40 @@ pub async fn run_tun_connect(
     let endpoint = crate::build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune)?
         .bind()
         .await
-        .context(tr!("binding endpoint"))?;
+        .map_err(|e| {
+            crate::exit::coded(
+                crate::exit::CONNECT,
+                anyhow::Error::new(e).context(tr!("binding endpoint")),
+            )
+        })?;
 
-    let peer_id: EndpointId = to
-        .parse()
-        .with_context(|| tr_fmt!("'{0}' is not a valid EndpointId", to))?;
+    let peer_id: EndpointId = match to.parse() {
+        Ok(id) => id,
+        Err(e) => {
+            endpoint.close().await;
+            return Err(anyhow::Error::new(e)
+                .context(tr_fmt!("'{0}' is not a valid EndpointId", to)));
+        }
+    };
     let own_id = endpoint.id();
     let own_vip = tun_ip.unwrap_or_else(|| derive_vip(own_id));
     // Collision check first (needs no network): fail fast on a taken address.
-    ensure_vip_free(own_vip)?;
-    crate::wait_online(&endpoint).await?;
+    if let Err(e) = ensure_vip_free(own_vip) {
+        endpoint.close().await;
+        return Err(e);
+    }
+    if let Err(e) = crate::wait_online(&endpoint).await {
+        endpoint.close().await;
+        return Err(e);
+    }
 
-    let dial_addr = crate::build_dial_addr(peer_id, relay, &to_addr)?;
+    let dial_addr = match crate::build_dial_addr(peer_id, relay, &to_addr) {
+        Ok(a) => a,
+        Err(e) => {
+            endpoint.close().await;
+            return Err(e);
+        }
+    };
     if !to_addr.is_empty() {
         println!(
             "  {}",
@@ -842,7 +1525,13 @@ pub async fn run_tun_connect(
     // interface (and its /32 address) survives across reconnects. MTU is
     // clamped per session (choose_mtu) and the interface follows via
     // set_tun_mtu, so start with the user's --mtu bound.
-    let (tun, tun_name) = create_tun_device(own_vip, mtu)?;
+    let (tun, tun_name) = match create_tun_device(own_vip, mtu) {
+        Ok(x) => x,
+        Err(e) => {
+            endpoint.close().await;
+            return Err(e);
+        }
+    };
 
     // Reconnect loop: unlike stream-mode `connect`, which re-dials per QUIC
     // connection in the background, a TUN session *is* the whole data path —
@@ -871,7 +1560,12 @@ pub async fn run_tun_connect(
             let conn = endpoint
                 .connect(dial_addr.clone(), TUN_ALPN)
                 .await
-                .context(tr!("connecting to remote endpoint"))?;
+                .map_err(|e| {
+                    crate::exit::coded(
+                        crate::exit::CONNECT,
+                        anyhow::Error::new(e).context(tr!("connecting to remote endpoint")),
+                    )
+                })?;
             // The peer's actual VIP (derived default or `--tun-ip` override)
             // comes from the handshake — never re-derived from its EndpointId.
             let peer_vip = exchange_peer_vip(&conn, own_vip, true).await?;
@@ -880,9 +1574,9 @@ pub async fn run_tun_connect(
             let user_mtu = mtu;
             let mut mtu = choose_mtu(user_mtu, &conn)?;
             set_tun_mtu(&tun_name, mtu)?;
-            add_peer_route(&tun_name, peer_vip)?;
-            // Same observability line as `tun serve`: compare this across both
-            // machines to check the MTU-symmetry assumption.
+            // Whole mesh /16 so traffic for other spokes (not only the hub)
+            // enters this TUN and is relayed by the hub.
+            add_mesh_route(&tun_name)?;
             info!(%peer_id, "{}", tr_fmt!(
                 "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}",
                 conn.max_datagram_size().unwrap_or_default(),
@@ -898,9 +1592,10 @@ pub async fn run_tun_connect(
                 println!(
                     "{}",
                     styler.dim(&tr_fmt!(
-                        "peer {0} is reachable at {1}",
+                        "hub {0} is at {1}; other peers in {2} are reachable via the hub",
                         peer_id.fmt_short(),
-                        peer_vip
+                        peer_vip,
+                        VIP_PREFIX
                     ))
                 );
                 println!("{}", styler.dim(&tr!("Press Ctrl+C to stop.")));
@@ -910,22 +1605,23 @@ pub async fn run_tun_connect(
                 &tun, &tun_name, &conn, user_mtu, &mut mtu, own_vip, peer_id, styler,
             )
             .await?;
-            Ok::<_, anyhow::Error>((end, Some(peer_vip)))
+            Ok::<_, anyhow::Error>((end, true))
         }
         .await;
 
-        let (end, peer_vip) = match session {
+        let (end, had_route) = match session {
             Ok(x) => x,
             Err(e) => {
-                warn!(%peer_id, error = %e, "{}", tr!("TUN session error"));
-                (SessionEnd::PeerGone, None)
+                // Prefer the full chain (`{:#}`) so iroh/QUIC causes aren't
+                // swallowed by the translated "connecting to remote endpoint"
+                // context alone.
+                warn!(%peer_id, error = format!("{e:#}"), "{}", tr!("TUN session error"));
+                (SessionEnd::PeerGone, false)
             }
         };
-        // Session over (peer gone, error, or Ctrl+C): drop the peer's route so
-        // a later session with a different VIP doesn't leave a stale route on
-        // the TUN interface. Best-effort, but never silent.
-        if let Some(vip) = peer_vip {
-            if let Err(e) = del_peer_route(&tun_name, vip) {
+        // Keep the /16 across reconnects; only tear it down when leaving.
+        if matches!(end, SessionEnd::CtrlC) && had_route {
+            if let Err(e) = del_mesh_route(&tun_name) {
                 warn!(%peer_id, error = %e, "{}", tr!("could not remove peer route"));
             }
         }
@@ -939,6 +1635,7 @@ pub async fn run_tun_connect(
             }
         }
     }
+    let _ = del_mesh_route(&tun_name);
     // Close gracefully instead of dropping the socket: the peer's datagram
     // loop then fails immediately (route cleanup on the serve side is
     // instant) and iroh doesn't log its ungraceful-drop error.
@@ -1021,5 +1718,21 @@ mod tests {
 
         assert!(build_icmp_frag_needed(&[], 1162, gw).is_none());
         assert!(build_icmp_frag_needed(&[0x45; 10], 1162, gw).is_none());
+    }
+
+    #[test]
+    fn vip_mesh_prefix_and_ipv4_headers() {
+        assert!(vip_in_mesh(Ipv4Addr::new(172, 24, 1, 2)));
+        assert!(!vip_in_mesh(Ipv4Addr::new(172, 25, 0, 1)));
+        assert!(!vip_in_mesh(Ipv4Addr::new(10, 0, 0, 1)));
+
+        let pkt = sample_ipv4_tcp(
+            Ipv4Addr::new(172, 24, 0, 1),
+            Ipv4Addr::new(172, 24, 0, 2),
+            40,
+        );
+        assert_eq!(ipv4_src(&pkt), Some(Ipv4Addr::new(172, 24, 0, 1)));
+        assert_eq!(ipv4_dst(&pkt), Some(Ipv4Addr::new(172, 24, 0, 2)));
+        assert!(ipv4_dst(&[]).is_none());
     }
 }
