@@ -27,7 +27,7 @@ use bytes::{Bytes, BytesMut};
 use iroh::endpoint::Connection;
 use iroh::protocol::ProtocolHandler;
 use iroh::{EndpointId, SecretKey};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tokio::time::{self, Duration};
 use tracing::{info, warn};
 use tun2::AbstractDevice;
@@ -1084,11 +1084,62 @@ struct HubPeer {
 }
 
 type HubPeers = Arc<RwLock<HashMap<Ipv4Addr, HubPeer>>>;
-type SharedTun = Arc<Mutex<tun2::AsyncDevice>>;
+
+/// Owned by a single task — never lock across `recv`/`send` awaits from
+/// other tasks (that starved spoke→hub delivery: the reader held the mutex
+/// while blocked in `recv`, so writers could not inject packets into TUN).
+#[derive(Clone)]
+struct TunIo {
+    /// Packets to write into the TUN (spoke→hub local delivery, ICMP PTB).
+    to_tun: tokio::sync::mpsc::Sender<Bytes>,
+}
+
+impl TunIo {
+    async fn send(&self, pkt: Bytes) {
+        let _ = self.to_tun.send(pkt).await;
+    }
+}
+
+fn spawn_tun_io(
+    tun: tun2::AsyncDevice,
+    user_mtu: u16,
+) -> (TunIo, tokio::sync::mpsc::Receiver<Bytes>) {
+    let (to_tun_tx, mut to_tun_rx) = tokio::sync::mpsc::channel::<Bytes>(256);
+    let (from_tun_tx, from_tun_rx) = tokio::sync::mpsc::channel::<Bytes>(256);
+    tokio::spawn(async move {
+        let tun = tun;
+        let mut buf = vec![0u8; user_mtu as usize + 64];
+        loop {
+            tokio::select! {
+                biased;
+                Some(pkt) = to_tun_rx.recv() => {
+                    if let Err(e) = tun.send(&pkt).await {
+                        warn!(error = %e, "{}", tr!("writing packet to TUN device"));
+                        break;
+                    }
+                }
+                r = tun.recv(&mut buf) => {
+                    match r {
+                        Ok(n) => {
+                            if from_tun_tx.send(Bytes::copy_from_slice(&buf[..n])).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "{}", tr!("reading packet from TUN device"));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+    (TunIo { to_tun: to_tun_tx }, from_tun_rx)
+}
 
 /// Send one inner IP packet as a QUIC datagram, shrinking/ICMP on oversize.
 async fn hub_send_datagram(
-    tun: &SharedTun,
+    tun: &TunIo,
     tun_name: &str,
     conn: &Connection,
     own_vip: Ipv4Addr,
@@ -1107,10 +1158,7 @@ async fn hub_send_datagram(
             ));
         }
         if let Some(icmp) = build_icmp_frag_needed(&pkt, next_hop, own_vip) {
-            let guard = tun.lock().await;
-            if let Err(e) = guard.send(&icmp).await {
-                warn!(%peer, error = %e, "{}", tr!("failed to inject ICMP Fragmentation Needed into TUN"));
-            }
+            tun.send(Bytes::from(icmp)).await;
         }
         return;
     }
@@ -1121,27 +1169,16 @@ async fn hub_send_datagram(
 
 /// Hub: packets from the local TUN → spoke (by destination VIP).
 async fn hub_tun_to_peers(
-    tun: SharedTun,
+    tun: TunIo,
+    mut from_tun: tokio::sync::mpsc::Receiver<Bytes>,
     tun_name: String,
     own_vip: Ipv4Addr,
     peers: HubPeers,
     user_mtu: u16,
 ) {
-    let mut buf = vec![0u8; user_mtu as usize + 64];
-    let mut send_buf = BytesMut::with_capacity(user_mtu as usize + 64);
     let mut iface_mtu = user_mtu;
-    loop {
-        let n = {
-            let guard = tun.lock().await;
-            match guard.recv(&mut buf).await {
-                Ok(n) => n,
-                Err(e) => {
-                    warn!(error = %e, "{}", tr!("reading packet from TUN device"));
-                    break;
-                }
-            }
-        };
-        let Some(dst) = ipv4_dst(&buf[..n]) else {
+    while let Some(pkt) = from_tun.recv().await {
+        let Some(dst) = ipv4_dst(&pkt) else {
             continue;
         };
         if dst == own_vip || !vip_in_mesh(dst) {
@@ -1155,9 +1192,6 @@ async fn hub_tun_to_peers(
             tracing::debug!(%dst, "no hub peer for destination VIP; dropping");
             continue;
         };
-        send_buf.clear();
-        send_buf.extend_from_slice(&buf[..n]);
-        let pkt = send_buf.split().freeze();
         hub_send_datagram(
             &tun,
             &tun_name,
@@ -1173,7 +1207,7 @@ async fn hub_tun_to_peers(
 
 /// Hub: packets from one spoke → local TUN and/or another spoke.
 async fn hub_peer_to_mesh(
-    tun: SharedTun,
+    tun: TunIo,
     tun_name: String,
     own_vip: Ipv4Addr,
     peers: HubPeers,
@@ -1200,11 +1234,7 @@ async fn hub_peer_to_mesh(
                         }
                         let Some(dst) = ipv4_dst(&data) else { continue };
                         if dst == own_vip {
-                            let guard = tun.lock().await;
-                            if let Err(e) = guard.send(&data[..]).await {
-                                warn!(peer = %peer.id, error = %e, "{}", tr!("writing packet to TUN device"));
-                                break;
-                            }
+                            tun.send(data).await;
                             continue;
                         }
                         if !vip_in_mesh(dst) || dst == peer_vip {
@@ -1284,12 +1314,13 @@ pub async fn run_tun_serve(
             return Err(e);
         }
     };
-    let tun: SharedTun = Arc::new(Mutex::new(tun));
+    let (tun_io, from_tun) = spawn_tun_io(tun, mtu);
     let peers: HubPeers = Arc::new(RwLock::new(HashMap::new()));
 
     // Capture local→mesh packets for as long as the hub lives.
     tokio::spawn(hub_tun_to_peers(
-        Arc::clone(&tun),
+        tun_io.clone(),
+        from_tun,
         tun_name.clone(),
         own_vip,
         Arc::clone(&peers),
@@ -1352,13 +1383,13 @@ pub async fn run_tun_serve(
                 }
 
                 let peer_id = conn.remote_id();
-                let tun = Arc::clone(&tun);
+                let tun_io = tun_io.clone();
                 let peers = Arc::clone(&peers);
                 let tun_name = tun_name.clone();
                 let user_mtu = mtu;
                 tokio::spawn(async move {
                     if let Err(e) = hub_run_spoke(
-                        tun, tun_name, own_vip, peers, peer_id, conn, user_mtu,
+                        tun_io, tun_name, own_vip, peers, peer_id, conn, user_mtu,
                     )
                     .await
                     {
@@ -1379,7 +1410,7 @@ pub async fn run_tun_serve(
 }
 
 async fn hub_run_spoke(
-    tun: SharedTun,
+    tun: TunIo,
     tun_name: String,
     own_vip: Ipv4Addr,
     peers: HubPeers,

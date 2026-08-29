@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   destination VIP, and forwards spoke↔spoke so every `172.24.0.0/16` virtual IP
   can reach every other. Spokes install a `/16` route (not only the hub `/32`).
   See `docs/tun-design.md`.
+- **TUN hub I/O**: a dedicated TUN actor (channel in/out) so spoke→hub delivery
+  is not starved by holding a mutex across `recv`.
 
 ### Fixed
 
