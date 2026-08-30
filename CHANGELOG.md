@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Multi `--relay`**: repeatable URLs / comma-separated `LINK_P2P_RELAY` for
+  custom `RelayMap` failover (e.g. self-hosted then n0). Still skips n0
+  discovery whenever any custom relay is set.
+- **`--relay-only`** / `LINK_P2P_RELAY_ONLY`: disable IP transports
+  (`clear_ip_transports` + relay-only addr filter) so traffic cannot
+  hole-punch to direct. Set on both peers for a true relay baseline.
+  Conflicts with `--to-addr`. `--relay` alone still allows direct upgrade.
+
 - **TUN mode on macOS and Windows** (alongside Linux): `utun` / Wintun backends
   for device I/O, with platform-specific address/route/MTU setup. Windows needs
   Administrator + `wintun.dll` next to the binary (`docs/windows.md`). macOS and
@@ -40,11 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`ping` RTT vs path timing**: measure and report **initial** RTT/path right
+  after connect, then wait up to 2s for relay→direct, then measure **settled**
+  again. JSON `rtt_us`/`path` are settled; `initial_*` diagnose the magicsock
+  upgrade race (avoids “path: direct” with a still-relay 600ms+ RTT).
+- **Path monitor**: while a session stays on relay, periodically
+  `Endpoint::network_change` to retry hole-punch; warn once (user-facing) when
+  active throughput stays in a relay-shaped ceiling (under ~128 KB/s). Announce
+  when the path upgrades to direct.
 - **Path classification**: `ping` / TUN session logs / path-stats no longer
   treat Quinn `udp_tx/rx > 0` as "direct". iroh magicsock feeds relay as UDP
   too; we now use `Connection::paths()` (`is_selected` / `is_ip` /
-  `is_relay`). Ping waits up to 2s for a relay→direct upgrade after
-  handshake.
+  `is_relay`).
 - **Fixed-forward silent hang**: download-first TCP (and any case where the
   dialer sends no bytes until the server speaks) no longer leaves serve
   stuck in `accept_bi`. Invalid/missing hellos fail immediately with a

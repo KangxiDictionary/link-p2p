@@ -70,6 +70,12 @@ whereas TUN backends and edge cases can be bolted on incrementally forever.
 | TUN mode: hub-coordinated VIP mesh (`link-p2p/tun/2` roster + spoke direct + hub fallback; `--allow`); Linux/macOS/Windows backends | done (macOS/Windows unverified on maintainer hardware) |
 | Persistent identity (per-machine secret key → stable `EndpointId`) | done |
 | Self-hosted relay (`--relay`) | done |
+| Multi `--relay` failover | done |
+| Relay-only baseline (`--relay-only`) | done |
+| Merge custom `--relay` with n0 defaults (`--no-n0-relays` to opt out) | planned (call / auto mode) |
+| `call` (symmetric dial) + local contacts / short codes | planned |
+| Persistent `config.toml` (relays, defaults) | planned |
+| Mesh-native relay (peer forwards for unreachable peers; opt-in `--allow`) | backlog |
 | iroh presets::N0 (n0's public relay + DNS/pkarr discovery) | done |
 | Deterministic default VIP derivation (BLAKE3 → 172.24.0.0/16) | done |
 | VIP exchange at handshake (so `--tun-ip` actually works for peer routing) | done |
@@ -294,6 +300,8 @@ behind the much larger trust-model project in gap #5.
 | Mobile clients | none | Android/iOS with appropriate VPN APIs, battery-aware |
 | GUI / TUI | CLI only | at minimum a TUI status dashboard; longer term a system tray app |
 | MagicDNS | manual IPs | local DNS resolver mapping peer hostnames → VIPs |
+| Phone-like UX (`call`, contacts, short codes) | `serve`/`connect` + EndpointId | see Layer 0 planned rows |
+| Mesh-native relay (any allowed peer forwards for CGNAT/no-v6 nodes) | hub TUN forward only; stream mode has no peer relay | opt-in bandwidth sharing via `--allow`; reuse `pipe_streams` QUIC↔QUIC; not anonymity (not Tor/I2P) |
 | Auto-update / packages | `cargo build` | binary releases, package repos, auto-update daemon |
 | Service integration | none | systemd unit files, Docker images, OpenWrt packages |
 

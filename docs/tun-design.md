@@ -89,5 +89,9 @@ A 应用 → tun → spoke A
 B: 收 datagram → 写 tun → B 应用
 ```
 
-阶段 0 诊断：`link-p2p ping` 看外层 `path: direct|relay`；TUN 会话日志也会打
-`path=`。裸 IP mtr 与 `--cc bbr3` 对比可区分链路/CC vs 架构问题。
+阶段 0 诊断：`link-p2p ping` 会打出 **initial** 与 **settled** 两套 RTT/path
+（握手常先走 relay，再升级直连；只看 settled）。长会话在仍走 relay 时会周期性
+`network_change` 重试打洞，并对「中继限速形态」的低吞吐打黄字警告。需要仅
+relay 对照时双方加 `--relay-only`；自建可重复传 `--relay`。裸 IP 上
+`mtr`/`iperf3` 与 `--cc bbr3`（仅在已直连时）对比可区分链路/CC vs 选路/公共
+relay 限速。优先确认服务器是否有全局 IPv6。

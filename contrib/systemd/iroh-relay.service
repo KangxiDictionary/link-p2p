@@ -1,15 +1,20 @@
 # systemd unit for an iroh relay server.
 #
-# A self-hosted relay replaces n0's public relay, which keeps spamming
-# "Lost connection to relay server: Ping timeout / TLS close_notify" when
-# the local network to n0's free nodes is flaky. Run your own relay on a
-# machine with a stable connection (the same box that runs `tun serve` is
-# fine), and point both link-p2p ends at it with --relay.
+# A self-hosted relay replaces n0's public relay for bootstrap / fallback.
+# Public n0 nodes rate-limit per client (often tens of KB/s) — that is
+# intentional, not a link-p2p bug. Run your own relay on a machine with a
+# stable public uplink (a cheap VPS; a CGNAT home box usually cannot accept
+# inbound relay clients), and point both link-p2p ends with --relay.
 #
 # Setup (one-time):
 #   cargo install iroh-relay --features server      # or build from source
 #   sudo install -m 0755 ~/.cargo/bin/iroh-relay /usr/local/bin/
 #   sudo cp contrib/systemd/iroh-relay.service /etc/systemd/system/
+#   # Optional: write /etc/iroh-relay.toml and raise per-client limits, e.g.
+#   #   [limits.client.rx]
+#   #   bytes_per_second = 104857600   # 100 MiB/s
+#   #   max_burst_bytes = 209715200
+#   # then: ExecStart=... --config-path /etc/iroh-relay.toml
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now iroh-relay
 #
@@ -19,6 +24,8 @@
 # your peers reach directly; for anything exposed to the public internet,
 # configure TLS instead (https_bind_addr + cert in a config file — see the
 # iroh-relay docs), the default dev mode is intentionally not for that.
+# Dev mode defaults often omit client rate limits; production configs may
+# re-introduce them — set limits.client.rx explicitly after you self-host.
 
 [Unit]
 Description=iroh relay server

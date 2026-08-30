@@ -132,9 +132,20 @@ across two machines behind NAT, without you manually exchanging IPs.
 
 ### Self-hosted relay (`--relay`)
 
-Pass `--relay http://your-relay:3340` on both sides to use your own relay
-instead of n0's, e.g. `iroh-relay --dev` for local testing. This skips
-DNS/pkarr discovery entirely and dials the peer directly through that relay.
+Pass one or more `--relay http://your-relay:3340` on both sides to use your
+own relay map instead of n0's (skips DNS/pkarr discovery). Example for local
+testing: `iroh-relay --dev`. Repeat the flag for failover:
+
+```bash
+# Prefer a VPS you control; keep an n0 URL as backup if you want
+link-p2p serve --forward 127.0.0.1:22 \
+  --relay http://vps.example:3340 \
+  --relay https://use1-1.relay.n0.iroh.link
+```
+
+`LINK_P2P_RELAY` accepts a comma-separated list. Magicsock picks among the
+configured relays; this is relay-side redundancy, not “force traffic through
+the first URL”.
 
 Direct connections still get attempted and usually succeed when NAT allows
 it — the relay isn't a permanent detour, it's how the two sides bootstrap
@@ -142,22 +153,30 @@ and exchange candidate addresses before upgrading to a direct path. Run with
 `RUST_LOG=iroh=trace` and look for `Established` / `path_remote=Ip` in the
 logs to confirm whether a given session actually went direct or stayed on
 the relay — that distinction matters when you're reading throughput numbers
-off it (see `docs/benchmarks.md`).
+off it (see `docs/benchmarks.md` / `docs/performance.md`).
+
+**IPv6 tip:** if either side has a global IPv6 address, try
+`connect --to-addr [2001:db8::1]:port` (and the matching listen/bind). That
+can skip CGNAT/IPv4 inbound filtering entirely; TCP port probes failing on
+IPv4 does **not** prove UDP hole-punch is impossible.
+
+To force a **relay-only baseline** (no hole-punch / LAN direct), pass
+`--relay-only` on **both** peers (`LINK_P2P_RELAY_ONLY=1`). That clears IP
+transports in iroh so traffic cannot upgrade to direct. It conflicts with
+`--to-addr`. `--relay` alone never meant “force relay”.
 
 One real caveat: skipping pkarr/DNS also skips one source of direct-address
 candidates, so on especially hostile NATs (symmetric NAT on both ends) a
-custom relay may hole-punch less reliably than the default n0 path. Not a
+custom-only map may hole-punch less reliably than the default n0 path. Not a
 concern for same-LAN or typical home-NAT testing.
 
-**Why self-host?** n0's public relay is a free shared service; on a flaky
-link the relay WebSocket is the first thing to drop, and iroh logs it as
-`Lost connection to relay server: Ping timeout` / `peer closed connection
-without sending TLS close_notify`. Those `WARN` lines are iroh's internals,
-not a bug in this tool, and they stop only when the relay link itself is
-stable. Pointing both ends at your own relay (a box with a steady uplink)
-is the real fix — see `contrib/systemd/iroh-relay.service` for a one-liner
-way to run one as a service. `--relay http://<that-box>:3340` then replaces
-n0 entirely.
+**Why self-host?** n0's public relay is a free shared service with
+**per-client rate limits** (token bucket) — expect tens of KB/s when a
+session stays on relay; cubic vs bbr3 will not move that ceiling. Self-host
+on a small VPS (stable uplink, not a CGNAT home box), point both ends with
+`--relay`, and **raise `limits.client.rx` in the iroh-relay config** or you
+rebuild the same throttle. See `contrib/systemd/iroh-relay.service` and
+`docs/performance.md`.
 
 ### Logging
 
@@ -434,20 +453,29 @@ session re-establishes: dial, VIP exchange, route). Run with
   `path stats` line logs iroh's selected path kind (`direct` / `relay` /
   `relay+direct-candidate` from `Connection::paths`) plus Quinn loss
   counters. **Do not** treat Quinn `udp_tx/rx` as proof of hole-punch —
-  magicsock feeds relay traffic to Quinn as UDP too.
+  magicsock feeds relay traffic to Quinn as UDP too. While a session stays
+  on relay, link-p2p periodically calls `Endpoint::network_change` to retry
+  hole-punch; if throughput stays low on relay it prints a yellow warning
+  about public-relay rate limits (self-host or wait for direct).
 - `ping`: `link-p2p ping <EndpointId>` measures RTT to a running `serve`
   (the serve side answers ping probes alongside its normal forwarding) or
-  `tun serve` node, and reports the selected path from iroh (waits up to
-  ~2s for a relay→direct upgrade after handshake):
+  `tun serve` node. Magicsock often handshakes on relay first then upgrades
+  to direct, so ping reports **both** an immediate (initial) RTT/path and a
+  settled measurement after waiting up to ~2s for that upgrade. Trust the
+  settled numbers; initial explains contradictory “direct but 600ms+” readings
+  from older builds:
 
 ```bash
 $ link-p2p ping <EndpointId>
 pinging 5f7d5db174a7...
-pong from 5f7d5db174a7: RTT 1912µs
-  path: direct (IP)
+pong from 5f7d5db174a7
+  initial: RTT 631234µs, path: relay
+  settled: RTT 1912µs, path: direct (IP)
 ```
 
-JSON `path` values: `direct`, `relay`, `relay+direct-candidate`, `unknown`.
+JSON keeps `rtt_us` / `path` as the settled values and adds `initial_rtt_us` /
+`initial_path` (plus mirrored `settled_*`) for scripts. Path tokens:
+`direct`, `relay`, `relay+direct-candidate`, `unknown`.
 On lossy relay paths, try `--cc bbr3` before changing topology.
 ### Resource limits
 
