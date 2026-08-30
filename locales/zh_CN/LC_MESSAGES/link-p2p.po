@@ -734,3 +734,96 @@ msgid "Dial a hub (`tun serve`) and join its virtual IP mesh at the IP layer."
 msgstr "拨号连接 `tun serve` 枢纽，在 IP 层加入虚拟组网。"
 
 
+
+# --- TUN mesh v2 (roster + direct) ---
+
+msgid "Make machines reachable at the IP layer over QUIC datagrams (mesh with hub coordination)."
+msgstr "通过 QUIC datagram 在 IP 层组网（枢纽协调 + 可选直连）。"
+
+msgid "Hub: roster + fallback forward for the virtual IP mesh."
+msgstr "枢纽：成员表 + 兜底转发（虚拟 IP 组网）。"
+
+msgid "Dial a hub, join the mesh, and try direct peer links."
+msgstr "拨号连接枢纽、加入组网，并尝试与对端直连。"
+
+msgid "Only accept TUN mesh connections from these EndpointIds (repeatable). Default: accept anyone who knows this hub's EndpointId. Also LINK_P2P_ALLOW."
+msgstr "仅接受这些 EndpointId 的 TUN 组网连接（可重复）。默认：任何知道本枢纽 EndpointId 的对端。也可用 LINK_P2P_ALLOW。"
+
+msgid "Only accept inbound direct mesh links from these EndpointIds (repeatable); also gates outbound peer dials. Hub dial is always attempted. Also LINK_P2P_ALLOW."
+msgstr "仅接受这些 EndpointId 的入站直连（可重复）；也限制出站拨号。连枢纽始终会尝试。也可用 LINK_P2P_ALLOW。"
+
+msgid "only accepting connections from the --allow list"
+msgstr "仅接受 --allow 名单中的连接"
+
+msgid "hub mode: roster + fallback forward; spokes may peer directly"
+msgstr "枢纽模式：成员表 + 兜底转发；spoke 可直连"
+
+msgid "accepting TUN roster control stream"
+msgstr "接受 TUN 成员表控制流"
+
+msgid "opening TUN roster control stream"
+msgstr "打开 TUN 成员表控制流"
+
+msgid "peer did not open the TUN roster control stream"
+msgstr "对端未打开 TUN 成员表控制流"
+
+msgid "roster control stream closed"
+msgstr "成员表控制流已关闭"
+
+msgid "direct mesh link ready"
+msgstr "直连就绪"
+
+msgid "direct mesh link closed"
+msgstr "直连已关闭"
+
+msgid "direct mesh dial failed; using hub fallback"
+msgstr "直连失败；改走枢纽兜底"
+
+msgid "direct mesh VIP exchange failed"
+msgstr "直连 VIP 交换失败"
+
+msgid "direct mesh VIP mismatch; closing"
+msgstr "直连 VIP 不匹配；关闭"
+
+msgid "skipping mesh peer (not allowed)"
+msgstr "跳过组网对端（不在允许名单）"
+
+msgid "mesh peer left"
+msgstr "组网对端已离开"
+
+msgid "mesh peer {0} at {1}"
+msgstr "组网对端 {0} 地址 {1}"
+
+msgid "hub {0} is at {1} (path {2}); peers may connect directly"
+msgstr "枢纽 {0} 在 {1}（路径 {2}）；对端可能直连"
+
+msgid ""
+"Make machines reachable at the IP layer over QUIC datagrams.\n"
+"\n"
+"Creates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). `tun serve` is the coordination hub (roster + fallback forward); `tun connect` dials it, learns the VIP↔EndpointId roster, and tries direct spoke↔spoke links (hub forward remains the fallback). Prefer `--cc bbr3` on lossy paths. Virtual IPs are IPv4 only — see docs/tun-design.md."
+msgstr ""
+"通过 QUIC datagram 在 IP 层组网。\n"
+"\n"
+"创建 TUN 接口（Linux/macOS 需 root 或 CAP_NET_ADMIN；Windows 需管理员 + wintun.dll）。`tun serve` 是协调枢纽（成员表 + 兜底转发）；`tun connect` 拨号加入、学习 VIP↔EndpointId 成员表，并尝试 spoke 直连（打不穿时仍走枢纽）。丢包链路可优先 `--cc bbr3`。虚拟 IP 仅 IPv4 — 见 docs/tun-design.md。"
+
+msgid ""
+"Hub: accept many concurrent peers, broadcast the VIP↔EndpointId roster, bridge this machine to each at the IP layer, and forward traffic when spokes have no direct path. Prints this node's virtual IP and EndpointId."
+msgstr ""
+"枢纽：并发接受多个对端，广播 VIP↔EndpointId 成员表，在 IP 层桥接本机，并在 spoke 无直连时兜底转发。打印本节点虚拟 IP 与 EndpointId。"
+
+msgid ""
+"Dial a `tun serve` hub, install 172.24.0.0/16 on the TUN, receive the mesh roster, and attempt direct links to other spokes (packets prefer direct; otherwise via hub)."
+msgstr ""
+"拨号连接 `tun serve` 枢纽，在 TUN 上安装 172.24.0.0/16，接收成员表，并尝试与其他 spoke 直连（优先直连，否则经枢纽）。"
+
+msgid "connection died quickly; backing off {0} before redial"
+msgstr "连接很快断开；退避 {0} 后再重拨"
+
+msgid "writing stream hello"
+msgstr "写入流握手魔数"
+
+msgid "reading stream hello"
+msgstr "读取流握手魔数"
+
+msgid "bad stream hello (expected LPF1, got {0})"
+msgstr "流握手魔数无效（期望 LPF1，实际 {0}）"

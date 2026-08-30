@@ -1,7 +1,8 @@
 # link-p2p (MVP)
 
 A minimal TCP-over-QUIC port forwarder on top of [iroh](https://github.com/n0-computer/iroh) 1.0,
-with a hub-and-spoke TUN mode for whole-machine IP mesh reachability.
+with a TUN mode for whole-machine IP mesh reachability (hub coordination +
+optional spoke↔spoke direct paths).
 This is step 1 of the roadmap discussed earlier — get one real P2P hop working
 and measured before adding SOCKS5, QoS policy, LD_PRELOAD interception, GSO/io_uring, etc.
 
@@ -16,33 +17,41 @@ and measured before adding SOCKS5, QoS policy, LD_PRELOAD interception, GSO/io_u
   connection (so NAT traversal / relay negotiation only happens once). It
   exposes either a plain forward (`--listen`) or a SOCKS5 server
   (`--socks5-listen`).
+- **Stream ALPN (breaking)**: `serve`/`connect` negotiate
+  `link-p2p/tcp-forward/1`. Fixed-forward streams (`--forward` /
+  `--listen` / `--stdio`) exchange a 4-byte `LPF1` hello so QUIC stream open
+  is visible on the wire. **Upgrade both sides together** — mixed `/0` and
+  `/1` fail at handshake. Proxy/SOCKS5 and TUN use separate ALPNs and are
+  unaffected.
 - `tun` (privileged: root / CAP_NET_ADMIN, or Administrator + `wintun.dll`
   on Windows) joins machines into a `172.24.0.0/16` virtual IP mesh over
-  unreliable QUIC datagrams — one hub (`tun serve`), many spokes
-  (`tun connect`), hub-forwarded spoke↔spoke traffic. Linux, macOS, and
-  Windows. See below.
+  unreliable QUIC datagrams — one coordination hub (`tun serve`), many spokes
+  (`tun connect`). Spokes learn the roster, try direct links, and fall back to
+  hub forward. Linux, macOS, and Windows. See below.
 
 ### Whole-machine TUN mode (`tun serve` / `tun connect`)
 
 The stream modes forward one TCP port. `tun` bridges whole machines at the IP
 layer: each side gets a TUN interface and a virtual IP in `172.24.0.0/16`.
-`tun serve` is the **hub** (many concurrent peers); `tun connect` dials it.
-Spokes route the whole `/16` into the tunnel; the hub demuxes by destination
-VIP and forwards spoke↔spoke so every virtual IP can reach every other.
-Packets cross as *unreliable* QUIC datagrams (inner TCP/UDP keep their own
-reliability — carrying inner TCP over a reliable stream would stack
-retransmission and reintroduce head-of-line blocking).
+`tun serve` is the **hub** (roster broadcast + fallback forward); `tun connect`
+dials it, installs a `/16` route, and attempts direct spoke↔spoke QUIC links
+when the roster lists other peers. Packets prefer a direct path; otherwise the
+hub demuxes by destination VIP. Inner traffic rides *unreliable* QUIC
+datagrams (inner TCP/UDP keep their own reliability).
 
 ```bash
 # hub (needs root / CAP_NET_ADMIN)
 sudo link-p2p tun serve
 # -> prints your virtual IP and EndpointId, e.g. 172.24.0.21
 
-# spoke B
+# spoke B (optional: --cc bbr3 on lossy links)
+sudo link-p2p --cc bbr3 tun connect --to <EndpointId from hub>
+
+# spoke C (same hub — both stay connected; B↔C prefer direct)
 sudo link-p2p tun connect --to <EndpointId from hub>
 
-# spoke C (same hub — both stay connected)
-sudo link-p2p tun connect --to <EndpointId from hub>
+# optional allowlist (hub and/or spokes)
+# sudo link-p2p tun serve --allow <id> --allow <id2>
 
 # on any machine:
 ping 172.24.x.y        # hub or another spoke's virtual IP
@@ -204,11 +213,12 @@ Also supports `powershell` and `elvish`. Re-run after upgrading if flags change.
   ASSOCIATE, no bind. Only CONNECT over 127.0.0.1.
 - No LD_PRELOAD-style transparent interception — clients must speak SOCKS5,
   use the fixed-port modes, or use TUN mode.
-- TUN mode is hub-and-spoke mesh (Linux / macOS / Windows): no full peer-to-peer
-  dial mesh / gossip discovery / ACLs yet. Datagram behavior over a *relay*
-  path is unmeasured so far (the sandbox can't force a relay-only path); the
-  design doc treats direct-path behavior as assumed and relay-path as a
-  real-hardware follow-up.
+- TUN mode (Linux / macOS / Windows): hub coordinates a VIP roster; spokes try
+  direct links and fall back to hub forward. Fine-grained ACLs (per-port/CIDR)
+  and lazy dial-on-demand are still out of scope. Datagram behavior over a
+  *relay* path is unmeasured so far (the sandbox can't force a relay-only
+  path); the design doc treats direct-path behavior as assumed and relay-path
+  as a real-hardware follow-up.
 - No per-stream QoS / datagram mode for "unreliable" traffic in the stream
   modes — every stream is a reliable QUIC stream (bidi, ordered). TUN mode
   does use unreliable datagrams, but that's a separate path.
@@ -218,8 +228,7 @@ Also supports `powershell` and `elvish`. Re-run after upgrading if flags change.
   this machine it's active. That's different from the app-level GSO/io_uring
   work that a benchmark would tell you whether to pursue. Measure first, then
   decide if that's actually your bottleneck.
-- No "full peer-to-peer dial mesh" — TUN is hub-and-spoke (one `tun serve`,
-  many `tun connect`); stream modes remain one dialer / one listener.
+- Stream modes remain one dialer / one listener (no multi-hop stream mesh).
 - **No tokio runtime/scheduling tuning** — `#[tokio::main]` uses the default
   multi-thread runtime (one OS thread per core), and it's one spawned task
   per stream. That's the right default for an I/O-bound forwarder and there's
@@ -376,7 +385,10 @@ Both sides persist their identity to the XDG config dir by default —
 first run, so existing `EndpointId`s stay stable. `EndpointId` stays stable
 across restarts because the key is persisted — don't commit that file, it's
 a private key. On Unix the key file is created with mode `0600` (owner-only)
-and existing files are tightened to `0600` on every start.
+and existing files are tightened to `0600` on every start. **Never run two
+processes with the same `--identity` file** (iroh treats that as one peer;
+relay/discovery will bounce connections between them). Give each role its
+own file, e.g. `--identity ~/.config/link-p2p/serve-22.key`.
 
 **Optional passphrase encryption** (`--identity-passphrase`, or the
 `LINK_P2P_PASSPHRASE` environment variable — prefer the env var, the flag

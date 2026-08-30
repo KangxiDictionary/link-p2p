@@ -22,6 +22,7 @@ mod socks5;
 mod ssrf;
 mod style;
 mod tun;
+mod tun_roster;
 
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
@@ -50,8 +51,10 @@ use crate::ssrf::check_proxy_target;
 use crate::style::{ColorMode, Styler};
 
 /// ALPN identifies this application protocol during the QUIC/TLS handshake.
-/// Bump the version suffix if you make a breaking change to the framing.
-const ALPN: &[u8] = b"link-p2p/tcp-forward/0";
+/// `/1` requires a 4-byte [`pipe::STREAM_HELLO`] on every fixed-forward stream
+/// so `open_bi()` becomes visible on the wire (QUIC has no stream-open frame).
+/// Mismatch must fail handshake — do not route `/0` and `/1` together.
+const ALPN: &[u8] = b"link-p2p/tcp-forward/1";
 
 /// ALPN for the `ping` probe (echoes a timestamp, reports RTT and path).
 /// Separate from the forwarding ALPN so a ping can target a node that is
@@ -282,7 +285,8 @@ enum Command {
     /// and wintun.dll on Windows) and routes `172.24.0.0/16` through it.
     /// Unlike `serve`/`connect`, which forward one TCP port, this bridges the
     /// whole machine: TCP, UDP and ICMP on mesh virtual IPs, with no per-port
-    /// setup. Hub-and-spoke mesh — see docs/tun-design.md.
+    /// setup. Hub coordinates the roster; spokes prefer direct links — see
+    /// docs/tun-design.md.
     Tun {
         #[command(subcommand)]
         command: TunCommand,
@@ -329,9 +333,9 @@ enum Command {
 /// Subcommands of `link-p2p tun`.
 #[derive(Subcommand)]
 enum TunCommand {
-    /// Exposed side: hub for a virtual IP mesh. Accepts many concurrent
-    /// peers, bridges this machine to each, and forwards traffic between
-    /// peers so every virtual IP can reach every other.
+    /// Exposed side: coordination hub for a virtual IP mesh. Accepts many
+    /// concurrent peers, broadcasts the VIP↔EndpointId roster, bridges this
+    /// machine to each, and forwards when spokes have no direct path.
     Serve {
         /// Override this node's virtual IP (default: derived from its
         /// EndpointId, inside 172.24.0.0/16).
@@ -342,8 +346,13 @@ enum TunCommand {
         /// 1280 are refused.
         #[arg(long, default_value_t = 1280)]
         mtu: u16,
+        /// Only accept TUN mesh connections from these EndpointIds
+        /// (repeatable). Default: anyone who knows this hub's EndpointId.
+        /// Also `LINK_P2P_ALLOW` (comma-separated).
+        #[arg(long)]
+        allow: Vec<String>,
     },
-    /// Dial a hub (`tun serve`) and join its virtual IP mesh at the IP layer.
+    /// Dial a hub (`tun serve`), join the mesh, and try direct peer links.
     Connect {
         /// The remote node's EndpointId (printed by `tun serve` on startup).
         /// Use `-` to read one line from stdin. Also `LINK_P2P_TO`.
@@ -362,6 +371,11 @@ enum TunCommand {
         /// --to-addr`. Dialed directly, skipping discovery.
         #[arg(long = "to-addr")]
         to_addr: Vec<SocketAddr>,
+        /// Only accept inbound direct mesh links from these EndpointIds
+        /// (repeatable). Hub dial is always attempted; this gates peer↔peer
+        /// accepts and outbound dials. Also `LINK_P2P_ALLOW`.
+        #[arg(long)]
+        allow: Vec<String>,
     },
 }
 
@@ -550,16 +564,16 @@ fn localized_command() -> clap::Command {
         .mut_subcommand("tun", |s| {
             s.disable_help_flag(true)
                 .arg(help_arg())
-                .about(tr!("Make machines reachable at the IP layer over QUIC datagrams (hub-and-spoke mesh)."))
+                .about(tr!("Make machines reachable at the IP layer over QUIC datagrams (mesh with hub coordination)."))
                 .long_about(helptext::hard_wrap_help(&tr!(
-                    "Make machines reachable at the IP layer over QUIC datagrams (hub-and-spoke mesh).\n\nCreates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). `tun serve` is the hub (many concurrent peers); `tun connect` dials it. Spokes route 172.24.0.0/16 into the tunnel; the hub forwards traffic between peers so every virtual IP can reach every other. Virtual IPs are IPv4 only — see docs/tun-design.md."
+                    "Make machines reachable at the IP layer over QUIC datagrams.\n\nCreates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). `tun serve` is the coordination hub (roster + fallback forward); `tun connect` dials it, learns the VIP↔EndpointId roster, and tries direct spoke↔spoke links (hub forward remains the fallback). Prefer `--cc bbr3` on lossy paths. Virtual IPs are IPv4 only — see docs/tun-design.md."
                 )))
                 .mut_subcommand("serve", |ss| {
                     ss.disable_help_flag(true)
                         .arg(help_arg())
-                        .about(tr!("Hub: accept many peers and forward traffic between them."))
+                        .about(tr!("Hub: roster + fallback forward for the virtual IP mesh."))
                         .long_about(helptext::hard_wrap_help(&tr!(
-                            "Hub: accept many concurrent peers, bridge this machine to each at the IP layer, and forward traffic between peers so every virtual IP can reach every other. Prints this node's virtual IP and EndpointId."
+                            "Hub: accept many concurrent peers, broadcast the VIP↔EndpointId roster, bridge this machine to each at the IP layer, and forward traffic when spokes have no direct path. Prints this node's virtual IP and EndpointId."
                         )))
                         .mut_arg(
                             "tun_ip",
@@ -569,13 +583,17 @@ fn localized_command() -> clap::Command {
                             "mtu",
                             |a| helptext::set_help(a, &tr!("Upper bound for the TUN interface MTU (default 1280). The final MTU is min(this, the negotiated QUIC datagram max); values above 1280 are refused.")),
                         )
+                        .mut_arg(
+                            "allow",
+                            |a| helptext::set_help(a, &tr!("Only accept TUN mesh connections from these EndpointIds (repeatable). Default: accept anyone who knows this hub's EndpointId. Also LINK_P2P_ALLOW.")),
+                        )
                 })
                 .mut_subcommand("connect", |ss| {
                     ss.disable_help_flag(true)
                         .arg(help_arg())
-                        .about(tr!("Dial a hub and join its virtual IP mesh."))
+                        .about(tr!("Dial a hub, join the mesh, and try direct peer links."))
                         .long_about(helptext::hard_wrap_help(&tr!(
-                            "Dial a `tun serve` hub and join its virtual IP mesh. Installs a route for 172.24.0.0/16 on the TUN so other spokes are reachable via the hub."
+                            "Dial a `tun serve` hub, install 172.24.0.0/16 on the TUN, receive the mesh roster, and attempt direct links to other spokes (packets prefer direct; otherwise via hub)."
                         )))
                         .mut_arg(
                             "to",
@@ -592,6 +610,10 @@ fn localized_command() -> clap::Command {
                         .mut_arg(
                             "to_addr",
                             |a| helptext::set_help(a, &tr!("Direct address hint(s) for the peer (repeatable) — see `connect --to-addr`. Dialed directly, skipping discovery.")),
+                        )
+                        .mut_arg(
+                            "allow",
+                            |a| helptext::set_help(a, &tr!("Only accept inbound direct mesh links from these EndpointIds (repeatable); also gates outbound peer dials. Hub dial is always attempted. Also LINK_P2P_ALLOW.")),
                         )
                 })
         })
@@ -919,8 +941,13 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                 )));
             }
             match command {
-                TunCommand::Serve { tun_ip, mtu } => {
+                TunCommand::Serve {
+                    tun_ip,
+                    mtu,
+                    allow,
+                } => {
                     tun::validate_mtu(mtu)?;
+                    let allow = parse_tun_allow(allow)?;
                     tun::run_tun_serve(
                         secret_key,
                         tun_ip,
@@ -929,6 +956,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                         Duration::from_secs(cli.keepalive),
                         Duration::from_secs(cli.idle_timeout),
                         tune,
+                        allow,
                         styler,
                     )
                     .await
@@ -938,9 +966,11 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                     tun_ip,
                     mtu,
                     to_addr,
+                    allow,
                 } => {
                     tun::validate_mtu(mtu)?;
                     let to = resolve_peer_to(to, false)?;
+                    let allow = parse_tun_allow(allow)?;
                     tun::run_tun_connect(
                         secret_key,
                         &to,
@@ -951,6 +981,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                         Duration::from_secs(cli.keepalive),
                         Duration::from_secs(cli.idle_timeout),
                         tune,
+                        allow,
                         styler,
                     )
                     .await
@@ -1054,6 +1085,28 @@ fn merge_allow_list(cli: Vec<String>) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Parse TUN `--allow` / `LINK_P2P_ALLOW` into a set; `None` means open.
+fn parse_tun_allow(cli: Vec<String>) -> Result<Option<HashSet<EndpointId>>> {
+    let allow = merge_allow_list(cli);
+    if allow.is_empty() {
+        return Ok(None);
+    }
+    let mut set = HashSet::new();
+    for s in &allow {
+        let id: EndpointId = s.parse().map_err(|e| {
+            exit::coded(
+                exit::USAGE,
+                anyhow::Error::new(e).context(tr_fmt!(
+                    "'{0}' is not a valid EndpointId in --allow",
+                    s
+                )),
+            )
+        })?;
+        set.insert(id);
+    }
+    Ok(Some(set))
 }
 
 /// Resolve the identity file path: an explicit `--identity` wins; otherwise
@@ -1692,10 +1745,12 @@ impl ProtocolHandler for ForwardHandler {
         // dials would otherwise each hold an accept task + connection state
         // forever. Acquired before the accept loop; released when the whole
         // connection ends.
+        tracing::debug!(%peer, "waiting for connection permit");
         let _conn_permit = match self.conn_semaphore.clone().acquire_owned().await {
             Ok(p) => p,
             Err(_) => return Ok(()), // semaphore closed; shouldn't happen
         };
+        tracing::debug!(%peer, "connection permit acquired, entering accept_bi loop");
 
         // One QUIC connection can carry many independent streams. Each stream
         // here corresponds to one TCP connection on the far side (see
@@ -1711,8 +1766,12 @@ impl ProtocolHandler for ForwardHandler {
                 Ok(p) => p,
                 Err(_) => break, // semaphore closed; shouldn't happen
             };
+            tracing::debug!(%peer, "waiting for bidi stream (accept_bi)");
             let (send, recv) = match connection.accept_bi().await {
-                Ok(pair) => pair,
+                Ok(pair) => {
+                    tracing::debug!(%peer, "bidi stream accepted");
+                    pair
+                }
                 Err(e) => {
                     // This fires both on a clean shutdown (peer closed the
                     // connection) and on real transport errors. iroh doesn't
@@ -1777,8 +1836,15 @@ async fn handle_forward_stream(
     mut recv: RecvStream,
 ) -> Result<()> {
     let target = match mode {
-        ServeMode::Forward(addr) => addr,
+        ServeMode::Forward(addr) => {
+            // Fixed-forward: consume STREAM_HELLO before dialing so accept_bi
+            // completes as soon as the connect side opens the stream — not
+            // when the local TCP client eventually writes (or FIN)s.
+            pipe::read_stream_hello(&mut recv).await?;
+            addr
+        }
         ServeMode::Proxy { allow_private } => {
+            // Proxy already has an on-wire header (`write_target` / read_target).
             let target = socks5::read_target(&mut recv).await?.resolve().await?;
             check_proxy_target(target, allow_private)?;
             target
@@ -1827,11 +1893,17 @@ fn spawn_path_stats_logger(connection: Connection, peer: EndpointId) {
 /// TUN reconnect loop (tun.rs).
 pub(crate) const RECONNECT_BASE: Duration = Duration::from_secs(1);
 pub(crate) const RECONNECT_MAX: Duration = Duration::from_secs(30);
+/// A connection must stay up at least this long before a successful dial
+/// counts as "stable" for backoff purposes. Handshake-then-instant-kick
+/// (relay identity conflict, brief path flaps) must *not* reset backoff —
+/// otherwise the watcher redials in a tight loop with no sleep.
+pub(crate) const MIN_STABLE_CONN: Duration = Duration::from_secs(5);
 
 /// Exponential backoff with a cap, shared by the stream-mode reconnect
 /// watcher and the TUN reconnect loop. `next()` returns the delay for the
 /// *next* attempt and then advances (1s, 2s, 4s, ... capped); `reset()`
-/// restarts after a successful connect.
+/// restarts from the base — call it only after a *stable* session, not
+/// merely after `connect()` returns `Ok`.
 pub(crate) struct Backoff {
     next_delay: Duration,
     base: Duration,
@@ -1855,6 +1927,21 @@ impl Backoff {
 
     pub(crate) fn reset(&mut self) {
         self.next_delay = self.base;
+    }
+
+    /// After a live session ends: reset if it was stable, otherwise advance
+    /// and return the sleep before the next dial. `None` = redial immediately.
+    pub(crate) fn after_session(
+        &mut self,
+        lived: Duration,
+        min_stable: Duration,
+    ) -> Option<Duration> {
+        if lived >= min_stable {
+            self.reset();
+            None
+        } else {
+            Some(self.next())
+        }
     }
 }
 
@@ -1925,6 +2012,11 @@ async fn open_stream_wait(slot: &ConnSlot) -> Result<(SendStream, RecvStream)> {
 /// Reconnect watcher: waits for the current connection to die, then re-dials
 /// with exponential backoff, swapping the slot on success.
 ///
+/// Backoff resets only when a session lived at least [`MIN_STABLE_CONN`].
+/// A handshake that succeeds and then dies in milliseconds (relay kick,
+/// path flap) keeps climbing the backoff and sleeps before the next dial —
+/// otherwise `connect()` success alone would reset to zero delay and spin.
+///
 /// Runs for the lifetime of the process. Deliberately NOT tracked in the
 /// shutdown drain (`tasks`): it never finishes on its own, and the process
 /// exits right after the drain anyway.
@@ -1941,29 +2033,57 @@ fn spawn_reconnect_watcher(
     let endpoint = endpoint.clone();
     tokio::spawn(async move {
         let mut backoff = Backoff::new(RECONNECT_BASE, RECONNECT_MAX);
+        // Pre-existing slot connection (installed by `run_connect` before we
+        // spawn) is treated as already stable so its first natural death
+        // after a long transfer is not mistaken for a short-lived flap.
+        let mut connected_at = if slot.0.borrow().is_some() {
+            // Pre-existing connection is treated as already past the stability
+            // floor so its first natural death after a long transfer is not
+            // mistaken for a short-lived flap.
+            Some(
+                std::time::Instant::now()
+                    .checked_sub(MIN_STABLE_CONN)
+                    .expect("MIN_STABLE_CONN fits in Instant clock"),
+            )
+        } else {
+            None
+        };
         loop {
-            // Wait for the current connection to die (none yet = dial now).
             let current = (*slot.0.subscribe().borrow_and_update()).clone();
             if let Some(conn) = current {
                 conn.closed().await;
-            }
-            // Re-dial until success, backing off exponentially.
-            loop {
-                match endpoint.connect(dial_addr.clone(), ALPN).await {
-                    Ok(conn) => {
-                        slot.replace(Some(conn));
-                        info!(%peer, "{}", tr!("reconnected to peer"));
-                        backoff.reset();
-                        break;
-                    }
-                    Err(e) => {
-                        let delay = backoff.next();
-                        warn!(%peer, error = %e, "{}", tr_fmt!(
-                            "reconnect failed; retrying in {0}",
+                slot.replace(None);
+                let lived = connected_at
+                    .map(|t| t.elapsed())
+                    .unwrap_or(Duration::ZERO);
+                connected_at = None;
+                if let Some(delay) = backoff.after_session(lived, MIN_STABLE_CONN) {
+                    warn!(
+                        %peer,
+                        lived_ms = lived.as_millis() as u64,
+                        "{}",
+                        tr_fmt!(
+                            "connection died quickly; backing off {0} before redial",
                             format!("{delay:?}")
-                        ));
-                        tokio::time::sleep(delay).await;
-                    }
+                        )
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+            }
+
+            match endpoint.connect(dial_addr.clone(), ALPN).await {
+                Ok(conn) => {
+                    connected_at = Some(std::time::Instant::now());
+                    slot.replace(Some(conn));
+                    info!(%peer, "{}", tr!("reconnected to peer"));
+                }
+                Err(e) => {
+                    let delay = backoff.next();
+                    warn!(%peer, error = %e, "{}", tr_fmt!(
+                        "reconnect failed; retrying in {0}",
+                        format!("{delay:?}")
+                    ));
+                    tokio::time::sleep(delay).await;
                 }
             }
         }
@@ -2024,10 +2144,14 @@ async fn run_connect(
     #[cfg(unix)]
     if matches!(mode, ConnectMode::Stdio) {
         ui.line(styler.ok(&tr!("connected. piping stdin/stdout to the remote peer.")));
-        let (send, recv) = connection
+        let (mut send, recv) = connection
             .open_bi()
             .await
             .context(tr!("opening stream"))?;
+        // Same hello as --listen: serve --forward must see a STREAM frame
+        // before accept_bi returns (stdio may stay silent until the remote
+        // banner arrives — classic download-first hang without this).
+        pipe::write_stream_hello(&mut send).await?;
         let result = pipe::pipe_stdio(send, recv).await;
         endpoint.close().await;
         return result;
@@ -2070,6 +2194,10 @@ async fn run_connect(
         tokio::select! {
             accepted = tcp_listener.accept() => {
                 let (mut tcp_stream, client_addr) = accepted?;
+                // Without this, a healthy QUIC session with nobody dialing the
+                // local listen port looks identical to a "stuck" serve from
+                // the far side (keepalive alone never opens a bidi stream).
+                tracing::debug!(%client_addr, %local_addr, "local TCP client accepted");
                 let slot = slot.clone();
                 let semaphore = semaphore.clone();
                 tasks.push(tokio::spawn(async move {
@@ -2077,12 +2205,17 @@ async fn run_connect(
                         if is_socks5 {
                             let target = socks5::accept_handshake(&mut tcp_stream).await?;
                             let _permit = semaphore.acquire_owned().await?;
+                            tracing::debug!(%client_addr, "opening QUIC stream for local client");
                             let (mut send, recv) = open_stream_wait(&slot).await?;
                             socks5::write_target(&mut send, &target).await?;
                             pipe::pipe_streams(tcp_stream, send, recv).await
                         } else {
                             let _permit = semaphore.acquire_owned().await?;
-                            let (send, recv) = open_stream_wait(&slot).await?;
+                            tracing::debug!(%client_addr, "opening QUIC stream for local client");
+                            let (mut send, recv) = open_stream_wait(&slot).await?;
+                            // Announce the stream on the wire immediately
+                            // (QUIC has no open-stream control frame).
+                            pipe::write_stream_hello(&mut send).await?;
                             pipe::pipe_streams(tcp_stream, send, recv).await
                         }
                     }
@@ -2220,6 +2353,33 @@ mod tests {
         // reset() restarts from the base.
         b.reset();
         assert_eq!(b.next(), Duration::from_secs(1));
+    }
+
+    /// Handshake-then-instant-kick must not reset backoff (the bug behind
+    /// thousands of redials when a relay rejects a just-opened connection).
+    #[test]
+    fn backoff_only_resets_after_stable_session() {
+        let min = Duration::from_secs(5);
+        let mut b = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
+        // Short-lived: climb 1s → 2s → 4s, never reset.
+        assert_eq!(
+            b.after_session(Duration::from_millis(50), min),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            b.after_session(Duration::from_millis(200), min),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            b.after_session(Duration::from_secs(4), min),
+            Some(Duration::from_secs(4))
+        );
+        // Lived past the floor → reset; next short death starts at base again.
+        assert_eq!(b.after_session(Duration::from_secs(5), min), None);
+        assert_eq!(
+            b.after_session(Duration::from_millis(10), min),
+            Some(Duration::from_secs(1))
+        );
     }
 
     /// Passphrase encryption: round-trip, wrong passphrase, tampering, and

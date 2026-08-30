@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (stream ALPN `tcp-forward/0` → `/1`)**: fixed-forward streams
+  (`serve --forward` with `connect --listen` / `--stdio`) now exchange a
+  4-byte `LPF1` hello so the dialer's `open_bi()` is visible on the wire.
+  QUIC has no stream-open control frame; without this, download-first /
+  server-banner flows hung in `accept_bi` until the local client FIN'd.
+  **Upgrade serve and connect together** — mixed versions fail ALPN
+  negotiation instead of mis-framing. Proxy/SOCKS5 and TUN unchanged.
+
 ### Added
 
 - **TUN mode on macOS and Windows** (alongside Linux): `utun` / Wintun backends
@@ -21,9 +31,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   See `docs/tun-design.md`.
 - **TUN hub I/O**: a dedicated TUN actor (channel in/out) so spoke→hub delivery
   is not starved by holding a mutex across `recv`.
+- **TUN mesh v2 (`link-p2p/tun/2`)**: hub broadcasts VIP↔EndpointId roster on a
+  reliable control stream; spokes try direct peer links and prefer them over
+  hub forward. Per-destination send queues avoid head-of-line blocking on
+  `send_datagram_wait`. `tun serve` / `tun connect --allow` (and
+  `LINK_P2P_ALLOW`) gate who may join. Prefer global `--cc bbr3` on lossy
+  paths.
 
 ### Fixed
 
+- **Fixed-forward silent hang**: download-first TCP (and any case where the
+  dialer sends no bytes until the server speaks) no longer leaves serve
+  stuck in `accept_bi`. Invalid/missing hellos fail immediately with a
+  logged error instead of hanging forever.
+- **Reconnect backoff**: only reset after a session lived ≥ 5s. Handshake-
+  then-instant-drop no longer clears backoff, so the watcher sleeps and
+  doubles instead of tight-loop redialing (same for TUN connect).
+- **Serve/connect wait-point logs**: `debug` around connection-permit acquire,
+  `accept_bi`, and local TCP accept — so a healthy QUIC session with nobody
+  dialing the connect listen port is distinguishable from a stuck handler.
 - **Proxy SSRF**: IPv4-mapped IPv6 (`::ffff:…`), deprecated IPv4-compatible
   (`::a.b.c.d`), NAT64 well-known, 6to4, and Teredo no longer bypass the
   private/loopback blocklist in `serve --proxy`.

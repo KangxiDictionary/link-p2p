@@ -10,8 +10,10 @@ Before concluding the ceiling is QUIC state-machine / crypto overhead:
 1. **GSO is default-on** in iroh’s UDP stack (noq-udp) when the kernel supports
    `UDP_SEGMENT`. Confirm it is actually engaged (see GSO check below) rather
    than assuming a disable path.
-2. **Congestion control defaults to CUBIC.** A/B with `LINK_P2P_CC=bbr3` (and
-   optional window env vars) before treating CUBIC behavior as “the stack.”
+2. **Congestion control defaults to CUBIC.** A/B with `--cc bbr3` /
+   `LINK_P2P_CC=bbr3` (and optional window env vars) before treating CUBIC
+   behavior as “the stack.” TUN datagram paths on lossy links often show the
+   same lift — compare before blaming hub-forward architecture.
 3. **Loopback benches are not RTT-bound.** Window and CC differences often
    show up only with real delay/loss (two machines, or `tc netem`). Label
    loopback-only results as such.

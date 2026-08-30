@@ -20,6 +20,10 @@ open an issue if create/route/MTU misbehaves. Windows TUN notes are in
 | `--to -` | Read the peer `EndpointId` from **stdin** (one line / token). |
 | `ping --format json` | Machine-parseable ping result on stdout. |
 
+Give each long-running role its own `--identity` file (e.g. `serve-22.key`,
+`connect-8001.key`). Two processes sharing one key look like one EndpointId
+to iroh and will fight over relay/discovery.
+
 ## Exit codes
 
 | Code | Meaning |

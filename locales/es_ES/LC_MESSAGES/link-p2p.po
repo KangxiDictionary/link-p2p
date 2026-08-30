@@ -711,3 +711,96 @@ msgstr "fallo al obtener entropía para el nonce de identidad"
 msgid "identity file is truncated"
 msgstr "el archivo de identidad está truncado"
 
+
+# --- TUN mesh v2 (roster + direct) ---
+
+msgid "Make machines reachable at the IP layer over QUIC datagrams (mesh with hub coordination)."
+msgstr "Haz que las máquinas se alcancen en capa IP con datagramas QUIC (malla con hub)."
+
+msgid "Hub: roster + fallback forward for the virtual IP mesh."
+msgstr "Hub: roster + reenvío de respaldo para la malla de IP virtual."
+
+msgid "Dial a hub, join the mesh, and try direct peer links."
+msgstr "Marca un hub, únete a la malla e intenta enlaces directos."
+
+msgid "Only accept TUN mesh connections from these EndpointIds (repeatable). Default: accept anyone who knows this hub's EndpointId. Also LINK_P2P_ALLOW."
+msgstr "Solo acepta conexiones TUN de estos EndpointId (repetible). Por defecto: cualquiera que conozca el EndpointId del hub. También LINK_P2P_ALLOW."
+
+msgid "Only accept inbound direct mesh links from these EndpointIds (repeatable); also gates outbound peer dials. Hub dial is always attempted. Also LINK_P2P_ALLOW."
+msgstr "Solo acepta enlaces directos entrantes de estos EndpointId (repetible); también limita marcados salientes. El hub siempre se intenta. También LINK_P2P_ALLOW."
+
+msgid "only accepting connections from the --allow list"
+msgstr "solo se aceptan conexiones de la lista --allow"
+
+msgid "hub mode: roster + fallback forward; spokes may peer directly"
+msgstr "modo hub: roster + reenvío de respaldo; los spokes pueden ir directo"
+
+msgid "accepting TUN roster control stream"
+msgstr "aceptando el flujo de control del roster TUN"
+
+msgid "opening TUN roster control stream"
+msgstr "abriendo el flujo de control del roster TUN"
+
+msgid "peer did not open the TUN roster control stream"
+msgstr "el peer no abrió el flujo de control del roster TUN"
+
+msgid "roster control stream closed"
+msgstr "flujo de control del roster cerrado"
+
+msgid "direct mesh link ready"
+msgstr "enlace mesh directo listo"
+
+msgid "direct mesh link closed"
+msgstr "enlace mesh directo cerrado"
+
+msgid "direct mesh dial failed; using hub fallback"
+msgstr "marcado directo falló; usando hub de respaldo"
+
+msgid "direct mesh VIP exchange failed"
+msgstr "falló el intercambio VIP del enlace directo"
+
+msgid "direct mesh VIP mismatch; closing"
+msgstr "VIP del enlace directo no coincide; cerrando"
+
+msgid "skipping mesh peer (not allowed)"
+msgstr "omitiento peer de malla (no permitido)"
+
+msgid "mesh peer left"
+msgstr "el peer de la malla se fue"
+
+msgid "mesh peer {0} at {1}"
+msgstr "peer de malla {0} en {1}"
+
+msgid "hub {0} is at {1} (path {2}); peers may connect directly"
+msgstr "hub {0} en {1} (ruta {2}); los peers pueden ir directo"
+
+msgid ""
+"Make machines reachable at the IP layer over QUIC datagrams.\n"
+"\n"
+"Creates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). `tun serve` is the coordination hub (roster + fallback forward); `tun connect` dials it, learns the VIP↔EndpointId roster, and tries direct spoke↔spoke links (hub forward remains the fallback). Prefer `--cc bbr3` on lossy paths. Virtual IPs are IPv4 only — see docs/tun-design.md."
+msgstr ""
+"Haz que las máquinas se alcancen en capa IP con datagramas QUIC.\n"
+"\n"
+"Crea un TUN (root/CAP_NET_ADMIN en Linux/macOS, o Administrador + wintun.dll en Windows). `tun serve` es el hub de coordinación (roster + reenvío de respaldo); `tun connect` marca, aprende el roster VIP↔EndpointId e intenta enlaces directos (el hub queda de respaldo). Prefiere `--cc bbr3` en rutas con pérdida. Las IP virtuales son solo IPv4 — ver docs/tun-design.md."
+
+msgid ""
+"Hub: accept many concurrent peers, broadcast the VIP↔EndpointId roster, bridge this machine to each at the IP layer, and forward traffic when spokes have no direct path. Prints this node's virtual IP and EndpointId."
+msgstr ""
+"Hub: acepta muchos peers concurrentes, difunde el roster VIP↔EndpointId, puentea esta máquina en capa IP y reenvía cuando no hay ruta directa. Imprime la IP virtual y el EndpointId."
+
+msgid ""
+"Dial a `tun serve` hub, install 172.24.0.0/16 on the TUN, receive the mesh roster, and attempt direct links to other spokes (packets prefer direct; otherwise via hub)."
+msgstr ""
+"Marca un hub `tun serve`, instala 172.24.0.0/16 en el TUN, recibe el roster e intenta enlaces directos (preferencia directa; si no, vía hub)."
+
+msgid "connection died quickly; backing off {0} before redial"
+msgstr "la conexión murió rápido; esperando {0} antes de volver a marcar"
+
+msgid "writing stream hello"
+msgstr "escribiendo el hello del stream"
+
+msgid "reading stream hello"
+msgstr "leyendo el hello del stream"
+
+msgid "bad stream hello (expected LPF1, got {0})"
+msgstr "hello de stream incorrecto (se esperaba LPF1, se obtuvo {0})"

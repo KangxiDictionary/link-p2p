@@ -707,3 +707,96 @@ msgstr "アイデンティティ用 nonce のエントロピー取得に失敗�
 msgid "identity file is truncated"
 msgstr "アイデンティティファイルが切り詰められています"
 
+
+# --- TUN mesh v2 (roster + direct) ---
+
+msgid "Make machines reachable at the IP layer over QUIC datagrams (mesh with hub coordination)."
+msgstr "QUIC datagram で IP 層メッシュ（ハブ協調 + 任意の直接接続）。"
+
+msgid "Hub: roster + fallback forward for the virtual IP mesh."
+msgstr "ハブ：名簿 + フォールバック転送（仮想 IP メッシュ）。"
+
+msgid "Dial a hub, join the mesh, and try direct peer links."
+msgstr "ハブに接続してメッシュに参加し、ピア直結を試す。"
+
+msgid "Only accept TUN mesh connections from these EndpointIds (repeatable). Default: accept anyone who knows this hub's EndpointId. Also LINK_P2P_ALLOW."
+msgstr "これらの EndpointId からの TUN メッシュ接続のみ受け付ける（繰り返し可）。既定：このハブの EndpointId を知る誰でも。LINK_P2P_ALLOW も可。"
+
+msgid "Only accept inbound direct mesh links from these EndpointIds (repeatable); also gates outbound peer dials. Hub dial is always attempted. Also LINK_P2P_ALLOW."
+msgstr "これらの EndpointId からの入直結のみ受け付ける（繰り返し可）；出方向ダイヤルも制限。ハブ接続は常に試行。LINK_P2P_ALLOW も可。"
+
+msgid "only accepting connections from the --allow list"
+msgstr "--allow リストの接続のみ受け付けます"
+
+msgid "hub mode: roster + fallback forward; spokes may peer directly"
+msgstr "ハブモード：名簿 + フォールバック転送；スポークは直結可能"
+
+msgid "accepting TUN roster control stream"
+msgstr "TUN 名簿制御ストリームを受理"
+
+msgid "opening TUN roster control stream"
+msgstr "TUN 名簿制御ストリームを開く"
+
+msgid "peer did not open the TUN roster control stream"
+msgstr "ピアが TUN 名簿制御ストリームを開きませんでした"
+
+msgid "roster control stream closed"
+msgstr "名簿制御ストリームが閉じました"
+
+msgid "direct mesh link ready"
+msgstr "直接メッシュリンク準備完了"
+
+msgid "direct mesh link closed"
+msgstr "直接メッシュリンクが閉じました"
+
+msgid "direct mesh dial failed; using hub fallback"
+msgstr "直接ダイヤル失敗；ハブへフォールバック"
+
+msgid "direct mesh VIP exchange failed"
+msgstr "直接メッシュの VIP 交換に失敗"
+
+msgid "direct mesh VIP mismatch; closing"
+msgstr "直接メッシュ VIP 不一致；切断します"
+
+msgid "skipping mesh peer (not allowed)"
+msgstr "メッシュピアをスキップ（許可されていません）"
+
+msgid "mesh peer left"
+msgstr "メッシュピアが離脱しました"
+
+msgid "mesh peer {0} at {1}"
+msgstr "メッシュピア {0} @ {1}"
+
+msgid "hub {0} is at {1} (path {2}); peers may connect directly"
+msgstr "ハブ {0} は {1}（経路 {2}）；ピアは直結できます"
+
+msgid ""
+"Make machines reachable at the IP layer over QUIC datagrams.\n"
+"\n"
+"Creates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). `tun serve` is the coordination hub (roster + fallback forward); `tun connect` dials it, learns the VIP↔EndpointId roster, and tries direct spoke↔spoke links (hub forward remains the fallback). Prefer `--cc bbr3` on lossy paths. Virtual IPs are IPv4 only — see docs/tun-design.md."
+msgstr ""
+"QUIC datagram で IP 層到達性を提供します。\n"
+"\n"
+"TUN を作成します（Linux/macOS は root/CAP_NET_ADMIN、Windows は管理者 + wintun.dll）。`tun serve` は協調ハブ（名簿 + フォールバック転送）；`tun connect` は接続して名簿を受け取り、スポーク直結を試します（失敗時はハブ転送）。損失の多い経路では `--cc bbr3` を推奨。仮想 IP は IPv4 のみ — docs/tun-design.md。"
+
+msgid ""
+"Hub: accept many concurrent peers, broadcast the VIP↔EndpointId roster, bridge this machine to each at the IP layer, and forward traffic when spokes have no direct path. Prints this node's virtual IP and EndpointId."
+msgstr ""
+"ハブ：多数のピアを並行受理し、VIP↔EndpointId 名簿を配信し、IP 層で本機と橋渡しし、直結がない場合に転送します。仮想 IP と EndpointId を表示します。"
+
+msgid ""
+"Dial a `tun serve` hub, install 172.24.0.0/16 on the TUN, receive the mesh roster, and attempt direct links to other spokes (packets prefer direct; otherwise via hub)."
+msgstr ""
+"`tun serve` ハブに接続し、TUN に 172.24.0.0/16 を入れ、名簿を受け取り、他スポークへの直結を試します（直結優先、なければハブ経由）。"
+
+msgid "connection died quickly; backing off {0} before redial"
+msgstr "接続がすぐに切断されました；{0} バックオフしてから再ダイヤル"
+
+msgid "writing stream hello"
+msgstr "ストリーム hello を書き込み中"
+
+msgid "reading stream hello"
+msgstr "ストリーム hello を読み取り中"
+
+msgid "bad stream hello (expected LPF1, got {0})"
+msgstr "不正なストリーム hello（LPF1 のはずが {0}）"

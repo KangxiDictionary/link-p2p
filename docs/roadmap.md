@@ -65,9 +65,9 @@ whereas TUN backends and edge cases can be bolted on incrementally forever.
 
 | capability | status |
 |---|---|
-| Stream mode: TCP-over-QUIC port forwarding (`serve --forward` / `connect --listen`) | done |
+| Stream mode: TCP-over-QUIC port forwarding (`serve --forward` / `connect --listen`); ALPN `link-p2p/tcp-forward/1` + fixed-forward `LPF1` stream hello | done |
 | SOCKS5 proxy mode (`serve --proxy` / `connect --socks5-listen`) | done |
-| TUN mode: hub-and-spoke whole-machine IP mesh over QUIC datagrams (Linux; macOS/Windows backends) | done (macOS/Windows unverified on maintainer hardware) |
+| TUN mode: hub-coordinated VIP mesh (`link-p2p/tun/2` roster + spoke direct + hub fallback; `--allow`); Linux/macOS/Windows backends | done (macOS/Windows unverified on maintainer hardware) |
 | Persistent identity (per-machine secret key → stable `EndpointId`) | done |
 | Self-hosted relay (`--relay`) | done |
 | iroh presets::N0 (n0's public relay + DNS/pkarr discovery) | done |
@@ -252,12 +252,16 @@ EndpointId can open a stream to the forwarded target. This is fine for a
 personal two-machine link but unacceptable for multi-user or multi-device
 setups.
 
-**Current:** No ACL layer at all. The `secure` connection model is purely at
-the transport level (authenticated QUIC). `EndpointId` is the only identity;
-there's no second-level authorisation.
+**Current:** Stream `serve` and TUN `tun serve` / `tun connect` support a
+coarse EndpointId `--allow` / `LINK_P2P_ALLOW` allowlist (deny unknown peers at
+accept / direct-dial time). There is still no per-peer, per-port, or
+per-protocol filtering. In the stream modes, an allowed peer who can dial can
+open a stream to the forwarded target. This is fine for a personal few-machine
+link but insufficient for multi-user setups that need port/CIDR rules.
 
 **Needed:**
 - Allowlists: configure which EndpointIds may connect to which services.
+  *(coarse EndpointId allowlist: done for stream serve + TUN)*
 - For TUN mode: per-peer, per-port/IP-range rules ("Bob can only reach
   192.168.1.5:443 on Alice's LAN").
 - Policy should be centrally defined (at the coordination server) and enforced
@@ -309,9 +313,9 @@ behind the much larger trust-model project in gap #5.
 
 ## What is deliberately left for later
 
-- **Mesh topology** (more than two peers on one TUN interface): this requires
-  a routing table, per-peer connection pools, and inner-IP demux — a different
-  architecture than point-to-point.
+- **Stream-mode mesh** (multi-hop port forwarding): `serve`/`connect` stay
+  point-to-point. TUN hub mesh (roster, spoke↔spoke direct, hub fallback) is
+  done — see `docs/tun-design.md`.
 - **Per-stream QoS / priority**: stream-mode reliability is currently uniform
   (ordered bidi); the datagram path is uniform "best-effort".
 - **GSO / io_uring performance work**: the loopback benchmarks showed the

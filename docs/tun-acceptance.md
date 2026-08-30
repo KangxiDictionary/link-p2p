@@ -7,6 +7,8 @@ anything here fails.
 
 Privileges: root / `CAP_NET_ADMIN` (Linux, macOS); Administrator + `wintun.dll`
 beside the binary (Windows). VIPs are **IPv4 only** (`172.24.0.0/16` by default).
+On lossy or relay-heavy paths, try global `--cc bbr3` before filing throughput
+bugs (see `docs/performance.md`).
 
 ## Matrix
 

@@ -2,22 +2,74 @@
 //!
 //! One shared `select!` loop drives both directions: a clean half-close does
 //! not cancel the other direction; an error aborts and RESET/STOPS the peer.
+//!
+//! # QUIC stream visibility (read this before adding a new stream feature)
+//!
+//! QUIC ([RFC 9000](https://www.rfc-editor.org/rfc/rfc9000.html)) has **no**
+//! "stream opened" control frame. `open_bi()` / `open_uni()` only allocate a
+//! local stream id and local state; the peer learns the stream exists when the
+//! first STREAM frame that references that id arrives — even empty data with
+//! FIN counts. Until then, the acceptor's `accept_bi()` waits forever while
+//! connection-level keepalive still looks healthy.
+//!
+//! Therefore: the side that opens a stream **must** write something at a
+//! deterministic time (a real header, or a sentinel like [`STREAM_HELLO`]).
+//! Do not assume "the far side will speak first" — download-first and
+//! server-banner protocols (SSH, many TCP services) never send on the dialer
+//! side until they have seen the peer. Proxy/SOCKS5 already satisfies this
+//! via `write_target`; fixed-forward (`serve --forward` / `connect --listen`
+//! / `--stdio`) uses [`STREAM_HELLO`] for the same reason.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use iroh::endpoint::{RecvStream, SendStream, VarInt};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
 use tracing::Instrument;
 
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_fmt};
 
 /// Error code when we abort a QUIC stream mid-transfer.
 pub(crate) const STREAM_ABORT_CODE: VarInt = VarInt::from_u32(1);
 
 /// How long Ctrl+C waits for in-flight forwards to flush.
 pub(crate) const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// First bytes on every fixed-forward QUIC stream (`serve --forward` with
+/// `connect --listen` / `--stdio`). Makes the dialer's `open_bi()` visible on
+/// the wire. Tied to ALPN `link-p2p/tcp-forward/1` — must bump together.
+pub(crate) const STREAM_HELLO: &[u8; 4] = b"LPF1";
+
+/// Write [`STREAM_HELLO`] so the peer's `accept_bi` can complete.
+///
+/// No flush: callers pass an unbuffered iroh `SendStream` (same rule as
+/// `socks5::write_target`).
+pub(crate) async fn write_stream_hello<W: AsyncWrite + Unpin>(w: &mut W) -> Result<()> {
+    w.write_all(STREAM_HELLO)
+        .await
+        .context(tr!("writing stream hello"))?;
+    Ok(())
+}
+
+/// Consume and validate [`STREAM_HELLO`]. Failures are immediate and logged
+/// by the caller — they must not hang like a silent `accept_bi` wait.
+pub(crate) async fn read_stream_hello<R: AsyncRead + Unpin>(r: &mut R) -> Result<()> {
+    let mut hello = [0u8; 4];
+    r.read_exact(&mut hello)
+        .await
+        .context(tr!("reading stream hello"))?;
+    if &hello != STREAM_HELLO {
+        bail!(tr_fmt!(
+            "bad stream hello (expected LPF1, got {0})",
+            format!(
+                "{:02x}{:02x}{:02x}{:02x}",
+                hello[0], hello[1], hello[2], hello[3]
+            )
+        ));
+    }
+    Ok(())
+}
 
 /// TCP ↔ QUIC bidi stream.
 pub(crate) async fn pipe_streams(tcp: TcpStream, send: SendStream, recv: RecvStream) -> Result<()> {
@@ -148,5 +200,43 @@ pub(crate) async fn drain_tasks(mut tasks: Vec<JoinHandle<()>>) {
                 tasks.remove(0);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stream_hello_round_trip() {
+        let mut buf = Vec::new();
+        write_stream_hello(&mut buf).await.unwrap();
+        assert_eq!(buf.as_slice(), STREAM_HELLO.as_slice());
+        read_stream_hello(&mut buf.as_slice()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_hello_rejects_garbage() {
+        let junk: &[u8] = b"XXXX";
+        let err = read_stream_hello(&mut &*junk).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("bad stream hello") || msg.contains("LPF1"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_hello_rejects_short_read() {
+        let short: &[u8] = b"LP";
+        let err = read_stream_hello(&mut &*short).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("reading stream hello")
+                || msg.contains("early eof")
+                || msg.contains("EOF")
+                || msg.contains("UnexpectedEof"),
+            "unexpected error: {msg}"
+        );
     }
 }

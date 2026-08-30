@@ -4,18 +4,15 @@
 //! at the IP layer over *unreliable* QUIC datagrams (inner TCP/UDP/ICMP keep
 //! their own reliability).
 //!
-//! Topology is **hub-and-spoke**: `tun serve` is the hub (many concurrent
-//! peers); `tun connect` dials the hub. Spokes install `172.24.0.0/16` on the
-//! TUN so any mesh VIP enters the tunnel; the hub demuxes by destination VIP
-//! and **forwards spoke→spoke** so every virtual IP can reach every other.
-//! Full peer-to-peer mesh (no hub) is out of scope for now — see
-//! `docs/tun-design.md`.
+//! Topology is **hub-and-spoke with optional spoke↔spoke direct paths**:
+//! `tun serve` is the hub (roster + fallback forward); `tun connect` dials the
+//! hub, receives the VIP↔EndpointId roster over a reliable control stream, and
+//! tries a direct `TUN_ALPN` link to each peer (iroh discovery/hole-punch).
+//! Packets prefer a direct connection when present, otherwise go via the hub.
 //!
-//! Desktop backends: Linux (`/dev/net/tun` + `ip`), macOS (`utun` +
-//! `route`/`ifconfig`), Windows (Wintun + `netsh`/`route`). Privileged
-//! (root / CAP_NET_ADMIN / Administrator) unlike stream modes.
+//! Desktop backends: Linux / macOS / Windows. Privileged unlike stream modes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,24 +20,25 @@ use std::time::Instant;
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use iroh::endpoint::Connection;
 use iroh::protocol::ProtocolHandler;
-use iroh::{EndpointId, SecretKey};
-use tokio::sync::RwLock;
+use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
+use tokio::sync::{mpsc, RwLock};
 use tokio::time::{self, Duration};
 use tracing::{info, warn};
 use tun2::AbstractDevice;
 
 use crate::i18n::{tr, tr_fmt};
 use crate::style::Styler;
+use crate::tun_roster::{
+    encode_joined, encode_left, encode_snapshot, read_msg, should_dial, write_msg, RosterEntry,
+    RosterMsg,
+};
 
-/// ALPN for TUN mode. Versioned: "1" added the one-shot VIP exchange stream;
-/// a "0" peer would install a route to the wrong address, so a version
-/// mismatch must fail the handshake rather than misroute. Distinct from the
-/// stream-forwarding ALPN so a `tun` peer and a `serve --forward` peer can't
-/// handshake into the wrong protocol either.
-pub const TUN_ALPN: &[u8] = b"link-p2p/tun/1";
+/// ALPN for TUN mode. "2" adds the reliable roster control stream after VIP
+/// exchange so spokes can learn the full mesh and attempt direct links.
+pub const TUN_ALPN: &[u8] = b"link-p2p/tun/2";
 
 /// 172.24.0.0/16 — a slice of RFC 1918's 172.16.0.0/12 that common tools
 /// (Docker's default bridge 172.17/16, typical home-router DHCP pools) don't
@@ -741,6 +739,23 @@ const MTU_RAISE_HOLDOFF: Duration = Duration::from_secs(15);
 /// cannot turn into an ICMP storm back into the local stack.
 const ICMP_PTB_RATE_PER_SEC: u32 = 20;
 
+/// Shared "do not raise interface MTU before this Instant" gate (one per TUN).
+type MtuRaiseGate = Arc<std::sync::Mutex<Instant>>;
+
+fn new_mtu_raise_gate() -> MtuRaiseGate {
+    Arc::new(std::sync::Mutex::new(Instant::now()))
+}
+
+fn note_mtu_shrink(gate: &MtuRaiseGate) {
+    if let Ok(mut g) = gate.lock() {
+        *g = Instant::now() + MTU_RAISE_HOLDOFF;
+    }
+}
+
+fn raise_after_now(gate: &MtuRaiseGate) -> Instant {
+    gate.lock().map(|g| *g).unwrap_or_else(|_| Instant::now())
+}
+
 /// Internet checksum (RFC 1071) over `data`, with an odd trailing byte
 /// treated as a high-order octet paired with a zero low octet.
 fn inet_checksum(data: &[u8]) -> u16 {
@@ -900,167 +915,9 @@ enum SessionEnd {
     PeerGone,
 }
 
-/// Pump IP packets between the TUN interface and the peer's QUIC connection.
-///
-/// One inner IP packet = one QUIC datagram, deliberately *unreliable*:
-/// loss/reordering are left to the inner protocol (TCP retransmits, UDP
-/// doesn't care), matching what a real network link does. A reliable stream
-/// transport would stack a second retransmission layer under the first and
-/// reintroduce head-of-line blocking — one dropped packet stalling every
-/// later one.
-///
-/// Datagram errors (send or read) are NOT treated as a peer disconnect
-/// here — iroh/noq's connection migration (MagicSocket) causes transient
-/// failures while switching paths, and the upper layer must not tear down
-/// the session during a path switch. The `conn.closed()` branch at the top
-/// of the select detects genuine disconnection as an event, so the error
-/// branches just log a warning and keep going.
-///
-/// The interface MTU is adjusted in both directions: the timer raises it as
-/// the path's PMTUD converges upward (held off for [`MTU_RAISE_HOLDOFF`] after
-/// a shrink), and the send path lowers it (via `shrink_tun_mtu`) when an
-/// actual oversize packet shows up after a switch to a worse path. Oversized
-/// drops also inject an ICMP Fragmentation Needed (Type 3 Code 4) back into
-/// the TUN so the local TCP stack learns the new Next-Hop MTU immediately
-/// instead of waiting for black-hole detection.
-async fn run_datagram_loop(
-    tun: &tun2::AsyncDevice,
-    tun_name: &str,
-    conn: &Connection,
-    user_mtu: u16,
-    mtu: &mut u16,
-    own_vip: Ipv4Addr,
-    peer: EndpointId,
-    styler: Styler,
-) -> Result<SessionEnd> {
-    let mut buf = vec![0u8; *mtu as usize + 64];
-    let mut send_buf = BytesMut::with_capacity(*mtu as usize + 64);
-    let mut refresh = time::interval(Duration::from_secs(2));
-    // Path-quality observability: every 15 refresh ticks (= 30s), log the
-    // connection's cumulative datagram/loss counters so a running tunnel is
-    // diagnosable without waiting for a failure (debug level only).
-    let mut stats_log_ticks = 0u8;
-    let mut dropped_oversized: u64 = 0;
-    let mut icmp_injected: u64 = 0;
-    let mut raise_after = Instant::now();
-    let mut icmp_window_start = Instant::now();
-    let mut icmp_window_count: u32 = 0;
-    loop {
-        tokio::select! {
-            biased; // closed() first — a disconnection is detected before
-                    // we waste time on stale packets.
-
-            _ = conn.closed() => {
-                info!(%peer, "{}", tr!("peer disconnected"));
-                return Ok(SessionEnd::PeerGone);
-            }
-            r = tun.recv(&mut buf) => {
-                let n = r.context(tr!("reading packet from TUN device"))?;
-                // The interface MTU can lag behind the path's current
-                // datagram ceiling after a path switch (PMTUD re-converges
-                // smaller, e.g. 1280 interface vs 1230 ceiling). Check before
-                // sending so an oversize packet *lowers* the MTU instead of
-                // being refused by the QUIC layer as "datagram too large" on
-                // every send. The packet itself is dropped — and we synthesize
-                // ICMP Frag Needed into the TUN so local TCP PMTUD reacts
-                // immediately rather than via black-hole timeouts.
-                let ceiling = conn.max_datagram_size().unwrap_or(usize::MAX);
-                if n > ceiling {
-                    let next_hop = u16::try_from(ceiling).unwrap_or(u16::MAX);
-                    dropped_oversized += 1;
-                    if shrink_tun_mtu(tun_name, ceiling, mtu)? {
-                        raise_after = Instant::now() + MTU_RAISE_HOLDOFF;
-                        warn!(%peer, "{}", tr_fmt!(
-                            "path datagram ceiling dropped to {0}; lowered TUN interface MTU and dropped one packet",
-                            *mtu
-                        ));
-                    }
-                    // Rate-limited ICMP PTB back into the local stack.
-                    if icmp_window_start.elapsed() >= Duration::from_secs(1) {
-                        icmp_window_start = Instant::now();
-                        icmp_window_count = 0;
-                    }
-                    if icmp_window_count < ICMP_PTB_RATE_PER_SEC {
-                        if let Some(icmp) = build_icmp_frag_needed(&buf[..n], next_hop, own_vip) {
-                            if let Err(e) = tun.send(&icmp).await {
-                                warn!(%peer, error = %e, "{}", tr!("failed to inject ICMP Fragmentation Needed into TUN"));
-                            } else {
-                                icmp_injected += 1;
-                                icmp_window_count += 1;
-                            }
-                        }
-                    }
-                    continue;
-                }
-                let pkt = {
-                    send_buf.clear();
-                    send_buf.extend_from_slice(&buf[..n]);
-                    send_buf.split().freeze()
-                };
-                if let Err(e) = conn.send_datagram_wait(pkt).await {
-                    // The connection is still alive (closed() above would
-                    // have fired if not) — iroh is migrating to a new path.
-                    // Drop this packet (TUN mode is best-effort) and keep
-                    // the session alive.
-                    warn!(%peer, error = %e, "{}", tr!("datagram error; assuming transient path switch (iroh may be migrating the connection)"));
-                }
-            }
-            r = conn.read_datagram() => {
-                match r {
-                    Ok(data) => {
-                        tun.send(&data[..])
-                            .await
-                            .context(tr!("writing packet to TUN device"))?;
-                    }
-                    Err(e) => {
-                        warn!(%peer, error = %e, "{}", tr!("datagram error; assuming transient path switch (iroh may be migrating the connection)"));
-                    }
-                }
-            }
-            _ = refresh.tick() => {
-                let old = *mtu;
-                refresh_tun_mtu(tun_name, user_mtu, conn, mtu, raise_after)?;
-                if *mtu != old {
-                    info!(%peer, "{}", tr_fmt!(
-                        "TUN interface MTU raised {0} → {1} (datagram path MTU converged)",
-                        old, *mtu
-                    ));
-                    buf.resize(*mtu as usize + 64, 0);
-                    if send_buf.capacity() < buf.len() {
-                        send_buf.reserve(buf.len() - send_buf.capacity());
-                    }
-                }
-                // Flush drop / ICMP counters once per tick instead of one
-                // log line per oversize packet.
-                if dropped_oversized > 0 || icmp_injected > 0 {
-                    warn!(%peer, "{}", tr_fmt!(
-                        "dropped {0} oversized packets in the last 2s (interface MTU is {1}; injected {2} ICMP Fragmentation Needed)",
-                        dropped_oversized, *mtu, icmp_injected
-                    ));
-                    dropped_oversized = 0;
-                    icmp_injected = 0;
-                }
-                if stats_log_ticks == 0 {
-                    let s = conn.stats();
-                    tracing::debug!(%peer,
-                        udp_tx = s.udp_tx.datagrams,
-                        udp_rx = s.udp_rx.datagrams,
-                        lost_packets = s.lost_packets,
-                        lost_bytes = s.lost_bytes,
-                        "path stats (growing udp_tx/rx means the direct path is in use)"
-                    );
-                    stats_log_ticks = 15;
-                } else {
-                    stats_log_ticks -= 1;
-                }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                println!("{}", styler.warn(&tr!("shutting down...")));
-                return Ok(SessionEnd::CtrlC);
-            }
-        }
-    }
-}
+// Per-peer outbound datagrams: [`spawn_peer_sender`] (channel +
+// `send_datagram_wait`). TUN device I/O: [`spawn_tun_io`]. The old monolithic
+// `run_datagram_loop` was removed so hub fan-out cannot HoL on one peer's CC.
 
 // ---------------------------------------------------------------------------
 // Entry points.
@@ -1081,9 +938,36 @@ fn handle_ping_probe(conn: Connection) {
 struct HubPeer {
     id: EndpointId,
     conn: Connection,
+    /// Non-blocking enqueue for datagrams destined to this spoke. A dedicated
+    /// send task drains the channel so one congested peer cannot stall
+    /// `read_datagram` / TUN demux for others (`send_datagram_wait` HoL).
+    outbound: mpsc::Sender<Bytes>,
 }
 
 type HubPeers = Arc<RwLock<HashMap<Ipv4Addr, HubPeer>>>;
+/// Control-stream writers for roster push (one per spoke).
+type RosterFans = Arc<RwLock<HashMap<EndpointId, mpsc::Sender<Bytes>>>>;
+
+fn path_label(conn: &Connection) -> &'static str {
+    let s = conn.stats();
+    if s.udp_tx.datagrams + s.udp_rx.datagrams > 0 {
+        "direct"
+    } else {
+        "relay"
+    }
+}
+
+fn check_allow(allow: Option<&HashSet<EndpointId>>, peer: EndpointId) -> Result<()> {
+    if let Some(set) = allow {
+        if !set.contains(&peer) {
+            return Err(crate::exit::coded(
+                crate::exit::DENIED,
+                anyhow::anyhow!(tr!("rejecting connection: peer is not in the --allow list")),
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Owned by a single task — never lock across `recv`/`send` awaits from
 /// other tasks (that starved spoke→hub delivery: the reader held the mutex
@@ -1091,7 +975,7 @@ type HubPeers = Arc<RwLock<HashMap<Ipv4Addr, HubPeer>>>;
 #[derive(Clone)]
 struct TunIo {
     /// Packets to write into the TUN (spoke→hub local delivery, ICMP PTB).
-    to_tun: tokio::sync::mpsc::Sender<Bytes>,
+    to_tun: mpsc::Sender<Bytes>,
 }
 
 impl TunIo {
@@ -1103,9 +987,9 @@ impl TunIo {
 fn spawn_tun_io(
     tun: tun2::AsyncDevice,
     user_mtu: u16,
-) -> (TunIo, tokio::sync::mpsc::Receiver<Bytes>) {
-    let (to_tun_tx, mut to_tun_rx) = tokio::sync::mpsc::channel::<Bytes>(256);
-    let (from_tun_tx, from_tun_rx) = tokio::sync::mpsc::channel::<Bytes>(256);
+) -> (TunIo, mpsc::Receiver<Bytes>) {
+    let (to_tun_tx, mut to_tun_rx) = mpsc::channel::<Bytes>(256);
+    let (from_tun_tx, from_tun_rx) = mpsc::channel::<Bytes>(256);
     tokio::spawn(async move {
         let tun = tun;
         let mut buf = vec![0u8; user_mtu as usize + 64];
@@ -1137,46 +1021,95 @@ fn spawn_tun_io(
     (TunIo { to_tun: to_tun_tx }, from_tun_rx)
 }
 
-/// Send one inner IP packet as a QUIC datagram, shrinking/ICMP on oversize.
-async fn hub_send_datagram(
-    tun: &TunIo,
-    tun_name: &str,
-    conn: &Connection,
+/// Drain one peer's outbound datagram queue onto its QUIC connection.
+///
+/// Owns ICMP Frag Needed injection (rate-limited) and interface MTU shrink on
+/// oversize; raise hold-off is recorded on [`MtuRaiseGate`] so the session's
+/// periodic [`refresh_tun_mtu`] respects it.
+fn spawn_peer_sender(
+    tun: TunIo,
+    tun_name: String,
     own_vip: Ipv4Addr,
     peer: EndpointId,
-    pkt: Bytes,
-    iface_mtu: &mut u16,
+    conn: Connection,
+    mut rx: mpsc::Receiver<Bytes>,
+    user_mtu: u16,
+    raise_gate: MtuRaiseGate,
 ) {
-    let n = pkt.len();
-    let ceiling = conn.max_datagram_size().unwrap_or(usize::MAX);
-    if n > ceiling {
-        let next_hop = u16::try_from(ceiling).unwrap_or(u16::MAX);
-        if let Ok(true) = shrink_tun_mtu(tun_name, ceiling, iface_mtu) {
-            warn!(%peer, "{}", tr_fmt!(
-                "path datagram ceiling dropped to {0}; lowered TUN interface MTU and dropped one packet",
-                *iface_mtu
-            ));
+    tokio::spawn(async move {
+        let mut iface_mtu = user_mtu;
+        let mut icmp_window_start = Instant::now();
+        let mut icmp_window_count: u32 = 0;
+        while let Some(pkt) = rx.recv().await {
+            let n = pkt.len();
+            let ceiling = conn.max_datagram_size().unwrap_or(usize::MAX);
+            if n > ceiling {
+                let next_hop = u16::try_from(ceiling).unwrap_or(u16::MAX);
+                if matches!(
+                    shrink_tun_mtu(&tun_name, ceiling, &mut iface_mtu),
+                    Ok(true)
+                ) {
+                    note_mtu_shrink(&raise_gate);
+                    warn!(%peer, "{}", tr_fmt!(
+                        "path datagram ceiling dropped to {0}; lowered TUN interface MTU and dropped one packet",
+                        iface_mtu
+                    ));
+                }
+                if icmp_window_start.elapsed() >= Duration::from_secs(1) {
+                    icmp_window_start = Instant::now();
+                    icmp_window_count = 0;
+                }
+                if icmp_window_count < ICMP_PTB_RATE_PER_SEC {
+                    if let Some(icmp) = build_icmp_frag_needed(&pkt, next_hop, own_vip) {
+                        tun.send(Bytes::from(icmp)).await;
+                        icmp_window_count += 1;
+                    }
+                }
+                continue;
+            }
+            if let Err(e) = conn.send_datagram_wait(pkt).await {
+                warn!(%peer, error = %e, "{}", tr!("datagram error; assuming transient path switch (iroh may be migrating the connection)"));
+            }
         }
-        if let Some(icmp) = build_icmp_frag_needed(&pkt, next_hop, own_vip) {
-            tun.send(Bytes::from(icmp)).await;
-        }
-        return;
+    });
+}
+
+fn enqueue_peer(peer: &HubPeer, pkt: Bytes) {
+    // Drop on full — same semantics as a lossy link / full datagram window.
+    let _ = peer.outbound.try_send(pkt);
+}
+
+async fn broadcast_roster(fans: &RosterFans, msg: Bytes) {
+    let senders: Vec<_> = fans.read().await.values().cloned().collect();
+    for tx in senders {
+        let _ = tx.send(msg.clone()).await;
     }
-    if let Err(e) = conn.send_datagram_wait(pkt).await {
-        warn!(%peer, error = %e, "{}", tr!("datagram error; assuming transient path switch (iroh may be migrating the connection)"));
+}
+
+async fn hub_roster_snapshot(
+    own_id: EndpointId,
+    own_vip: Ipv4Addr,
+    peers: &HubPeers,
+) -> Vec<RosterEntry> {
+    let mut entries = vec![RosterEntry {
+        vip: own_vip,
+        id: own_id,
+    }];
+    for (vip, p) in peers.read().await.iter() {
+        entries.push(RosterEntry {
+            vip: *vip,
+            id: p.id,
+        });
     }
+    entries
 }
 
 /// Hub: packets from the local TUN → spoke (by destination VIP).
 async fn hub_tun_to_peers(
-    tun: TunIo,
-    mut from_tun: tokio::sync::mpsc::Receiver<Bytes>,
-    tun_name: String,
+    mut from_tun: mpsc::Receiver<Bytes>,
     own_vip: Ipv4Addr,
     peers: HubPeers,
-    user_mtu: u16,
 ) {
-    let mut iface_mtu = user_mtu;
     while let Some(pkt) = from_tun.recv().await {
         let Some(dst) = ipv4_dst(&pkt) else {
             continue;
@@ -1192,30 +1125,18 @@ async fn hub_tun_to_peers(
             tracing::debug!(%dst, "no hub peer for destination VIP; dropping");
             continue;
         };
-        hub_send_datagram(
-            &tun,
-            &tun_name,
-            &peer.conn,
-            own_vip,
-            peer.id,
-            pkt,
-            &mut iface_mtu,
-        )
-        .await;
+        enqueue_peer(&peer, pkt);
     }
 }
 
-/// Hub: packets from one spoke → local TUN and/or another spoke.
+/// Hub: packets from one spoke → local TUN and/or another spoke's outbound queue.
 async fn hub_peer_to_mesh(
     tun: TunIo,
-    tun_name: String,
     own_vip: Ipv4Addr,
     peers: HubPeers,
     peer_vip: Ipv4Addr,
     peer: HubPeer,
-    user_mtu: u16,
 ) {
-    let mut iface_mtu = user_mtu;
     loop {
         tokio::select! {
             _ = peer.conn.closed() => {
@@ -1226,8 +1147,6 @@ async fn hub_peer_to_mesh(
                 match r {
                     Ok(data) => {
                         let Some(src) = ipv4_src(&data) else { continue };
-                        // Drop spoofed sources so one spoke cannot inject
-                        // another VIP's address into the mesh.
                         if src != peer_vip {
                             tracing::debug!(%peer_vip, %src, "dropping spoofed source VIP");
                             continue;
@@ -1248,16 +1167,7 @@ async fn hub_peer_to_mesh(
                             tracing::debug!(%dst, "no hub peer for forwarded VIP; dropping");
                             continue;
                         };
-                        hub_send_datagram(
-                            &tun,
-                            &tun_name,
-                            &other.conn,
-                            own_vip,
-                            other.id,
-                            data,
-                            &mut iface_mtu,
-                        )
-                        .await;
+                        enqueue_peer(&other, data);
                     }
                     Err(e) => {
                         warn!(peer = %peer.id, error = %e, "{}", tr!("datagram error; assuming transient path switch (iroh may be migrating the connection)"));
@@ -1269,8 +1179,8 @@ async fn hub_peer_to_mesh(
 }
 
 /// Exposed side (`tun serve`): hub for many concurrent spokes. Keeps accepting
-/// while sessions run; demuxes local TUN traffic by destination VIP and
-/// forwards spoke→spoke so every virtual IP can reach every other.
+/// while sessions run; pushes a VIP↔EndpointId roster; demuxes local TUN
+/// traffic and forwards spoke→spoke (fallback when spokes have no direct path).
 pub async fn run_tun_serve(
     secret_key: SecretKey,
     tun_ip: Option<Ipv4Addr>,
@@ -1279,12 +1189,10 @@ pub async fn run_tun_serve(
     keepalive: Duration,
     idle_timeout: Duration,
     tune: crate::TransportTune,
+    allow: Option<HashSet<EndpointId>>,
     styler: Styler,
 ) -> Result<()> {
     let endpoint = crate::build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune)?
-        // PING_ALPN must be registered here or the probe never gets past the
-        // TLS ALPN negotiation: iroh only accepts connections whose ALPN is
-        // in this list, so the conn.alpn() dispatch below would be dead code.
         .alpns(vec![TUN_ALPN.to_vec(), crate::PING_ALPN.to_vec()])
         .bind()
         .await
@@ -1297,8 +1205,6 @@ pub async fn run_tun_serve(
 
     let own_id = endpoint.id();
     let own_vip = tun_ip.unwrap_or_else(|| derive_vip(own_id));
-    // Collision check first (needs no network): a taken address should be
-    // reported before we spend up to 30s waiting to come online.
     if let Err(e) = ensure_vip_free(own_vip) {
         endpoint.close().await;
         return Err(e);
@@ -1315,17 +1221,11 @@ pub async fn run_tun_serve(
         }
     };
     let (tun_io, from_tun) = spawn_tun_io(tun, mtu);
+    let raise_gate = new_mtu_raise_gate();
     let peers: HubPeers = Arc::new(RwLock::new(HashMap::new()));
+    let fans: RosterFans = Arc::new(RwLock::new(HashMap::new()));
 
-    // Capture local→mesh packets for as long as the hub lives.
-    tokio::spawn(hub_tun_to_peers(
-        tun_io.clone(),
-        from_tun,
-        tun_name.clone(),
-        own_vip,
-        Arc::clone(&peers),
-        mtu,
-    ));
+    tokio::spawn(hub_tun_to_peers(from_tun, own_vip, Arc::clone(&peers)));
 
     println!("{}", styler.banner("link-p2p tun serve"));
     println!(
@@ -1345,9 +1245,15 @@ pub async fn run_tun_serve(
     println!(
         "  {}",
         styler.dim(&tr!(
-            "hub mode: multiple peers can connect; traffic between peers is forwarded"
+            "hub mode: roster + fallback forward; spokes may peer directly"
         ))
     );
+    if allow.is_some() {
+        println!(
+            "  {}",
+            styler.dim(&tr!("only accepting connections from the --allow list"))
+        );
+    }
     println!();
     println!("{}", styler.dim(&tr!("Press Ctrl+C to stop.")));
 
@@ -1357,8 +1263,6 @@ pub async fn run_tun_serve(
                 let Some(incoming) = incoming else {
                     bail!(tr!("endpoint closed"));
                 };
-                // Errors here are usually garbage packets hitting the UDP
-                // socket, not app problems — log and keep listening.
                 let accepting = match incoming.accept() {
                     Ok(a) => a,
                     Err(e) => {
@@ -1374,22 +1278,36 @@ pub async fn run_tun_serve(
                     }
                 };
 
-                // `link-p2p ping` probes arrive on their own ALPN; answer
-                // them on a dedicated task so the tunnel keeps accepting
-                // peers. (PING_ALPN is registered on the endpoint above.)
                 if conn.alpn() == crate::PING_ALPN {
                     handle_ping_probe(conn);
                     continue;
                 }
 
                 let peer_id = conn.remote_id();
+                if let Err(e) = check_allow(allow.as_ref(), peer_id) {
+                    warn!(peer = %peer_id, error = format!("{e:#}"), "{}", tr!("TUN session error"));
+                    conn.close(0u32.into(), b"denied");
+                    continue;
+                }
+
                 let tun_io = tun_io.clone();
                 let peers = Arc::clone(&peers);
+                let fans = Arc::clone(&fans);
                 let tun_name = tun_name.clone();
+                let raise_gate = Arc::clone(&raise_gate);
                 let user_mtu = mtu;
                 tokio::spawn(async move {
                     if let Err(e) = hub_run_spoke(
-                        tun_io, tun_name, own_vip, peers, peer_id, conn, user_mtu,
+                        tun_io,
+                        tun_name,
+                        own_id,
+                        own_vip,
+                        peers,
+                        fans,
+                        peer_id,
+                        conn,
+                        user_mtu,
+                        raise_gate,
                     )
                     .await
                     {
@@ -1403,8 +1321,6 @@ pub async fn run_tun_serve(
             }
         }
     }
-    // Close gracefully: send close frames to every spoke so their sessions
-    // (and route cleanup) end immediately.
     endpoint.close().await;
     Ok(())
 }
@@ -1412,11 +1328,14 @@ pub async fn run_tun_serve(
 async fn hub_run_spoke(
     tun: TunIo,
     tun_name: String,
+    own_id: EndpointId,
     own_vip: Ipv4Addr,
     peers: HubPeers,
+    fans: RosterFans,
     peer_id: EndpointId,
     conn: Connection,
     user_mtu: u16,
+    raise_gate: MtuRaiseGate,
 ) -> Result<()> {
     let peer_vip = exchange_peer_vip(&conn, own_vip, false).await?;
     if peer_vip == own_vip || !vip_in_mesh(peer_vip) {
@@ -1425,6 +1344,31 @@ async fn hub_run_spoke(
             peer_vip
         ));
     }
+
+    // Control stream: spoke opens after VIP exchange; we accept and push roster.
+    let (mut ctrl_send, _ctrl_recv) = time::timeout(VIP_EXCHANGE_TIMEOUT, conn.accept_bi())
+        .await
+        .map_err(|_| {
+            crate::exit::coded(
+                crate::exit::TIMEOUT,
+                anyhow::anyhow!(tr!("peer did not open the TUN roster control stream")),
+            )
+        })?
+        .context(tr!("accepting TUN roster control stream"))?;
+
+    let (out_tx, out_rx) = mpsc::channel::<Bytes>(256);
+    let (fan_tx, mut fan_rx) = mpsc::channel::<Bytes>(32);
+    let out_tx_mesh = out_tx.clone();
+    spawn_peer_sender(
+        tun.clone(),
+        tun_name.clone(),
+        own_vip,
+        peer_id,
+        conn.clone(),
+        out_rx,
+        user_mtu,
+        raise_gate,
+    );
 
     {
         let mut map = peers.write().await;
@@ -1439,17 +1383,20 @@ async fn hub_run_spoke(
             HubPeer {
                 id: peer_id,
                 conn: conn.clone(),
+                outbound: out_tx,
             },
         );
     }
+    fans.write().await.insert(peer_id, fan_tx);
 
     if let Err(e) = add_peer_route(&tun_name, peer_vip, own_vip) {
         peers.write().await.remove(&peer_vip);
+        fans.write().await.remove(&peer_id);
         return Err(e);
     }
 
     let session_mtu = choose_mtu(user_mtu, &conn).unwrap_or(user_mtu);
-    info!(%peer_id, %peer_vip, "{}", tr!("TUN session established"));
+    info!(%peer_id, %peer_vip, path = path_label(&conn), "{}", tr!("TUN session established"));
     info!(%peer_id, "{}", tr_fmt!(
         "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}",
         conn.max_datagram_size().unwrap_or_default(),
@@ -1464,21 +1411,42 @@ async fn hub_run_spoke(
         )
     );
 
-    hub_peer_to_mesh(
-        tun,
-        tun_name.clone(),
-        own_vip,
-        Arc::clone(&peers),
-        peer_vip,
-        HubPeer {
-            id: peer_id,
-            conn,
-        },
-        user_mtu,
-    )
-    .await;
+    // Snapshot to the new spoke, then Joined to everyone else.
+    let snap = hub_roster_snapshot(own_id, own_vip, &peers).await;
+    let _ = write_msg(&mut ctrl_send, &encode_snapshot(&snap)).await;
+    let joined = Bytes::from(encode_joined(&RosterEntry {
+        vip: peer_vip,
+        id: peer_id,
+    }));
+    broadcast_roster(&fans, joined).await;
 
+    // Fan-out task: roster updates for this spoke.
+    let ctrl_send_task = {
+        let mut ctrl_send = ctrl_send;
+        tokio::spawn(async move {
+            while let Some(msg) = fan_rx.recv().await {
+                if write_msg(&mut ctrl_send, &msg).await.is_err() {
+                    break;
+                }
+            }
+        })
+    };
+
+    let hub_peer = HubPeer {
+        id: peer_id,
+        conn: conn.clone(),
+        outbound: out_tx_mesh,
+    };
+    hub_peer_to_mesh(tun, own_vip, Arc::clone(&peers), peer_vip, hub_peer).await;
+
+    ctrl_send_task.abort();
     peers.write().await.remove(&peer_vip);
+    fans.write().await.remove(&peer_id);
+    let left = Bytes::from(encode_left(&RosterEntry {
+        vip: peer_vip,
+        id: peer_id,
+    }));
+    broadcast_roster(&fans, left).await;
     if let Err(e) = del_peer_route(&tun_name, peer_vip) {
         warn!(%peer_id, error = %e, "{}", tr!("could not remove peer route"));
     }
@@ -1486,9 +1454,264 @@ async fn hub_run_spoke(
     Ok(())
 }
 
-/// Connecting side (`tun connect`): dial the peer, then bridge this machine
-/// to it at the IP layer.
-#[allow(clippy::too_many_arguments)] // CLI entry point; explicit config beats a grab-bag struct
+/// Spoke-side mesh table: hub fallback + optional direct peer connections.
+struct SpokeMesh {
+    #[allow(dead_code)]
+    own_id: EndpointId,
+    #[allow(dead_code)]
+    own_vip: Ipv4Addr,
+    hub_vip: Option<Ipv4Addr>,
+    hub_out: Option<mpsc::Sender<Bytes>>,
+    /// Direct links keyed by VIP.
+    direct: HashMap<Ipv4Addr, mpsc::Sender<Bytes>>,
+    /// Known EndpointId → VIP (from roster); used to decide dial vs wait.
+    roster: HashMap<EndpointId, Ipv4Addr>,
+}
+
+impl SpokeMesh {
+    fn new(own_id: EndpointId, own_vip: Ipv4Addr) -> Self {
+        Self {
+            own_id,
+            own_vip,
+            hub_vip: None,
+            hub_out: None,
+            direct: HashMap::new(),
+            roster: HashMap::new(),
+        }
+    }
+
+    fn clear_hub(&mut self) {
+        self.hub_vip = None;
+        self.hub_out = None;
+    }
+
+    fn lookup_out(&self, dst: Ipv4Addr) -> Option<mpsc::Sender<Bytes>> {
+        if let Some(tx) = self.direct.get(&dst) {
+            return Some(tx.clone());
+        }
+        if self.hub_vip == Some(dst) || vip_in_mesh(dst) {
+            return self.hub_out.clone();
+        }
+        None
+    }
+}
+
+type SharedSpokeMesh = Arc<RwLock<SpokeMesh>>;
+
+fn spawn_conn_sender(
+    tun: TunIo,
+    tun_name: String,
+    own_vip: Ipv4Addr,
+    peer: EndpointId,
+    conn: Connection,
+    rx: mpsc::Receiver<Bytes>,
+    user_mtu: u16,
+    raise_gate: MtuRaiseGate,
+) {
+    spawn_peer_sender(tun, tun_name, own_vip, peer, conn, rx, user_mtu, raise_gate);
+}
+
+async fn spoke_install_direct(
+    mesh: &SharedSpokeMesh,
+    tun: TunIo,
+    tun_name: &str,
+    own_vip: Ipv4Addr,
+    peer_id: EndpointId,
+    peer_vip: Ipv4Addr,
+    conn: Connection,
+    user_mtu: u16,
+    raise_gate: MtuRaiseGate,
+) {
+    if peer_vip == own_vip {
+        return;
+    }
+    let (tx, rx) = mpsc::channel::<Bytes>(256);
+    spawn_conn_sender(
+        tun.clone(),
+        tun_name.to_string(),
+        own_vip,
+        peer_id,
+        conn.clone(),
+        rx,
+        user_mtu,
+        raise_gate,
+    );
+    {
+        let mut g = mesh.write().await;
+        g.roster.insert(peer_id, peer_vip);
+        g.direct.insert(peer_vip, tx);
+    }
+    info!(%peer_id, %peer_vip, path = path_label(&conn), "{}", tr!("direct mesh link ready"));
+    // Read datagrams from this direct link into TUN.
+    let mesh_drop = Arc::clone(mesh);
+    let peer_vip_c = peer_vip;
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = conn.closed() => break,
+                r = conn.read_datagram() => {
+                    match r {
+                        Ok(data) => {
+                            let Some(src) = ipv4_src(&data) else { continue };
+                            if src != peer_vip_c {
+                                continue;
+                            }
+                            tun.send(data).await;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+        let mut g = mesh_drop.write().await;
+        g.direct.remove(&peer_vip_c);
+        info!(%peer_id, %peer_vip_c, "{}", tr!("direct mesh link closed"));
+    });
+}
+
+async fn spoke_try_dial_peer(
+    endpoint: Endpoint,
+    mesh: SharedSpokeMesh,
+    tun: TunIo,
+    tun_name: String,
+    own_id: EndpointId,
+    own_vip: Ipv4Addr,
+    entry: RosterEntry,
+    user_mtu: u16,
+    allow: Option<HashSet<EndpointId>>,
+    raise_gate: MtuRaiseGate,
+) {
+    if entry.id == own_id || entry.vip == own_vip {
+        return;
+    }
+    if let Err(e) = check_allow(allow.as_ref(), entry.id) {
+        warn!(peer = %entry.id, error = format!("{e:#}"), "{}", tr!("skipping mesh peer (not allowed)"));
+        return;
+    }
+    if !should_dial(own_id, entry.id) {
+        return;
+    }
+    {
+        let g = mesh.read().await;
+        if g.direct.contains_key(&entry.vip) {
+            return;
+        }
+    }
+    let dial = EndpointAddr::from(entry.id);
+    match endpoint.connect(dial, TUN_ALPN).await {
+        Ok(conn) => {
+            match exchange_peer_vip(&conn, own_vip, true).await {
+                Ok(vip) if vip == entry.vip => {
+                    // Spokes do not open a roster control stream on direct links.
+                    spoke_install_direct(
+                        &mesh,
+                        tun,
+                        &tun_name,
+                        own_vip,
+                        entry.id,
+                        vip,
+                        conn,
+                        user_mtu,
+                        raise_gate,
+                    )
+                    .await;
+                }
+                Ok(vip) => {
+                    warn!(
+                        peer = %entry.id,
+                        expected = %entry.vip,
+                        got = %vip,
+                        "{}",
+                        tr!("direct mesh VIP mismatch; closing")
+                    );
+                }
+                Err(e) => {
+                    warn!(peer = %entry.id, error = format!("{e:#}"), "{}", tr!("direct mesh VIP exchange failed"));
+                }
+            }
+        }
+        Err(e) => {
+            info!(peer = %entry.id, error = %e, "{}", tr!("direct mesh dial failed; using hub fallback"));
+        }
+    }
+}
+
+async fn spoke_apply_roster_msg(
+    endpoint: Endpoint,
+    mesh: SharedSpokeMesh,
+    tun: TunIo,
+    tun_name: String,
+    own_id: EndpointId,
+    own_vip: Ipv4Addr,
+    msg: RosterMsg,
+    user_mtu: u16,
+    allow: Option<HashSet<EndpointId>>,
+    raise_gate: MtuRaiseGate,
+) {
+    match msg {
+        RosterMsg::Snapshot(entries) => {
+            for e in entries {
+                if e.id == own_id {
+                    continue;
+                }
+                mesh.write().await.roster.insert(e.id, e.vip);
+                let ep = endpoint.clone();
+                let mesh = Arc::clone(&mesh);
+                let tun = tun.clone();
+                let tun_name = tun_name.clone();
+                let allow = allow.clone();
+                let raise_gate = Arc::clone(&raise_gate);
+                tokio::spawn(async move {
+                    spoke_try_dial_peer(
+                        ep,
+                        mesh,
+                        tun,
+                        tun_name,
+                        own_id,
+                        own_vip,
+                        e,
+                        user_mtu,
+                        allow,
+                        raise_gate,
+                    )
+                    .await;
+                });
+            }
+        }
+        RosterMsg::Joined(e) => {
+            if e.id == own_id {
+                return;
+            }
+            mesh.write().await.roster.insert(e.id, e.vip);
+            println!(
+                "{}",
+                tr_fmt!("mesh peer {0} at {1}", e.id.fmt_short(), e.vip)
+            );
+            tokio::spawn(spoke_try_dial_peer(
+                endpoint,
+                mesh,
+                tun,
+                tun_name,
+                own_id,
+                own_vip,
+                e,
+                user_mtu,
+                allow,
+                raise_gate,
+            ));
+        }
+        RosterMsg::Left(e) => {
+            let mut g = mesh.write().await;
+            g.roster.remove(&e.id);
+            g.direct.remove(&e.vip);
+            info!(peer = %e.id, vip = %e.vip, "{}", tr!("mesh peer left"));
+        }
+    }
+}
+
+/// Connecting side (`tun connect`): join a hub mesh, learn the roster, try
+/// direct spoke links, fall back to hub forward.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_tun_connect(
     secret_key: SecretKey,
     to: &str,
@@ -1499,9 +1722,11 @@ pub async fn run_tun_connect(
     keepalive: Duration,
     idle_timeout: Duration,
     tune: crate::TransportTune,
+    allow: Option<HashSet<EndpointId>>,
     styler: Styler,
 ) -> Result<()> {
     let endpoint = crate::build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune)?
+        .alpns(vec![TUN_ALPN.to_vec(), crate::PING_ALPN.to_vec()])
         .bind()
         .await
         .map_err(|e| {
@@ -1511,7 +1736,7 @@ pub async fn run_tun_connect(
             )
         })?;
 
-    let peer_id: EndpointId = match to.parse() {
+    let hub_id: EndpointId = match to.parse() {
         Ok(id) => id,
         Err(e) => {
             endpoint.close().await;
@@ -1521,7 +1746,6 @@ pub async fn run_tun_connect(
     };
     let own_id = endpoint.id();
     let own_vip = tun_ip.unwrap_or_else(|| derive_vip(own_id));
-    // Collision check first (needs no network): fail fast on a taken address.
     if let Err(e) = ensure_vip_free(own_vip) {
         endpoint.close().await;
         return Err(e);
@@ -1531,7 +1755,7 @@ pub async fn run_tun_connect(
         return Err(e);
     }
 
-    let dial_addr = match crate::build_dial_addr(peer_id, relay, &to_addr) {
+    let dial_addr = match crate::build_dial_addr(hub_id, relay, &to_addr) {
         Ok(a) => a,
         Err(e) => {
             endpoint.close().await;
@@ -1552,10 +1776,6 @@ pub async fn run_tun_connect(
         );
     }
 
-    // The TUN device lives for the whole process: sessions come and go, the
-    // interface (and its /32 address) survives across reconnects. MTU is
-    // clamped per session (choose_mtu) and the interface follows via
-    // set_tun_mtu, so start with the user's --mtu bound.
     let (tun, tun_name) = match create_tun_device(own_vip, mtu) {
         Ok(x) => x,
         Err(e) => {
@@ -1563,18 +1783,90 @@ pub async fn run_tun_connect(
             return Err(e);
         }
     };
+    let (tun_io, mut from_tun) = spawn_tun_io(tun, mtu);
+    let raise_gate = new_mtu_raise_gate();
+    let mesh: SharedSpokeMesh = Arc::new(RwLock::new(SpokeMesh::new(own_id, own_vip)));
 
-    // Reconnect loop: unlike stream-mode `connect`, which re-dials per QUIC
-    // connection in the background, a TUN session *is* the whole data path —
-    // when the peer goes away the datagram loop ends, so re-establish the
-    // session (dial + VIP exchange + route) with the same exponential backoff
-    // stream mode uses (Backoff, shared with spawn_reconnect_watcher). Ctrl+C
-    // is handled both inside the datagram loop and during the backoff wait.
+    // Long-lived TUN → mesh demux (hub and direct outs live in SpokeMesh).
+    {
+        let mesh_d = Arc::clone(&mesh);
+        tokio::spawn(async move {
+            while let Some(pkt) = from_tun.recv().await {
+                let Some(dst) = ipv4_dst(&pkt) else { continue };
+                if dst == own_vip {
+                    continue;
+                }
+                let out = mesh_d.read().await.lookup_out(dst);
+                if let Some(tx) = out {
+                    let _ = tx.try_send(pkt);
+                }
+            }
+        });
+    }
+
+    // Accept inbound direct mesh dials (and ping) for the process lifetime.
+    {
+        let endpoint_acc = endpoint.clone();
+        let mesh_acc = Arc::clone(&mesh);
+        let tun_acc = tun_io.clone();
+        let tun_name_acc = tun_name.clone();
+        let allow_acc = allow.clone();
+        let raise_gate_acc = Arc::clone(&raise_gate);
+        tokio::spawn(async move {
+            while let Some(incoming) = endpoint_acc.accept().await {
+                let Ok(accepting) = incoming.accept() else { continue };
+                let Ok(conn) = accepting.await else { continue };
+                if conn.alpn() == crate::PING_ALPN {
+                    handle_ping_probe(conn);
+                    continue;
+                }
+                if conn.alpn() != TUN_ALPN {
+                    continue;
+                }
+                let peer = conn.remote_id();
+                if let Err(e) = check_allow(allow_acc.as_ref(), peer) {
+                    warn!(%peer, error = format!("{e:#}"), "{}", tr!("TUN session error"));
+                    conn.close(0u32.into(), b"denied");
+                    continue;
+                }
+                // Only accept if we are the lower id (tie-break): the other side dials.
+                if should_dial(own_id, peer) {
+                    conn.close(0u32.into(), b"tie-break");
+                    continue;
+                }
+                let tun = tun_acc.clone();
+                let mesh = Arc::clone(&mesh_acc);
+                let tun_name = tun_name_acc.clone();
+                let raise_gate = Arc::clone(&raise_gate_acc);
+                tokio::spawn(async move {
+                    match exchange_peer_vip(&conn, own_vip, false).await {
+                        Ok(vip) => {
+                            spoke_install_direct(
+                                &mesh,
+                                tun,
+                                &tun_name,
+                                own_vip,
+                                peer,
+                                vip,
+                                conn,
+                                mtu,
+                                raise_gate,
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            warn!(%peer, error = format!("{e:#}"), "{}", tr!("TUN session error"));
+                        }
+                    }
+                });
+            }
+        });
+    }
+
     let mut connected_once = false;
     let mut backoff = crate::Backoff::new(crate::RECONNECT_BASE, crate::RECONNECT_MAX);
     let mut delay: Option<Duration> = None;
     loop {
-        // Backoff between sessions (None = first attempt, dial immediately).
         if let Some(d) = delay {
             tokio::select! {
                 _ = time::sleep(d) => {}
@@ -1586,7 +1878,8 @@ pub async fn run_tun_connect(
             }
         }
 
-        println!("{}", styler.info(&tr_fmt!("dialing {0}...", peer_id)));
+        println!("{}", styler.info(&tr_fmt!("dialing {0}...", hub_id)));
+        let session_started = Instant::now();
         let session = async {
             let conn = endpoint
                 .connect(dial_addr.clone(), TUN_ALPN)
@@ -1597,22 +1890,42 @@ pub async fn run_tun_connect(
                         anyhow::Error::new(e).context(tr!("connecting to remote endpoint")),
                     )
                 })?;
-            // The peer's actual VIP (derived default or `--tun-ip` override)
-            // comes from the handshake — never re-derived from its EndpointId.
-            let peer_vip = exchange_peer_vip(&conn, own_vip, true).await?;
+            let hub_vip = exchange_peer_vip(&conn, own_vip, true).await?;
 
-            // Fail closed on datagram support before bridging anything.
+            // Control stream for roster (we are dialer → open_bi).
+            let (ctrl_send, mut ctrl_recv) = conn
+                .open_bi()
+                .await
+                .context(tr!("opening TUN roster control stream"))?;
+            drop(ctrl_send); // hub writes; we only read
+
             let user_mtu = mtu;
-            let mut mtu = choose_mtu(user_mtu, &conn)?;
-            set_tun_mtu(&tun_name, mtu)?;
-            // Whole mesh /16 so traffic for other spokes (not only the hub)
-            // enters this TUN and is relayed by the hub.
+            let mut session_mtu = choose_mtu(user_mtu, &conn)?;
+            set_tun_mtu(&tun_name, session_mtu)?;
             add_mesh_route(&tun_name)?;
-            info!(%peer_id, "{}", tr_fmt!(
+            info!(peer_id = %hub_id, path = path_label(&conn), "{}", tr_fmt!(
                 "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}",
                 conn.max_datagram_size().unwrap_or_default(),
-                mtu
+                session_mtu
             ));
+
+            let (hub_tx, hub_rx) = mpsc::channel::<Bytes>(256);
+            spawn_conn_sender(
+                tun_io.clone(),
+                tun_name.clone(),
+                own_vip,
+                hub_id,
+                conn.clone(),
+                hub_rx,
+                user_mtu,
+                Arc::clone(&raise_gate),
+            );
+            {
+                let mut g = mesh.write().await;
+                g.hub_vip = Some(hub_vip);
+                g.hub_out = Some(hub_tx);
+                g.roster.insert(hub_id, hub_vip);
+            }
 
             if !connected_once {
                 connected_once = true;
@@ -1623,19 +1936,98 @@ pub async fn run_tun_connect(
                 println!(
                     "{}",
                     styler.dim(&tr_fmt!(
-                        "hub {0} is at {1}; other peers in {2} are reachable via the hub",
-                        peer_id.fmt_short(),
-                        peer_vip,
-                        VIP_PREFIX
+                        "hub {0} is at {1} (path {2}); peers may connect directly",
+                        hub_id.fmt_short(),
+                        hub_vip,
+                        path_label(&conn)
                     ))
                 );
                 println!("{}", styler.dim(&tr!("Press Ctrl+C to stop.")));
             }
 
-            let end = run_datagram_loop(
-                &tun, &tun_name, &conn, user_mtu, &mut mtu, own_vip, peer_id, styler,
-            )
-            .await?;
+            // Roster reader
+            let endpoint_r = endpoint.clone();
+            let mesh_r = Arc::clone(&mesh);
+            let tun_r = tun_io.clone();
+            let tun_name_r = tun_name.clone();
+            let allow_r = allow.clone();
+            let raise_gate_r = Arc::clone(&raise_gate);
+            let roster_task = tokio::spawn(async move {
+                loop {
+                    match read_msg(&mut ctrl_recv).await {
+                        Ok(msg) => {
+                            spoke_apply_roster_msg(
+                                endpoint_r.clone(),
+                                Arc::clone(&mesh_r),
+                                tun_r.clone(),
+                                tun_name_r.clone(),
+                                own_id,
+                                own_vip,
+                                msg,
+                                user_mtu,
+                                allow_r.clone(),
+                                Arc::clone(&raise_gate_r),
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            warn!(error = format!("{e:#}"), "{}", tr!("roster control stream closed"));
+                            break;
+                        }
+                    }
+                }
+            });
+
+            // Hub → TUN
+            let tun_h = tun_io.clone();
+            let hub_vip_c = hub_vip;
+            let conn_r = conn.clone();
+            let hub_read = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = conn_r.closed() => break,
+                        r = conn_r.read_datagram() => {
+                            match r {
+                                Ok(data) => {
+                                    let Some(src) = ipv4_src(&data) else { continue };
+                                    if !vip_in_mesh(src) && src != hub_vip_c {
+                                        continue;
+                                    }
+                                    tun_h.send(data).await;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                }
+            });
+
+            let end = loop {
+                tokio::select! {
+                    biased;
+                    _ = tokio::signal::ctrl_c() => {
+                        println!("{}", styler.warn(&tr!("shutting down...")));
+                        break SessionEnd::CtrlC;
+                    }
+                    _ = conn.closed() => {
+                        info!(peer_id = %hub_id, "{}", tr!("peer disconnected"));
+                        break SessionEnd::PeerGone;
+                    }
+                    _ = time::sleep(Duration::from_secs(2)) => {
+                        let _ = refresh_tun_mtu(
+                            &tun_name,
+                            user_mtu,
+                            &conn,
+                            &mut session_mtu,
+                            raise_after_now(&raise_gate),
+                        );
+                    }
+                }
+            };
+
+            roster_task.abort();
+            hub_read.abort();
+            mesh.write().await.clear_hub();
             Ok::<_, anyhow::Error>((end, true))
         }
         .await;
@@ -1643,36 +2035,38 @@ pub async fn run_tun_connect(
         let (end, had_route) = match session {
             Ok(x) => x,
             Err(e) => {
-                // Prefer the full chain (`{:#}`) so iroh/QUIC causes aren't
-                // swallowed by the translated "connecting to remote endpoint"
-                // context alone.
-                warn!(%peer_id, error = format!("{e:#}"), "{}", tr!("TUN session error"));
+                warn!(peer_id = %hub_id, error = format!("{e:#}"), "{}", tr!("TUN session error"));
                 (SessionEnd::PeerGone, false)
             }
         };
-        // Keep the /16 across reconnects; only tear it down when leaving.
-        if matches!(end, SessionEnd::CtrlC) && had_route {
-            if let Err(e) = del_mesh_route(&tun_name) {
-                warn!(%peer_id, error = %e, "{}", tr!("could not remove peer route"));
+        if matches!(end, SessionEnd::CtrlC) {
+            if had_route {
+                let _ = del_mesh_route(&tun_name);
             }
+            break;
         }
-
-        match end {
-            SessionEnd::CtrlC => break,
-            SessionEnd::PeerGone => {
-                let next = backoff.next();
-                delay = Some(next);
-                info!(%peer_id, "{}", tr_fmt!("reconnecting in {0}", format!("{next:?}")));
-            }
+        let lived = session_started.elapsed();
+        if let Some(next) = backoff.after_session(lived, crate::MIN_STABLE_CONN) {
+            delay = Some(next);
+            info!(
+                peer_id = %hub_id,
+                lived_ms = lived.as_millis() as u64,
+                "{}",
+                tr_fmt!("reconnecting in {0}", format!("{next:?}"))
+            );
+        } else {
+            // Stable session ended — redial without climbing backoff, but
+            // still take the base delay so we don't hot-loop on a flapping hub.
+            let next = crate::RECONNECT_BASE;
+            delay = Some(next);
+            info!(peer_id = %hub_id, "{}", tr_fmt!("reconnecting in {0}", format!("{next:?}")));
         }
     }
     let _ = del_mesh_route(&tun_name);
-    // Close gracefully instead of dropping the socket: the peer's datagram
-    // loop then fails immediately (route cleanup on the serve side is
-    // instant) and iroh doesn't log its ungraceful-drop error.
     endpoint.close().await;
     Ok(())
 }
+
 
 #[cfg(test)]
 mod tests {
