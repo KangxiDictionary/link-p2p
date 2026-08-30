@@ -71,4 +71,12 @@ mod tests {
         let a = host_port("http://127.0.0.1:3340").expect("parse");
         assert_eq!(a.port(), 3340);
     }
+
+    #[test]
+    fn parses_ipv6_literal() {
+        let a = host_port("http://[::1]:3340").expect("parse");
+        assert_eq!(a.port(), 3340);
+        assert!(a.ip().is_ipv6());
+    }
 }
+

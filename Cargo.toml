@@ -1,6 +1,6 @@
 [package]
 name = "link-p2p"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Minimal TCP-over-QUIC forwarder on iroh, with a point-to-point TUN mode for whole-machine IP reachability"
 license = "GPL-3.0-or-later"

@@ -34,15 +34,25 @@ impl ColorMode {
 /// Parses the raw `--color` value from argv (used before clap parses, so the
 /// help/error output is styled correctly on the first pass).
 pub fn detect_color_mode() -> ColorMode {
-    let mut args = std::env::args().skip(1);
+    detect_color_mode_from(std::env::args().skip(1))
+}
+
+/// Same as [`detect_color_mode`], but takes an explicit arg iterator (for tests).
+pub fn detect_color_mode_from<I, S>(args: I) -> ColorMode
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
+        let arg = arg.as_ref();
         if let Some(value) = arg.strip_prefix("--color=") {
             if let Some(mode) = parse(value) {
                 return mode;
             }
         } else if arg == "--color" {
             if let Some(value) = args.next() {
-                if let Some(mode) = parse(&value) {
+                if let Some(mode) = parse(value.as_ref()) {
                     return mode;
                 }
             }
@@ -126,5 +136,46 @@ impl Styler {
     /// Secondary / hints (dim).
     pub fn dim(&self, text: &str) -> String {
         self.apply(text, &Style::new().dim())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_equals_form() {
+        assert_eq!(
+            detect_color_mode_from(["--color=always"]),
+            ColorMode::Always
+        );
+        assert_eq!(detect_color_mode_from(["--color=never"]), ColorMode::Never);
+        assert_eq!(detect_color_mode_from(["--color=auto"]), ColorMode::Auto);
+    }
+
+    #[test]
+    fn detects_separate_arg_form() {
+        assert_eq!(
+            detect_color_mode_from(["--color", "always"]),
+            ColorMode::Always
+        );
+        assert_eq!(
+            detect_color_mode_from(["serve", "--color", "never", "--forward", "1:2"]),
+            ColorMode::Never
+        );
+    }
+
+    #[test]
+    fn unknown_or_missing_falls_back_to_auto() {
+        assert_eq!(detect_color_mode_from(["--color=wat"]), ColorMode::Auto);
+        assert_eq!(detect_color_mode_from(["--color"]), ColorMode::Auto);
+        assert_eq!(detect_color_mode_from(["serve", "--quiet"]), ColorMode::Auto);
+    }
+
+    #[test]
+    fn parse_is_case_sensitive_like_clap() {
+        // Match clap ValueEnum: only lowercase tokens.
+        assert_eq!(parse("ALWAYS"), None);
+        assert_eq!(parse("always"), Some(ColorMode::Always));
     }
 }

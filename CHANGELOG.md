@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-31
+
+### Fixed
+
+- **`-q/--quiet` ignored by `serve` and `tun`**: banners and path-upgrade
+  notices now go through `Ui` / real `ui.quiet` (was hardcoded `false`).
+  Machine lines (`ENDPOINT_ID=`, `contact list` TSV, `contact code`) stay on
+  stdout under `-q`.
+- **`help <bad>` exit path**: localized + `exit::USAGE` (no bare `eprintln!` /
+  hardcoded `2`).
+- **Config parse failures no longer silent**: bad `config.toml` warns and
+  falls back to defaults (`config::load_or_default`).
+- **SSRF**: also block RFC 6598 CGNAT `100.64.0.0/10`.
+- **`tun_roster` errors localized** (were the only module with bare English
+  `bail!` strings).
+- **`call` dialer hung after `open_bi`**: dial-side `call` no longer registers
+  `alpns` / `Router` (same shape as `connect`). Waiter keeps serve-like accept;
+  dialer `--forward` accepts streams on the outbound connection. Also
+  `call --stdio` UI banners go to stderr so stdout stays data-only.
+- **`open_bi` hang no longer silent**: stream open waits at most 5s, then logs
+  connection stats/paths/`close_reason`, closes **only that connection**, and
+  waits for redial. `call` dialer now runs a reconnect watcher (like
+  `connect`) so redial actually happens; waiter accepts replace the slot on
+  every new inbound connection. Reconnect aborts the previous path-monitor /
+  forward-accept tasks so stats logs are not duplicated.
+
+### Added
+
+- **`config init` / `config path`**: write/show `~/.config/link-p2p/config.toml`
+  (was save-only / hand-edit only).
+- **Short-code check digit**: Crockford codes get a trailing check character
+  (typo detection); legacy 52-char codes still parse.
+- **Multi-relay TCP latency ordering** for all commands (was `call`-only).
+
 ### Changed
 
 - **Breaking (stream ALPN `tcp-forward/0` → `/1`)**: fixed-forward streams

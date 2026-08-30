@@ -54,7 +54,24 @@ pub fn load(path: &Path) -> Result<UserConfig> {
     toml::from_str(&text).with_context(|| tr_fmt!("parsing config {0}", path.display()))
 }
 
-#[allow(dead_code)] // written by tests / future `config init`
+/// Like [`load`], but on parse/IO errors log a warning and return defaults
+/// instead of failing the whole process (CLI still works; bad config is
+/// ignored rather than silent).
+pub fn load_or_default(path: &Path) -> UserConfig {
+    match load(path) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::warn!(
+                error = format!("{e:#}"),
+                path = %path.display(),
+                "{}",
+                tr!("failed to parse config; using defaults")
+            );
+            UserConfig::default()
+        }
+    }
+}
+
 pub fn save(path: &Path, cfg: &UserConfig) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)

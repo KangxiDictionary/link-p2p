@@ -1,19 +1,26 @@
 //! Symmetric `call`: both peers publish and dial (tie-break like mesh roster).
 //!
-//! Resolves a contact name / EndpointId / short code, merges config relays with
-//! n0 by default, then either dials or waits — same ALPN as stream forward.
+//! After EndpointId tie-break the roles match stream mode:
+//! - **Dialer** = `connect` (no local `alpns` / `Router` — those starved outbound
+//!   STREAM frames in early `call` builds)
+//! - **Waiter** = `serve` (`alpns` + `Router` accepting the peer)
+//!
+//! The dialer runs a reconnect watcher (same idea as `connect --listen`) so an
+//! `open_bi` hang can close **only** that connection and redial without killing
+//! the Endpoint.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use iroh::endpoint::Connection;
+use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use iroh::{Endpoint, EndpointId, SecretKey};
+use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
+use tokio::time::{timeout, Instant};
 use tracing::{info, warn};
 
 use crate::config::{self, UserConfig};
@@ -25,9 +32,9 @@ use crate::relay_probe;
 use crate::style::Styler;
 use crate::tun_roster::should_dial;
 use crate::{
-    build_dial_addr, build_endpoint, install_extra_relays, open_stream_wait, reject_relay_only_with_to_addr,
-    spawn_path_monitor, wait_online, ConnSlot, PingHandler, ServeMode, TransportTune, Ui, ALPN,
-    PING_ALPN,
+    build_dial_addr, build_endpoint, handle_forward_stream, install_extra_relays, open_stream_wait,
+    reject_relay_only_with_to_addr, spawn_path_monitor, spawn_reconnect_watcher, wait_online,
+    ConnSlot, PingHandler, ServeMode, TransportTune, Ui, ALPN, PING_ALPN,
 };
 
 /// How the local side of a call presents traffic.
@@ -55,7 +62,7 @@ pub async fn run_call(
     ui: Ui,
     styler: Styler,
 ) -> Result<()> {
-    let user_cfg = config::load(&config::config_path()).unwrap_or_default();
+    let user_cfg = config::load_or_default(&config::config_path());
     let book = contacts::load(&contacts::contacts_path()).unwrap_or_default();
     let peer = contacts::resolve(&book, to)?;
     let label = peer
@@ -74,28 +81,9 @@ pub async fn run_call(
     ui.line(styler.info(&tr_fmt!("calling {0}...", label)));
     let relays = relay_probe::order_by_connect_latency(&relays).await;
 
-    let endpoint = build_endpoint(
-        secret_key,
-        &relays,
-        keepalive,
-        idle_timeout,
-        &tune,
-        relay_only,
-        no_n0,
-    )?
-    .alpns(vec![ALPN.to_vec(), PING_ALPN.to_vec()])
-    .bind()
-    .await
-    .map_err(|e| {
-        exit::coded(
-            exit::CONNECT,
-            anyhow::Error::new(e).context(tr!("binding endpoint")),
-        )
-    })?;
-    wait_online(&endpoint).await?;
-    install_extra_relays(&endpoint, &relays, no_n0).await?;
-
-    let own_id = endpoint.id();
+    // Know the role before bind: dialer must NOT register accept ALPNs / Router
+    // (that path hung write_stream_hello — no STREAM frames left the dialer).
+    let own_id = secret_key.public();
     let we_dial = should_dial(own_id, peer.id);
     ui.line(styler.dim(&if we_dial {
         tr!("we dial (EndpointId tie-break)")
@@ -107,34 +95,68 @@ pub async fn run_call(
         contacts::encode_short_code(own_id)
     )));
 
+    let builder = build_endpoint(
+        secret_key,
+        &relays,
+        keepalive,
+        idle_timeout,
+        &tune,
+        relay_only,
+        no_n0,
+    )?;
+    let endpoint = if we_dial {
+        // Pure client, same as `connect`.
+        builder.bind().await
+    } else {
+        builder
+            .alpns(vec![ALPN.to_vec(), PING_ALPN.to_vec()])
+            .bind()
+            .await
+    }
+    .map_err(|e| {
+        exit::coded(
+            exit::CONNECT,
+            anyhow::Error::new(e).context(tr!("binding endpoint")),
+        )
+    })?;
+    wait_online(&endpoint).await?;
+    install_extra_relays(&endpoint, &relays, no_n0).await?;
+
     let slot = ConnSlot::new(None);
     let tasks: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
-    let semaphore = Arc::new(Semaphore::new(if max_conns == 0 {
-        usize::MAX
-    } else {
-        max_conns
-    }));
+    let semaphore = crate::conn_semaphore(max_conns);
 
-    let handler = CallAcceptHandler {
-        expected: peer.id,
-        forward,
-        slot: slot.clone(),
-        semaphore: semaphore.clone(),
-        tasks: tasks.clone(),
-        endpoint: endpoint.clone(),
-        relay_only,
-        styler,
-        quiet: ui.quiet,
+    // Waiter only: accept inbound like `serve`.
+    let router = if we_dial {
+        None
+    } else {
+        let handler = CallAcceptHandler {
+            expected: peer.id,
+            forward,
+            slot: slot.clone(),
+            semaphore: semaphore.clone(),
+            tasks: tasks.clone(),
+            endpoint: endpoint.clone(),
+            relay_only,
+            styler,
+            quiet: ui.quiet,
+            path_monitor: Arc::new(Mutex::new(None)),
+        };
+        Some(
+            Router::builder(endpoint.clone())
+                .accept(ALPN, handler)
+                .accept(PING_ALPN, PingHandler)
+                .spawn(),
+        )
     };
-    let router = Router::builder(endpoint.clone())
-        .accept(ALPN, handler)
-        .accept(PING_ALPN, PingHandler)
-        .spawn();
+
+    let dial_addr = build_dial_addr(peer.id, &relays, &addrs)?;
+    let path_monitor: Arc<Mutex<Option<JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+    let forward_loop: Arc<Mutex<Option<JoinHandle<()>>>> = Arc::new(Mutex::new(None));
 
     if we_dial {
-        let dial_addr = build_dial_addr(peer.id, &relays, &addrs)?;
         let conn = endpoint
-            .connect(dial_addr, ALPN)
+            .connect(dial_addr.clone(), ALPN)
             .await
             .map_err(|e| {
                 exit::coded(
@@ -142,15 +164,36 @@ pub async fn run_call(
                     anyhow::Error::new(e).context(tr!("connecting to remote endpoint")),
                 )
             })?;
-        spawn_path_monitor(
-            conn.clone(),
+        install_dialer_session(
+            &conn,
             peer.id,
+            &endpoint,
+            relay_only,
+            styler,
+            ui.quiet,
+            forward,
+            &semaphore,
+            &tasks,
+            &path_monitor,
+            &forward_loop,
+        );
+        slot.replace(Some(conn));
+        // Same as `connect`: when the conn dies (incl. open_bi timeout close),
+        // redial and swap the slot — without closing the Endpoint.
+        spawn_call_dialer_watcher(
+            slot.clone(),
             endpoint.clone(),
+            dial_addr,
+            peer.id,
+            forward,
+            semaphore.clone(),
+            tasks.clone(),
+            path_monitor.clone(),
+            forward_loop.clone(),
             relay_only,
             styler,
             ui.quiet,
         );
-        slot.replace(Some(conn));
     } else {
         ui.line(styler.info(&tr!("waiting for peer...")));
         let mut rx = slot.subscribe();
@@ -166,23 +209,176 @@ pub async fn run_call(
     ui.line(styler.ok(&tr_fmt!("connected to {0}", label)));
 
     let result = match local {
-        CallLocal::Listen(addr) => {
-            run_local_listen(addr, &slot, semaphore, ui, styler).await
-        }
+        CallLocal::Listen(addr) => run_local_listen(addr, &slot, semaphore, ui, styler).await,
         #[cfg(unix)]
         CallLocal::Stdio => {
             ui.line(styler.ok(&tr!("connected. piping stdin/stdout to the remote peer.")));
             let (mut send, recv) = open_stream_wait(&slot).await?;
-            pipe::write_stream_hello(&mut send).await?;
+            write_stream_hello_timed(&mut send, &slot).await?;
             pipe::pipe_stdio(send, recv).await
         }
     };
 
-    router.shutdown().await.ok();
+    if let Some(router) = router {
+        router.shutdown().await.ok();
+    }
     let pending = std::mem::take(&mut *tasks.lock().unwrap_or_else(|e| e.into_inner()));
     pipe::drain_tasks(pending).await;
     endpoint.close().await;
     result
+}
+
+fn install_dialer_session(
+    conn: &Connection,
+    peer: EndpointId,
+    endpoint: &Endpoint,
+    relay_only: bool,
+    styler: Styler,
+    quiet: bool,
+    forward: Option<SocketAddr>,
+    semaphore: &Arc<Semaphore>,
+    tasks: &Arc<Mutex<Vec<JoinHandle<()>>>>,
+    path_monitor: &Arc<Mutex<Option<JoinHandle<()>>>>,
+    forward_loop: &Arc<Mutex<Option<JoinHandle<()>>>>,
+) {
+    // Abort the previous session's background tasks so reconnect does not
+    // leave duplicate path-stats / accept loops running on a dead conn.
+    replace_bg_task(
+        path_monitor,
+        Some(spawn_path_monitor(
+            conn.clone(),
+            peer,
+            endpoint.clone(),
+            relay_only,
+            styler,
+            quiet,
+        )),
+    );
+    let next_forward = forward.map(|target| {
+        spawn_forward_accept_loop(conn.clone(), target, semaphore.clone(), tasks.clone())
+    });
+    replace_bg_task(forward_loop, next_forward);
+}
+
+fn replace_bg_task(slot: &Arc<Mutex<Option<JoinHandle<()>>>>, next: Option<JoinHandle<()>>) {
+    let mut g = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(prev) = g.take() {
+        prev.abort();
+    }
+    *g = next;
+}
+
+/// Dialer-side reconnect: like [`spawn_reconnect_watcher`], but also restarts
+/// path monitor + optional `--forward` accept loop on the new connection.
+#[allow(clippy::too_many_arguments)]
+fn spawn_call_dialer_watcher(
+    slot: ConnSlot,
+    endpoint: Endpoint,
+    dial_addr: EndpointAddr,
+    peer: EndpointId,
+    forward: Option<SocketAddr>,
+    semaphore: Arc<Semaphore>,
+    tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    path_monitor: Arc<Mutex<Option<JoinHandle<()>>>>,
+    forward_loop: Arc<Mutex<Option<JoinHandle<()>>>>,
+    relay_only: bool,
+    styler: Styler,
+    quiet: bool,
+) {
+    // Reuse connect's watcher for the redial loop, then a side task that
+    // watches slot swaps and attaches forward/monitor to each new conn.
+    spawn_reconnect_watcher(&slot, &endpoint, dial_addr, peer);
+
+    tokio::spawn(async move {
+        let mut rx = slot.subscribe();
+        let mut seen = rx.borrow_and_update().clone();
+        // Initial conn already installed monitors in run_call.
+        loop {
+            if rx.changed().await.is_err() {
+                break;
+            }
+            let next = rx.borrow_and_update().clone();
+            match (&seen, &next) {
+                (_, Some(conn))
+                    if seen.as_ref().map(|c| c.stable_id()) != Some(conn.stable_id()) =>
+                {
+                    install_dialer_session(
+                        conn,
+                        peer,
+                        &endpoint,
+                        relay_only,
+                        styler,
+                        quiet,
+                        forward,
+                        &semaphore,
+                        &tasks,
+                        &path_monitor,
+                        &forward_loop,
+                    );
+                }
+                _ => {}
+            }
+            seen = next;
+        }
+    });
+}
+
+/// `write_stream_hello` with a deadline so a hung send surfaces diagnostics
+/// instead of looking like a silent pipe.
+async fn write_stream_hello_timed(send: &mut SendStream, slot: &ConnSlot) -> Result<()> {
+    const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+    let start = Instant::now();
+    match timeout(HELLO_TIMEOUT, pipe::write_stream_hello(send)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => {
+            let conn = slot.borrow();
+            let stats = conn.as_ref().map(Connection::stats);
+            let close = conn.as_ref().and_then(Connection::close_reason);
+            warn!(
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                close = ?close,
+                udp_tx = stats.as_ref().map(|s| s.udp_tx.bytes),
+                udp_rx = stats.as_ref().map(|s| s.udp_rx.bytes),
+                "stream hello write timed out"
+            );
+            Err(anyhow::anyhow!(tr!(
+                "timed out writing stream hello (open_bi ok but no STREAM frames sent) — check dialer is not also running an accept Router on the same ALPN"
+            )))
+        }
+    }
+}
+
+fn spawn_forward_accept_loop(
+    connection: Connection,
+    target: SocketAddr,
+    semaphore: Arc<Semaphore>,
+    tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let peer = connection.remote_id();
+        loop {
+            let permit = match semaphore.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+            let (send, recv) = match connection.accept_bi().await {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(%peer, error = %e, "{}", tr!("connection ended"));
+                    break;
+                }
+            };
+            let mode = ServeMode::Forward(target);
+            let task = tokio::spawn(async move {
+                let _permit = permit;
+                if let Err(e) = handle_forward_stream(mode, send, recv).await {
+                    warn!(%peer, error = %e, "{}", tr!("stream error"));
+                }
+            });
+            crate::push_task(&tasks, task);
+        }
+    })
 }
 
 fn resolve_relay_opts(
@@ -228,7 +424,7 @@ async fn run_local_listen(
                     let result = async {
                         let _permit = semaphore.acquire_owned().await?;
                         let (mut send, recv) = open_stream_wait(&slot).await?;
-                        pipe::write_stream_hello(&mut send).await?;
+                        write_stream_hello_timed(&mut send, &slot).await?;
                         pipe::pipe_streams(tcp_stream, send, recv).await
                     }
                     .await;
@@ -258,6 +454,7 @@ struct CallAcceptHandler {
     relay_only: bool,
     styler: Styler,
     quiet: bool,
+    path_monitor: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl std::fmt::Debug for CallAcceptHandler {
@@ -279,21 +476,22 @@ impl ProtocolHandler for CallAcceptHandler {
             return Ok(());
         }
         info!(%peer, "{}", tr!("connection opened"));
-        spawn_path_monitor(
-            connection.clone(),
-            peer,
-            self.endpoint.clone(),
-            self.relay_only,
-            self.styler,
-            self.quiet,
+        replace_bg_task(
+            &self.path_monitor,
+            Some(spawn_path_monitor(
+                connection.clone(),
+                peer,
+                self.endpoint.clone(),
+                self.relay_only,
+                self.styler,
+                self.quiet,
+            )),
         );
-        // First matching connection fills the slot for our local listen/stdio.
-        if self.slot.borrow().is_none() {
-            self.slot.replace(Some(connection.clone()));
-        }
+        // Always prefer the newest inbound connection (covers peer redial
+        // after an open_bi timeout closed the previous one).
+        self.slot.replace(Some(connection.clone()));
 
         let Some(target) = self.forward else {
-            // No --forward: keep connection alive for outbound streams only.
             connection.closed().await;
             return Ok(());
         };
@@ -303,7 +501,7 @@ impl ProtocolHandler for CallAcceptHandler {
                 Ok(p) => p,
                 Err(_) => break,
             };
-            let (send, recv) = match connection.accept_bi().await {
+            let (send, recv): (SendStream, RecvStream) = match connection.accept_bi().await {
                 Ok(p) => p,
                 Err(e) => {
                     warn!(%peer, error = %e, "{}", tr!("connection ended"));
@@ -313,14 +511,11 @@ impl ProtocolHandler for CallAcceptHandler {
             let mode = ServeMode::Forward(target);
             let task = tokio::spawn(async move {
                 let _permit = permit;
-                if let Err(e) = crate::handle_forward_stream(mode, send, recv).await {
+                if let Err(e) = handle_forward_stream(mode, send, recv).await {
                     warn!(%peer, error = %e, "{}", tr!("stream error"));
                 }
             });
-            match self.tasks.lock() {
-                Ok(mut g) => g.push(task),
-                Err(poisoned) => poisoned.into_inner().push(task),
-            }
+            crate::push_task(&self.tasks, task);
         }
         connection.closed().await;
         Ok(())

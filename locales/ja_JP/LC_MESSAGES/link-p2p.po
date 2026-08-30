@@ -467,6 +467,12 @@ msgstr "データグラムエラー；一時的なパス切り替えと見なし
 msgid "connection lost; waiting for reconnect"
 msgstr "接続が切断されました。再接続を待機しています"
 
+msgid "open_bi timed out (connection still open; see stats/paths)"
+msgstr "open_bi timed out (connection still open; see stats/paths)"
+
+msgid "open_bi timed out; waiting for reconnect"
+msgstr "open_bi timed out; waiting for reconnect"
+
 msgid "reconnected to peer"
 msgstr "ピアに再接続しました"
 
@@ -997,6 +1003,48 @@ msgstr "serializing config"
 
 msgid "serializing contacts"
 msgstr "serializing contacts"
+
+msgid "timed out writing stream hello (open_bi ok but no STREAM frames sent) — check dialer is not also running an accept Router on the same ALPN"
+msgstr "timed out writing stream hello (open_bi ok but no STREAM frames sent) — check dialer is not also running an accept Router on the same ALPN"
+
+msgid "unrecognized subcommand '{0}'"
+msgstr "unrecognized subcommand '{0}'"
+
+msgid "failed to parse config; using defaults"
+msgstr "failed to parse config; using defaults"
+
+msgid "short code check digit mismatch (typo?)"
+msgstr "short code check digit mismatch (typo?)"
+
+msgid "Read or write ~/.config/link-p2p/config.toml defaults."
+msgstr "Read or write ~/.config/link-p2p/config.toml defaults."
+
+msgid "Write a default config.toml (refuses to overwrite unless --force)."
+msgstr "Write a default config.toml (refuses to overwrite unless --force)."
+
+msgid "Replace an existing config file."
+msgstr "Replace an existing config file."
+
+msgid "Print the resolved config file path."
+msgstr "Print the resolved config file path."
+
+msgid "config already exists at {0} (use --force to overwrite)"
+msgstr "config already exists at {0} (use --force to overwrite)"
+
+msgid "wrote {0}"
+msgstr "wrote {0}"
+
+msgid "roster entry truncated"
+msgstr "roster entry truncated"
+
+msgid "invalid EndpointId in roster"
+msgstr "invalid EndpointId in roster"
+
+msgid "bad roster magic"
+msgstr "bad roster magic"
+
+msgid "unknown roster msg type {0}"
+msgstr "unknown roster msg type {0}"
 
 msgid "waiting for peer..."
 msgstr "waiting for peer..."

@@ -461,6 +461,12 @@ msgstr "datagram 错误；假定为瞬时路径切换（iroh 可能正在迁移�
 msgid "connection lost; waiting for reconnect"
 msgstr "连接已断开；等待重连"
 
+msgid "open_bi timed out (connection still open; see stats/paths)"
+msgstr "open_bi 超时（连接仍在；见 stats/paths）"
+
+msgid "open_bi timed out; waiting for reconnect"
+msgstr "open_bi 超时；等待重连"
+
 msgid "reconnected to peer"
 msgstr "已重新连接到对端"
 
@@ -1012,6 +1018,48 @@ msgstr "序列化配置"
 
 msgid "serializing contacts"
 msgstr "序列化联系人"
+
+msgid "timed out writing stream hello (open_bi ok but no STREAM frames sent) — check dialer is not also running an accept Router on the same ALPN"
+msgstr "写入 stream hello 超时（open_bi 成功但未发出 STREAM 帧）——请确认拨号侧未在同一 ALPN 上同时挂着 accept Router"
+
+msgid "unrecognized subcommand '{0}'"
+msgstr "无法识别的子命令 '{0}'"
+
+msgid "failed to parse config; using defaults"
+msgstr "解析配置文件失败，使用默认配置"
+
+msgid "short code check digit mismatch (typo?)"
+msgstr "短码校验位不匹配（是否打错？）"
+
+msgid "Read or write ~/.config/link-p2p/config.toml defaults."
+msgstr "读取或写入 ~/.config/link-p2p/config.toml 默认项。"
+
+msgid "Write a default config.toml (refuses to overwrite unless --force)."
+msgstr "写入默认 config.toml（除非 --force，否则不覆盖已有文件）。"
+
+msgid "Replace an existing config file."
+msgstr "覆盖已有配置文件。"
+
+msgid "Print the resolved config file path."
+msgstr "打印解析后的配置文件路径。"
+
+msgid "config already exists at {0} (use --force to overwrite)"
+msgstr "配置已存在于 {0}（使用 --force 覆盖）"
+
+msgid "wrote {0}"
+msgstr "已写入 {0}"
+
+msgid "roster entry truncated"
+msgstr "roster 条目被截断"
+
+msgid "invalid EndpointId in roster"
+msgstr "roster 中的 EndpointId 无效"
+
+msgid "bad roster magic"
+msgstr "roster magic 不正确"
+
+msgid "unknown roster msg type {0}"
+msgstr "未知 roster 消息类型 {0}"
 
 msgid "waiting for peer..."
 msgstr "等待对端……"

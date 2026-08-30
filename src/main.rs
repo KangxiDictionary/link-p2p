@@ -205,6 +205,18 @@ enum ContactCommand {
     Code,
 }
 
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Write a default `config.toml` (refuses to overwrite unless `--force`).
+    Init {
+        /// Replace an existing config file.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Print the resolved config file path.
+    Path,
+}
+
 /// Machine-oriented output for status commands (`ping`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum OutputFormat {
@@ -230,8 +242,8 @@ pub(crate) struct TransportTune {
 /// User-facing status lines: respect `-q` and keep stdout clean in `--stdio`.
 #[derive(Clone, Copy)]
 pub(crate) struct Ui {
-    quiet: bool,
-    stderr_only: bool,
+    pub(crate) quiet: bool,
+    pub(crate) stderr_only: bool,
 }
 
 impl Ui {
@@ -244,6 +256,23 @@ impl Ui {
         } else {
             println!("{}", s.as_ref());
         }
+    }
+}
+
+/// Shared `--max-conns` → semaphore mapping (`0` = unlimited).
+pub(crate) fn conn_semaphore(max_conns: usize) -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(if max_conns == 0 {
+        usize::MAX
+    } else {
+        max_conns
+    }))
+}
+
+/// Push a JoinHandle into a shared task list, surviving a poisoned mutex.
+pub(crate) fn push_task(tasks: &Mutex<Vec<JoinHandle<()>>>, task: JoinHandle<()>) {
+    match tasks.lock() {
+        Ok(mut g) => g.push(task),
+        Err(poisoned) => poisoned.into_inner().push(task),
     }
 }
 
@@ -367,6 +396,11 @@ enum Command {
     Contact {
         #[command(subcommand)]
         command: ContactCommand,
+    },
+    /// Read or write `~/.config/link-p2p/config.toml` defaults.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
     },
     /// Print a shell completion script to stdout.
     ///
@@ -777,6 +811,27 @@ fn localized_command() -> clap::Command {
                         .about(tr!("Print this node's short code (and EndpointId)."))
                 })
         })
+        .mut_subcommand("config", |s| {
+            s.disable_help_flag(true)
+                .arg(help_arg())
+                .about(tr!("Read or write ~/.config/link-p2p/config.toml defaults."))
+                .mut_subcommand("init", |ss| {
+                    ss.disable_help_flag(true)
+                        .arg(help_arg())
+                        .about(tr!(
+                            "Write a default config.toml (refuses to overwrite unless --force)."
+                        ))
+                        .mut_arg(
+                            "force",
+                            |a| helptext::set_help(a, &tr!("Replace an existing config file.")),
+                        )
+                })
+                .mut_subcommand("path", |ss| {
+                    ss.disable_help_flag(true)
+                        .arg(help_arg())
+                        .about(tr!("Print the resolved config file path."))
+                })
+        })
         .mut_subcommand("completions", |s| {
             s.disable_help_flag(true)
                 .arg(help_arg())
@@ -891,8 +946,10 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             target = match target.find_subcommand_mut(name) {
                 Some(c) => c,
                 None => {
-                    eprintln!("error: unrecognized subcommand '{name}'");
-                    std::process::exit(2);
+                    return Err(exit::coded(
+                        exit::USAGE,
+                        anyhow::anyhow!(tr_fmt!("unrecognized subcommand '{0}'", name)),
+                    ));
                 }
             };
         }
@@ -951,8 +1008,10 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
 
     let styler = style::apply_color_mode(color_mode);
     // Load ~/.config/link-p2p/config.toml defaults (CLI still wins / appends).
-    let user_cfg = config::load(&config::config_path()).unwrap_or_default();
+    let user_cfg = config::load_or_default(&config::config_path());
     cli.relay = config::merge_relay_urls(&cli.relay, &user_cfg);
+    // Bias multi-relay dial order for every command (not just `call`).
+    cli.relay = relay_probe::order_by_connect_latency(&cli.relay).await;
     cli.no_n0_relays = cli.no_n0_relays || user_cfg.relays.no_n0;
     if !cli.relay_only {
         cli.relay_only = user_cfg.relays.relay_only;
@@ -1022,6 +1081,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                 Duration::from_secs(cli.keepalive),
                 Duration::from_secs(cli.idle_timeout),
                 tune,
+                ui,
                 styler,
             )
             .await
@@ -1113,6 +1173,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                         Duration::from_secs(cli.idle_timeout),
                         tune,
                         allow,
+                        ui,
                         styler,
                     )
                     .await
@@ -1140,6 +1201,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                         Duration::from_secs(cli.idle_timeout),
                         tune,
                         allow,
+                        ui,
                         styler,
                     )
                     .await
@@ -1199,6 +1261,11 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                     ));
                 }
             };
+            #[cfg(unix)]
+            let ui = Ui {
+                quiet: ui.quiet,
+                stderr_only: matches!(local, call::CallLocal::Stdio),
+            };
             call::run_call(
                 secret_key,
                 &to,
@@ -1253,6 +1320,9 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                 if book.contacts.is_empty() {
                     ui.line(styler.dim(&tr!("no contacts yet — use `contact add` or pair a short code")));
                 } else {
+                    // Machine-readable TSV for scripts (`name\tid`), like
+                    // `contact code` / `ping --format json`: always stdout,
+                    // not via `ui.line` — quiet must not suppress data output.
                     for (name, c) in &book.contacts {
                         println!("{name}\t{}", c.id);
                     }
@@ -1260,9 +1330,34 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                 Ok(())
             }
             ContactCommand::Code => {
+                // Machine-readable identity lines for scripts / pairing —
+                // always stdout, even under `-q` (same rule as ENDPOINT_ID=).
                 let id = secret_key.public();
                 println!("ENDPOINT_ID={id}");
                 println!("SHORT_CODE={}", contacts::encode_short_code(id));
+                Ok(())
+            }
+        },
+        Command::Config { command } => match command {
+            ConfigCommand::Path => {
+                // Machine-readable path for scripts — always stdout.
+                println!("{}", config::config_path().display());
+                Ok(())
+            }
+            ConfigCommand::Init { force } => {
+                let path = config::config_path();
+                if path.exists() && !force {
+                    return Err(exit::coded(
+                        exit::USAGE,
+                        anyhow::anyhow!(tr_fmt!(
+                            "config already exists at {0} (use --force to overwrite)",
+                            path.display()
+                        )),
+                    ));
+                }
+                let cfg = config::UserConfig::default();
+                config::save(&path, &cfg)?;
+                ui.line(styler.ok(&tr_fmt!("wrote {0}", path.display())));
                 Ok(())
             }
         },
@@ -1911,6 +2006,7 @@ async fn run_serve(
     keepalive: Duration,
     idle_timeout: Duration,
     tune: TransportTune,
+    ui: Ui,
     styler: Styler,
 ) -> Result<()> {
     let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune, relay_only, no_n0_relays)?
@@ -1922,51 +2018,52 @@ async fn run_serve(
     wait_online(&endpoint).await?;
     install_extra_relays(&endpoint, relay, no_n0_relays).await?;
 
-    println!("{}", styler.banner("link-p2p serve"));
+    ui.line(styler.banner("link-p2p serve"));
     match mode {
-        ServeMode::Forward(target) => println!(
+        ServeMode::Forward(target) => ui.line(format!(
             "  {}",
             tr_fmt!("forwarding P2P connections to: {0}", target)
-        ),
+        )),
         ServeMode::Proxy { allow_private } => {
-            println!(
+            ui.line(format!(
                 "  {}",
                 styler.info(&tr!(
                     "proxy mode: dialing the target address from each stream's header"
                 ))
-            );
+            ));
             if !allow_private {
-                println!(
+                ui.line(format!(
                     "  {}",
                     styler.warn(&tr!(
                         "proxy targets in private/loopback ranges are blocked (use --allow-private to permit)"
                     ))
-                );
+                ));
             }
         }
     }
     // The whitelist is an important security property; surface it in the
     // banner instead of hiding it in --help.
     if !allowed.is_empty() {
-        println!(
+        ui.line(format!(
             "  {}",
             styler.info(&tr_fmt!(
                 "only accepting connections from {0} allowed peer(s)",
                 allowed.len()
             ))
-        );
+        ));
     }
-    println!(
+    ui.line(format!(
         "  {}",
         styler.dim(&tr!(
             "your EndpointId (give this to peers running `connect --to`):"
         ))
-    );
+    ));
     let ep_hex = endpoint.id().to_string();
-    println!("    {}", styler.highlight(&ep_hex));
+    ui.line(format!("    {}", styler.highlight(&ep_hex)));
+    // Machine-readable for scripts / e2e — always stdout, even under `-q`.
     println!("ENDPOINT_ID={ep_hex}");
-    println!();
-    println!("{}", styler.dim(&tr!("Press Ctrl+C to stop.")));
+    ui.line("");
+    ui.line(styler.dim(&tr!("Press Ctrl+C to stop.")));
 
     // Every per-stream forwarder is our own spawned task; the router's
     // accept loop doesn't know about them, so keep the handles here for the
@@ -1980,24 +2077,16 @@ async fn run_serve(
             Some(Arc::new(allowed.into_iter().collect()))
         },
         // 0 = unlimited. usize::MAX keeps the acquire() call shape uniform.
-        semaphore: Arc::new(Semaphore::new(if max_conns == 0 {
-            usize::MAX
-        } else {
-            max_conns
-        })),
+        semaphore: conn_semaphore(max_conns),
         // A second, independent cap on *connections* (not streams): an idle
         // connection costs memory + an accept task even without any stream,
         // so bound how many such connections a flood of dials can open.
-        conn_semaphore: Arc::new(Semaphore::new(if max_conns == 0 {
-            usize::MAX
-        } else {
-            max_conns
-        })),
+        conn_semaphore: conn_semaphore(max_conns),
         tasks: tasks.clone(),
         endpoint: endpoint.clone(),
         relay_only,
         styler,
-        quiet: false,
+        quiet: ui.quiet,
     };
     let router = Router::builder(endpoint.clone())
         .accept(ALPN, handler)
@@ -2005,7 +2094,7 @@ async fn run_serve(
         .spawn();
 
     tokio::signal::ctrl_c().await?;
-    println!("{}", styler.warn(&tr!("shutting down...")));
+    ui.line(styler.warn(&tr!("shutting down...")));
     router.shutdown().await?;
     // router.shutdown() only stops the router's own accept loop — the
     // per-stream forwarders are our tasks, so give them the same bounded
@@ -2116,10 +2205,7 @@ impl ProtocolHandler for ForwardHandler {
                     warn!(%peer, error = %e, "{}", tr!("stream error"));
                 }
             });
-            match self.tasks.lock() {
-                Ok(mut g) => g.push(task),
-                Err(poisoned) => poisoned.into_inner().push(task),
-            }
+            push_task(&self.tasks, task);
         }
 
         connection.closed().await;
@@ -2178,6 +2264,7 @@ pub(crate) async fn handle_forward_stream(
     let tcp = TcpStream::connect(target)
         .await
         .with_context(|| tr_fmt!("connecting to {0}", target))?;
+    tracing::debug!("DBG forward: connected to {target}, starting pipe_streams");
     pipe::pipe_streams(tcp, send, recv).await
 }
 
@@ -2197,7 +2284,7 @@ pub(crate) fn spawn_path_monitor(
     relay_only: bool,
     styler: Styler,
     quiet: bool,
-) {
+) -> tokio::task::JoinHandle<()> {
     /// Sample window for path stats + slow-relay detection.
     const STATS_SECS: u64 = 30;
     /// How often to nudge magicsock while still on relay (and not relay-permanent).
@@ -2315,19 +2402,33 @@ pub(crate) fn spawn_path_monitor(
                 }
                 _ = tokio::time::sleep_until(next_upgrade), if !relay_only => {
                     next_upgrade = tokio::time::Instant::now() + upgrade_delay;
-                    if !path_kind::path_kind(&connection).is_direct() {
+                    // Experiment gates (env, temporary):
+                    // - LINK_P2P_NO_PATH_NUDGE=1  → never call network_change
+                    // - LINK_P2P_FORCE_PATH_NUDGE=1 → nudge even when already
+                    //   direct (stress CID churn / Tailscale re-probe)
+                    let force = std::env::var_os("LINK_P2P_FORCE_PATH_NUDGE").is_some();
+                    let disable = std::env::var_os("LINK_P2P_NO_PATH_NUDGE").is_some();
+                    let should_nudge =
+                        !disable && (force || !path_kind::path_kind(&connection).is_direct());
+                    if should_nudge {
                         tracing::debug!(
                             %peer,
                             secs = upgrade_delay.as_secs(),
+                            force,
                             "nudging magicsock (network_change) for path upgrade retry"
                         );
                         endpoint.network_change().await;
+                    } else if disable {
+                        tracing::debug!(
+                            %peer,
+                            "skipping path nudge (LINK_P2P_NO_PATH_NUDGE set)"
+                        );
                     }
                 }
                 _ = connection.closed() => break,
             }
         }
-    });
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2433,7 +2534,20 @@ impl ConnSlot {
 ///   will redial and swap the slot.
 /// - `open_bi` fails on a still-alive connection (e.g. stream limit): give
 ///   up this stream only.
+/// - `open_bi` hangs past `open_timeout`: log [`Connection::stats`] /
+///   `close_reason` / `paths`, close **only this connection** (not the
+///   endpoint), clear the slot, and wait for a redial. Callers that dial
+///   must run [`spawn_reconnect_watcher`] (or equivalent) or this waits
+///   forever after a hang.
 pub(crate) async fn open_stream_wait(slot: &ConnSlot) -> Result<(SendStream, RecvStream)> {
+    open_stream_wait_deadline(slot, Duration::from_secs(5)).await
+}
+
+/// Like [`open_stream_wait`], but with an explicit `open_bi` deadline.
+pub(crate) async fn open_stream_wait_deadline(
+    slot: &ConnSlot,
+    open_timeout: Duration,
+) -> Result<(SendStream, RecvStream)> {
     loop {
         // A fresh receiver per attempt: starts at the current value, so if
         // a connection is already present we never wait at all.
@@ -2447,9 +2561,9 @@ pub(crate) async fn open_stream_wait(slot: &ConnSlot) -> Result<(SendStream, Rec
                 .map_err(|_| anyhow::anyhow!(tr!("connection slot closed")))?;
             continue;
         };
-        match conn.open_bi().await {
-            Ok(pair) => return Ok(pair),
-            Err(e) if conn.close_reason().is_some() => {
+        match time::timeout(open_timeout, conn.open_bi()).await {
+            Ok(Ok(pair)) => return Ok(pair),
+            Ok(Err(e)) if conn.close_reason().is_some() => {
                 warn!(error = %e, "{}", tr!("connection lost; waiting for reconnect"));
                 // The current value is a dead connection; wait until the
                 // watcher replaces it (changed() fires only on a write, so
@@ -2458,9 +2572,36 @@ pub(crate) async fn open_stream_wait(slot: &ConnSlot) -> Result<(SendStream, Rec
                     .await
                     .map_err(|_| anyhow::anyhow!(tr!("connection slot closed")))?;
             }
-            Err(e) => return Err(e.into()),
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                log_open_bi_timeout(&conn);
+                // Force the reconnect watcher (or peer) to install a fresh
+                // connection. Do NOT close the Endpoint — only this conn.
+                conn.close(0u32.into(), b"open_bi timeout");
+                slot.replace(None);
+                warn!("{}", tr!("open_bi timed out; waiting for reconnect"));
+                rx.changed()
+                    .await
+                    .map_err(|_| anyhow::anyhow!(tr!("connection slot closed")))?;
+            }
         }
     }
+}
+
+fn log_open_bi_timeout(conn: &Connection) {
+    let stats = conn.stats();
+    let close = conn.close_reason();
+    let kind = path_kind::path_kind(conn);
+    warn!(
+        close = ?close,
+        path = kind.as_str(),
+        paths = conn.paths().len(),
+        udp_tx = stats.udp_tx.bytes,
+        udp_rx = stats.udp_rx.bytes,
+        lost_packets = stats.lost_packets,
+        "{}",
+        tr!("open_bi timed out (connection still open; see stats/paths)")
+    );
 }
 
 /// Reconnect watcher: waits for the current connection to die, then re-dials
@@ -2477,7 +2618,7 @@ pub(crate) async fn open_stream_wait(slot: &ConnSlot) -> Result<(SendStream, Rec
 ///
 /// Scope note: this reconnects the QUIC *connection*; process-level restarts
 /// are the systemd unit's job (contrib/systemd), they don't mix.
-fn spawn_reconnect_watcher(
+pub(crate) fn spawn_reconnect_watcher(
     slot: &ConnSlot,
     endpoint: &Endpoint,
     dial_addr: EndpointAddr,
@@ -2647,11 +2788,7 @@ async fn run_connect(
         local_addr
     )));
 
-    let semaphore = Arc::new(Semaphore::new(if max_conns == 0 {
-        usize::MAX
-    } else {
-        max_conns
-    }));
+    let semaphore = conn_semaphore(max_conns);
 
     let mut tasks = Vec::new();
 

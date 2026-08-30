@@ -26,9 +26,9 @@ pub(crate) fn check_proxy_target(target: SocketAddr, allow_private: bool) -> Res
     Ok(())
 }
 
-/// Loopback, RFC 1918 private, link-local, unspecified, multicast, broadcast
-/// (v4); loopback, unspecified, multicast, ULA, link-local, and embedded-v4
-/// tunnel forms (v6).
+/// Loopback, RFC 1918 private, RFC 6598 CGNAT (`100.64.0.0/10`), link-local,
+/// unspecified, multicast, broadcast (v4); loopback, unspecified, multicast,
+/// ULA, link-local, and embedded-v4 tunnel forms (v6).
 pub(crate) fn is_blocked_target(addr: SocketAddr) -> bool {
     is_blocked_ip(addr.ip())
 }
@@ -52,8 +52,14 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
 }
 
 fn is_blocked_v4(ip: Ipv4Addr) -> bool {
+    // RFC 6598 CGNAT / shared address space (100.64.0.0/10). Not in
+    // `Ipv4Addr::is_private()` but used by carriers and some cloud/VPN
+    // fabrics (Tailscale also treats this range specially).
+    let bits = u32::from(ip);
+    let is_cgnat = (bits & 0xffc0_0000) == 0x6440_0000;
     ip.is_loopback()
         || ip.is_private()
+        || is_cgnat
         || ip.is_link_local()
         || ip.is_unspecified()
         || ip.is_multicast()
@@ -122,6 +128,8 @@ mod tests {
             IpAddr::V4("172.16.0.1".parse().unwrap()),
             IpAddr::V4("172.31.255.255".parse().unwrap()),
             IpAddr::V4("192.168.1.1".parse().unwrap()),
+            IpAddr::V4("100.64.0.1".parse().unwrap()),
+            IpAddr::V4("100.127.255.255".parse().unwrap()),
             IpAddr::V4("169.254.169.254".parse().unwrap()),
             IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             IpAddr::V4("224.0.0.1".parse().unwrap()),
@@ -140,6 +148,8 @@ mod tests {
         for ip in [
             IpAddr::V4("8.8.8.8".parse().unwrap()),
             IpAddr::V4("203.0.113.7".parse().unwrap()),
+            IpAddr::V4("100.63.255.255".parse().unwrap()), // just below CGNAT
+            IpAddr::V4("100.128.0.1".parse().unwrap()),    // just above CGNAT
             IpAddr::V6("2606:4700:4700::1111".parse().unwrap()),
             IpAddr::V6("2001:db8::1".parse().unwrap()),
         ] {

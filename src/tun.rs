@@ -953,12 +953,13 @@ fn path_label(conn: &Connection) -> &'static str {
 }
 
 fn check_allow(allow: Option<&HashSet<EndpointId>>, peer: EndpointId) -> Result<()> {
+    // Plain anyhow (not exit::coded): callers warn + close the connection and
+    // keep serving — the process exit code is never taken from this Err.
     if let Some(set) = allow {
         if !set.contains(&peer) {
-            return Err(crate::exit::coded(
-                crate::exit::DENIED,
-                anyhow::anyhow!(tr!("rejecting connection: peer is not in the --allow list")),
-            ));
+            return Err(anyhow::anyhow!(tr!(
+                "rejecting connection: peer is not in the --allow list"
+            )));
         }
     }
     Ok(())
@@ -1187,6 +1188,7 @@ pub async fn run_tun_serve(
     idle_timeout: Duration,
     tune: crate::TransportTune,
     allow: Option<HashSet<EndpointId>>,
+    ui: crate::Ui,
     styler: Styler,
 ) -> Result<()> {
     let endpoint = crate::build_endpoint(
@@ -1236,35 +1238,36 @@ pub async fn run_tun_serve(
 
     tokio::spawn(hub_tun_to_peers(from_tun, own_vip, Arc::clone(&peers)));
 
-    println!("{}", styler.banner("link-p2p tun serve"));
-    println!(
+    ui.line(styler.banner("link-p2p tun serve"));
+    ui.line(format!(
         "  {}",
         styler.dim(&tr!("your virtual IP (the peer reaches you here):"))
-    );
-    println!("    {}", styler.highlight(&own_vip.to_string()));
-    println!(
+    ));
+    ui.line(format!("    {}", styler.highlight(&own_vip.to_string())));
+    ui.line(format!(
         "  {}",
         styler.dim(&tr!(
             "your EndpointId (give this to peers running `tun connect --to`):"
         ))
-    );
+    ));
     let ep_hex = own_id.to_string();
-    println!("    {}", styler.highlight(&ep_hex));
+    ui.line(format!("    {}", styler.highlight(&ep_hex)));
+    // Machine-readable for scripts / e2e — always stdout, even under `-q`.
     println!("ENDPOINT_ID={ep_hex}");
-    println!(
+    ui.line(format!(
         "  {}",
         styler.dim(&tr!(
             "hub mode: roster + fallback forward; spokes may peer directly"
         ))
-    );
+    ));
     if allow.is_some() {
-        println!(
+        ui.line(format!(
             "  {}",
             styler.dim(&tr!("only accepting connections from the --allow list"))
-        );
+        ));
     }
-    println!();
-    println!("{}", styler.dim(&tr!("Press Ctrl+C to stop.")));
+    ui.line("");
+    ui.line(styler.dim(&tr!("Press Ctrl+C to stop.")));
 
     loop {
         tokio::select! {
@@ -1311,8 +1314,9 @@ pub async fn run_tun_serve(
                     endpoint.clone(),
                     relay_only,
                     styler,
-                    false,
+                    ui.quiet,
                 );
+                let quiet = ui.quiet;
                 tokio::spawn(async move {
                     if let Err(e) = hub_run_spoke(
                         tun_io,
@@ -1325,6 +1329,7 @@ pub async fn run_tun_serve(
                         conn,
                         user_mtu,
                         raise_gate,
+                        quiet,
                     )
                     .await
                     {
@@ -1333,7 +1338,7 @@ pub async fn run_tun_serve(
                 });
             }
             _ = tokio::signal::ctrl_c() => {
-                println!("{}", styler.warn(&tr!("shutting down...")));
+                ui.line(styler.warn(&tr!("shutting down...")));
                 break;
             }
         }
@@ -1353,6 +1358,7 @@ async fn hub_run_spoke(
     conn: Connection,
     user_mtu: u16,
     raise_gate: MtuRaiseGate,
+    quiet: bool,
 ) -> Result<()> {
     let peer_vip = exchange_peer_vip(&conn, own_vip, false).await?;
     if peer_vip == own_vip || !vip_in_mesh(peer_vip) {
@@ -1419,14 +1425,16 @@ async fn hub_run_spoke(
         conn.max_datagram_size().unwrap_or_default(),
         session_mtu
     ));
-    println!(
-        "{}",
-        tr_fmt!(
-            "peer {0} joined at {1}",
-            peer_id.fmt_short(),
-            peer_vip
-        )
-    );
+    if !quiet {
+        println!(
+            "{}",
+            tr_fmt!(
+                "peer {0} joined at {1}",
+                peer_id.fmt_short(),
+                peer_vip
+            )
+        );
+    }
 
     // Snapshot to the new spoke, then Joined to everyone else.
     let snap = hub_roster_snapshot(own_id, own_vip, &peers).await;
@@ -1664,6 +1672,7 @@ async fn spoke_apply_roster_msg(
     user_mtu: u16,
     allow: Option<HashSet<EndpointId>>,
     raise_gate: MtuRaiseGate,
+    quiet: bool,
 ) {
     match msg {
         RosterMsg::Snapshot(entries) => {
@@ -1700,10 +1709,12 @@ async fn spoke_apply_roster_msg(
                 return;
             }
             mesh.write().await.roster.insert(e.id, e.vip);
-            println!(
-                "{}",
-                tr_fmt!("mesh peer {0} at {1}", e.id.fmt_short(), e.vip)
-            );
+            if !quiet {
+                println!(
+                    "{}",
+                    tr_fmt!("mesh peer {0} at {1}", e.id.fmt_short(), e.vip)
+                );
+            }
             tokio::spawn(spoke_try_dial_peer(
                 endpoint,
                 mesh,
@@ -1742,6 +1753,7 @@ pub async fn run_tun_connect(
     idle_timeout: Duration,
     tune: crate::TransportTune,
     allow: Option<HashSet<EndpointId>>,
+    ui: crate::Ui,
     styler: Styler,
 ) -> Result<()> {
     crate::reject_relay_only_with_to_addr(relay_only, &to_addr)?;
@@ -1795,7 +1807,7 @@ pub async fn run_tun_connect(
         }
     };
     if !to_addr.is_empty() {
-        println!(
+        ui.line(format!(
             "  {}",
             styler.dim(&tr_fmt!(
                 "dialing the peer's direct address hint(s): {0}",
@@ -1805,7 +1817,7 @@ pub async fn run_tun_connect(
                     .collect::<Vec<_>>()
                     .join(", ")
             ))
-        );
+        ));
     }
 
     let (tun, tun_name) = match create_tun_device(own_vip, mtu) {
@@ -1903,14 +1915,14 @@ pub async fn run_tun_connect(
             tokio::select! {
                 _ = time::sleep(d) => {}
                 _ = tokio::signal::ctrl_c() => {
-                    println!("{}", styler.warn(&tr!("shutting down...")));
+                    ui.line(styler.warn(&tr!("shutting down...")));
                     endpoint.close().await;
                     return Ok(());
                 }
             }
         }
 
-        println!("{}", styler.info(&tr_fmt!("dialing {0}...", hub_id)));
+        ui.line(styler.info(&tr_fmt!("dialing {0}...", hub_id)));
         let session_started = Instant::now();
         let session = async {
             let conn = endpoint
@@ -1946,7 +1958,7 @@ pub async fn run_tun_connect(
                 endpoint.clone(),
                 relay_only,
                 styler,
-                false,
+                ui.quiet,
             );
 
             let (hub_tx, hub_rx) = mpsc::channel::<Bytes>(256);
@@ -1969,20 +1981,14 @@ pub async fn run_tun_connect(
 
             if !connected_once {
                 connected_once = true;
-                println!(
-                    "{}",
-                    styler.ok(&tr_fmt!("connected. your virtual IP: {0}", own_vip))
-                );
-                println!(
-                    "{}",
-                    styler.dim(&tr_fmt!(
-                        "hub {0} is at {1} (path {2}); peers may connect directly",
-                        hub_id.fmt_short(),
-                        hub_vip,
-                        path_label(&conn)
-                    ))
-                );
-                println!("{}", styler.dim(&tr!("Press Ctrl+C to stop.")));
+                ui.line(styler.ok(&tr_fmt!("connected. your virtual IP: {0}", own_vip)));
+                ui.line(styler.dim(&tr_fmt!(
+                    "hub {0} is at {1} (path {2}); peers may connect directly",
+                    hub_id.fmt_short(),
+                    hub_vip,
+                    path_label(&conn)
+                )));
+                ui.line(styler.dim(&tr!("Press Ctrl+C to stop.")));
             }
 
             // Roster reader
@@ -1992,6 +1998,7 @@ pub async fn run_tun_connect(
             let tun_name_r = tun_name.clone();
             let allow_r = allow.clone();
             let raise_gate_r = Arc::clone(&raise_gate);
+            let quiet_r = ui.quiet;
             let roster_task = tokio::spawn(async move {
                 loop {
                     match read_msg(&mut ctrl_recv).await {
@@ -2007,6 +2014,7 @@ pub async fn run_tun_connect(
                                 user_mtu,
                                 allow_r.clone(),
                                 Arc::clone(&raise_gate_r),
+                                quiet_r,
                             )
                             .await;
                         }
@@ -2046,7 +2054,7 @@ pub async fn run_tun_connect(
                 tokio::select! {
                     biased;
                     _ = tokio::signal::ctrl_c() => {
-                        println!("{}", styler.warn(&tr!("shutting down...")));
+                        ui.line(styler.warn(&tr!("shutting down...")));
                         break SessionEnd::CtrlC;
                     }
                     _ = conn.closed() => {

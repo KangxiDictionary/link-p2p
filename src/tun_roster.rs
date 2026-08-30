@@ -9,6 +9,8 @@ use anyhow::{bail, Context, Result};
 use iroh::EndpointId;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::i18n::{tr, tr_fmt};
+
 /// Control-plane magic for TUN ALPN `link-p2p/tun/2`.
 pub const ROSTER_MAGIC: &[u8; 4] = b"LPR2";
 
@@ -30,12 +32,13 @@ impl RosterEntry {
 
     pub fn decode(buf: &[u8]) -> Result<(Self, usize)> {
         if buf.len() < 36 {
-            bail!("roster entry truncated");
+            bail!(tr!("roster entry truncated"));
         }
         let vip = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
         let mut id_bytes = [0u8; 32];
         id_bytes.copy_from_slice(&buf[4..36]);
-        let id = EndpointId::from_bytes(&id_bytes).context("invalid EndpointId in roster")?;
+        let id = EndpointId::from_bytes(&id_bytes)
+            .context(tr!("invalid EndpointId in roster"))?;
         Ok((Self { vip, id }, 36))
     }
 }
@@ -81,7 +84,7 @@ pub async fn read_msg<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<RosterMsg> {
     let mut hdr = [0u8; 5];
     r.read_exact(&mut hdr).await?;
     if &hdr[..4] != ROSTER_MAGIC {
-        bail!("bad roster magic");
+        bail!(tr!("bad roster magic"));
     }
     match hdr[4] {
         MSG_SNAPSHOT => {
@@ -109,7 +112,7 @@ pub async fn read_msg<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<RosterMsg> {
             let (e, _) = RosterEntry::decode(&buf)?;
             Ok(RosterMsg::Left(e))
         }
-        other => bail!("unknown roster msg type {other}"),
+        other => bail!(tr_fmt!("unknown roster msg type {0}", other)),
     }
 }
 

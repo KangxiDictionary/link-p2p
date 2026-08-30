@@ -108,6 +108,9 @@ fn contact_to_resolved(name: Option<String>, c: &Contact) -> Result<ResolvedPeer
 }
 
 /// Parse a hex EndpointId or Crockford short code.
+///
+/// Short codes include a trailing Crockford check character (typo detection).
+/// Legacy 52-character codes without a check digit are still accepted.
 pub fn parse_endpoint_token(token: &str) -> Result<EndpointId> {
     let t = token.trim();
     if let Ok(id) = t.parse::<EndpointId>() {
@@ -116,14 +119,48 @@ pub fn parse_endpoint_token(token: &str) -> Result<EndpointId> {
     let compact: String = t
         .chars()
         .filter(|c| *c != '-' && !c.is_whitespace())
+        .map(|c| match c.to_ascii_uppercase() {
+            'I' | 'L' => '1',
+            'O' => '0',
+            other => other,
+        })
         .collect();
-    if let Ok(bytes) = decode_crockford(&compact) {
-        // 32 bytes = 256 bits → 52 Crockford chars carry 260 bits; ignore pad.
-        if bytes.len() >= 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes[..32]);
-            return EndpointId::from_bytes(&arr)
-                .map_err(|e| anyhow::Error::new(e).context(tr!("invalid EndpointId in short code")));
+
+    // New format: 52 payload chars + 1 check symbol.
+    if compact.chars().count() >= 53 {
+        let (body, check) = compact.split_at(compact.len() - 1);
+        let check = check
+            .chars()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!(tr!("invalid character in short code")))?;
+        let bytes = decode_crockford(body)?;
+        if bytes.len() < 32 {
+            return Err(anyhow::anyhow!(tr_fmt!(
+                "'{0}' is not a contact name, EndpointId, or short code",
+                token
+            )));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes[..32]);
+        if check_symbol(&arr) != check {
+            return Err(anyhow::anyhow!(tr!(
+                "short code check digit mismatch (typo?)"
+            )));
+        }
+        return EndpointId::from_bytes(&arr)
+            .map_err(|e| anyhow::Error::new(e).context(tr!("invalid EndpointId in short code")));
+    }
+
+    // Legacy: payload only (no check digit), exactly 52 Crockford chars.
+    if compact.len() == 52 {
+        if let Ok(bytes) = decode_crockford(&compact) {
+            if bytes.len() >= 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes[..32]);
+                return EndpointId::from_bytes(&arr).map_err(|e| {
+                    anyhow::Error::new(e).context(tr!("invalid EndpointId in short code"))
+                });
+            }
         }
     }
     Err(anyhow::anyhow!(tr_fmt!(
@@ -132,19 +169,33 @@ pub fn parse_endpoint_token(token: &str) -> Result<EndpointId> {
     )))
 }
 
-/// Encode EndpointId as grouped Crockford Base32.
+/// Encode EndpointId as grouped Crockford Base32 plus a trailing check char.
 pub fn encode_short_code(id: EndpointId) -> String {
     let raw = encode_crockford(id.as_bytes());
-    raw.as_bytes()
+    let with_check = format!("{}{}", raw, check_symbol(id.as_bytes()));
+    with_check
+        .as_bytes()
         .chunks(4)
         .map(|c| std::str::from_utf8(c).unwrap_or(""))
         .collect::<Vec<_>>()
         .join("-")
 }
 
-// --- Crockford Base32 (no check symbol) ---
+// --- Crockford Base32 ---
+//
+// Payload uses the standard alphabet; a single trailing check symbol is the
+// CRC-ish residue of the 32 raw bytes mod 32 (typo detection only — QUIC
+// still authenticates the peer key).
 
 const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+fn check_symbol(data: &[u8]) -> char {
+    let mut x = 0u32;
+    for &b in data {
+        x = x.wrapping_mul(31).wrapping_add(u32::from(b));
+    }
+    CROCKFORD[(x % 32) as usize] as char
+}
 
 fn encode_crockford(data: &[u8]) -> String {
     // Stream bits without accumulating into a widening integer (32 bytes
@@ -173,11 +224,7 @@ fn decode_crockford(s: &str) -> Result<Vec<u8>> {
     let mut nbits: u32 = 0;
     let mut out = Vec::new();
     for c in s.chars() {
-        let u = match c.to_ascii_uppercase() {
-            'I' | 'L' => '1',
-            'O' => '0',
-            other => other,
-        };
+        let u = c.to_ascii_uppercase();
         let v = CROCKFORD
             .iter()
             .position(|&b| b == u as u8)
@@ -209,5 +256,34 @@ mod tests {
         let compact: String = code.chars().filter(|c| *c != '-').collect();
         assert_eq!(parse_endpoint_token(&compact).unwrap(), id);
         assert_eq!(parse_endpoint_token(&id.to_string()).unwrap(), id);
+    }
+
+    #[test]
+    fn short_code_check_digit_catches_typo() {
+        let sk = SecretKey::from_bytes(&[9u8; 32]);
+        let id = sk.public();
+        let code = encode_short_code(id);
+        let mut chars: Vec<char> = code.chars().collect();
+        // Flip a payload character (not a dash, not the final check group).
+        let idx = chars
+            .iter()
+            .position(|&c| c != '-' && c.is_ascii_alphanumeric())
+            .unwrap();
+        chars[idx] = if chars[idx] == '0' { '1' } else { '0' };
+        let bad: String = chars.into_iter().collect();
+        let err = parse_endpoint_token(&bad).unwrap_err().to_string();
+        assert!(
+            err.contains("check digit") || err.contains("校验"),
+            "unexpected err: {err}"
+        );
+    }
+
+    #[test]
+    fn short_code_legacy_without_check_still_parses() {
+        let sk = SecretKey::from_bytes(&[3u8; 32]);
+        let id = sk.public();
+        let legacy = encode_crockford(id.as_bytes());
+        assert_eq!(legacy.len(), 52);
+        assert_eq!(parse_endpoint_token(&legacy).unwrap(), id);
     }
 }
