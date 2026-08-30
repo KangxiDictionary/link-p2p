@@ -812,3 +812,67 @@ msgstr "経路: リレー（直接 IP 候補あり・未選択）"
 
 msgid "path: unknown"
 msgstr "経路: 不明"
+
+# --- ping dual RTT / --relay-only / remaining mesh ---
+msgid "--relay-only cannot be combined with --to-addr (direct IP hints)"
+msgstr "--relay-only は --to-addr（直通 IP ヒント）と併用できません"
+
+msgid "Disable IP transports (no hole-punch / LAN direct); traffic stays on relay. Set on both peers for a reliable baseline. Conflicts with --to-addr. Also LINK_P2P_RELAY_ONLY."
+msgstr "IP トランスポートを無効化し（ホールパンチ/LAN 直通なし）、トラフィックをリレーに留める。信頼できる基線には双方で設定。--to-addr と併用不可。LINK_P2P_RELAY_ONLY も可。"
+
+msgid "Use a custom relay server instead of n0's public one, e.g. http://127.0.0.1:3340 (run `iroh-relay --dev` locally). Skips n0 DNS/pkarr discovery. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY."
+msgstr "n0 の公開リレーの代わりにカスタムリレーを使う例: http://127.0.0.1:3340（ローカルでは `iroh-relay --dev`）。n0 の DNS/pkarr 発見をスキップ。ホールパンチは無効にならない——真のリレーのみ基線には --relay-only を使う。LINK_P2P_RELAY も可。"
+
+msgid ""
+"creating TUN device failed (needs Administrator).\n"
+"Use the official signed wintun.dll from https://www.wintun.net/ (amd64 for 64-bit), placed next to this executable:\n"
+"{0}\n"
+"\"The file is not signed\" means Windows rejected the DLL signature — replace a wrong/unsigned/PATH-shadowed copy with the official one."
+msgstr ""
+"TUN デバイスの作成に失敗しました（管理者権限が必要）。\n"
+"https://www.wintun.net/ の公式署名付き wintun.dll（64 ビットは amd64）を実行ファイルと同じ場所に置いてください:\n"
+"{0}\n"
+"\"The file is not signed\" は Windows が DLL 署名を拒否した意味です——誤った/未署名/PATH で先に読まれたコピーを公式版に置き換えてください。"
+
+msgid "initial: RTT {0}µs, {1}"
+msgstr "初期: RTT {0}µs、{1}"
+
+msgid "note: --max-conns is not used by TUN mode (hub accepts peers until stopped)"
+msgstr "注意: --max-conns は TUN モードでは使われません（ハブは停止までピアを受け入れます）"
+
+msgid "peer left the mesh"
+msgstr "ピアがメッシュを離れました"
+
+msgid "peer {0} joined at {1}"
+msgstr "ピア {0} が {1} で参加しました"
+
+msgid "pong from {0}"
+msgstr "{0} からの pong"
+
+msgid "settled: RTT {0}µs, {1}"
+msgstr "安定後: RTT {0}µs、{1}"
+
+msgid "virtual IP {0} is already claimed by another peer"
+msgstr "仮想 IP {0} は既に別のピアが使用中です"
+
+msgid ""
+"wintun.dll not found next to this executable:\n"
+"{0}\n"
+"Download the official signed build from https://www.wintun.net/ (use the amd64 folder on 64-bit Windows) and copy wintun.dll here."
+msgstr ""
+"実行ファイルの隣に wintun.dll がありません:\n"
+"{0}\n"
+"https://www.wintun.net/ から公式署名付きビルドを入手し（64 ビット Windows は amd64 フォルダ）、ここに wintun.dll をコピーしてください。"
+
+# --- multi-relay / path monitor ---
+msgid "Custom relay URL(s), repeatable (failover). Replaces n0's map when set; skips n0 DNS/pkarr. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY (comma-separated)."
+msgstr "カスタムリレー URL（繰り返し可、フェイルオーバー用）。設定すると n0 のマップを置き換え、n0 DNS/pkarr をスキップ。ホールパンチは無効にならない——リレーのみ基線には --relay-only。LINK_P2P_RELAY（カンマ区切り）も可。"
+
+msgid "invalid --relay URL in list: {0}"
+msgstr "--relay リストに無効な URL があります: {0}"
+
+msgid "path upgraded to direct (IP)"
+msgstr "パスが直通（IP）にアップグレードされました"
+
+msgid "low throughput while on relay (~{0} KB/s) — public relays rate-limit; self-host with --relay (and raise iroh-relay client limits) or wait for direct. See docs/performance.md"
+msgstr "リレー上で低スループット（約 {0} KB/s）——公開リレーはレート制限します。--relay で自前リレー（iroh-relay の client 制限を上げる）か直通を待ってください。docs/performance.md 参照"

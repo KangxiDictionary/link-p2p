@@ -100,14 +100,20 @@ struct Cli {
     #[arg(long, global = true, conflicts_with = "ephemeral")]
     identity_passphrase: Option<String>,
 
-    /// Use a custom relay server instead of n0's public one, e.g.
-    /// http://127.0.0.1:3340 (run `iroh-relay --dev` locally). With this set,
-    /// address discovery is skipped entirely: `connect` dials the peer
-    /// directly through this relay, so no DNS/pkarr lookup to iroh.link is
-    /// needed. Useful for self-hosted relays and for offline/local testing.
-    /// Also accepted via `LINK_P2P_RELAY` (flag wins).
-    #[arg(long, global = true, env = "LINK_P2P_RELAY")]
-    relay: Option<String>,
+    /// Custom relay URL(s), repeatable. Replaces n0's default map when set
+    /// (skips n0 DNS/pkarr). Pass several for failover, e.g. a self-hosted
+    /// relay first then an n0 URL as backup. **Does not disable hole-punch** —
+    /// use `--relay-only` for a true relay-only baseline. Also
+    /// `LINK_P2P_RELAY` (comma-separated; flag wins / appends).
+    #[arg(long, global = true, env = "LINK_P2P_RELAY", value_delimiter = ',', action = ArgAction::Append)]
+    relay: Vec<String>,
+
+    /// Disable IP transports so traffic stays on relay (no hole-punch / LAN
+    /// direct). Both sides of a session must set this for a reliable
+    /// relay-only baseline. Conflicts with `--to-addr` (direct hints). Also
+    /// `LINK_P2P_RELAY_ONLY=1`.
+    #[arg(long, global = true, env = "LINK_P2P_RELAY_ONLY", default_value_t = false)]
+    relay_only: bool,
 
     /// Control colored output: auto (colors on TTY only), always, or never.
     #[arg(long, global = true, value_enum, default_value_t = ColorMode::Auto)]
@@ -471,7 +477,11 @@ fn localized_command() -> clap::Command {
         )
         .mut_arg(
             "relay",
-            |a| helptext::set_help(a, &tr!("Use a custom relay server instead of n0's public one, e.g. http://127.0.0.1:3340 (run `iroh-relay --dev` locally). With this set, address discovery is skipped entirely: `connect` dials the peer directly through this relay, so no DNS/pkarr lookup to iroh.link is needed. Useful for self-hosted relays and for offline/local testing.")),
+            |a| helptext::set_help(a, &tr!("Custom relay URL(s), repeatable (failover). Replaces n0's map when set; skips n0 DNS/pkarr. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY (comma-separated).")),
+        )
+        .mut_arg(
+            "relay_only",
+            |a| helptext::set_help(a, &tr!("Disable IP transports (no hole-punch / LAN direct); traffic stays on relay. Set on both peers for a reliable baseline. Conflicts with --to-addr. Also LINK_P2P_RELAY_ONLY.")),
         )
         .mut_arg(
             "color",
@@ -866,7 +876,8 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                 secret_key,
                 mode,
                 allowed,
-                cli.relay.as_deref(),
+                &cli.relay,
+                cli.relay_only,
                 cli.max_conns,
                 Duration::from_secs(cli.keepalive),
                 Duration::from_secs(cli.idle_timeout),
@@ -923,7 +934,8 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                 secret_key,
                 &to,
                 mode,
-                cli.relay.as_deref(),
+                &cli.relay,
+                cli.relay_only,
                 to_addr,
                 cli.max_conns,
                 Duration::from_secs(cli.keepalive),
@@ -953,7 +965,8 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                         secret_key,
                         tun_ip,
                         mtu,
-                        cli.relay.as_deref(),
+                        &cli.relay,
+                        cli.relay_only,
                         Duration::from_secs(cli.keepalive),
                         Duration::from_secs(cli.idle_timeout),
                         tune,
@@ -977,7 +990,8 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                         &to,
                         tun_ip,
                         mtu,
-                        cli.relay.as_deref(),
+                        &cli.relay,
+                        cli.relay_only,
                         to_addr,
                         Duration::from_secs(cli.keepalive),
                         Duration::from_secs(cli.idle_timeout),
@@ -998,7 +1012,8 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             run_ping(
                 secret_key,
                 &to,
-                cli.relay.as_deref(),
+                &cli.relay,
+                cli.relay_only,
                 to_addr,
                 Duration::from_secs(cli.keepalive),
                 Duration::from_secs(cli.idle_timeout),
@@ -1483,33 +1498,65 @@ async fn wait_online(endpoint: &Endpoint) -> Result<()> {
 
 /// Build an endpoint with the given identity.
 ///
-/// With `relay: None` this uses [`presets::N0`]: n0's public relay servers
-/// plus DNS/pkarr address discovery. With `relay: Some(url)` it uses only
-/// that relay (self-hosted), skipping n0's discovery entirely — which also
-/// means nothing about this node is published to iroh.link.
-fn build_endpoint(
+/// With `relay` empty this uses [`presets::N0`]: n0's public relay servers
+/// plus DNS/pkarr address discovery. With one or more URLs it uses
+/// [`RelayMode::Custom`] from that list (self-hosted / multi-relay failover),
+/// skipping n0's discovery — nothing about this node is published to
+/// iroh.link. Pass several `--relay` values (e.g. your VPS then an n0 URL)
+/// for relay-side redundancy; magicsock picks among them.
+///
+/// `relay_only` calls [`iroh::endpoint::Builder::clear_ip_transports`] so
+/// magicsock cannot hole-punch; both peers must set it for a reliable
+/// relay-only baseline (`--relay` alone still allows direct upgrade).
+pub(crate) fn build_endpoint(
     secret_key: SecretKey,
-    relay: Option<&str>,
+    relay: &[String],
     keepalive: Duration,
     idle_timeout: Duration,
     tune: &TransportTune,
+    relay_only: bool,
 ) -> Result<iroh::endpoint::Builder> {
     let transport = transport_config(keepalive, idle_timeout, tune)?;
-    match relay {
-        Some(relay_url) => {
-            // Minimal sets only the mandatory crypto provider; we configure
-            // everything else ourselves. Custom relay map from the given URL.
-            let relay_map = RelayMap::try_from_iter([relay_url])
-                .with_context(|| tr_fmt!("'{0}' is not a valid --relay URL", relay_url))?;
-            Ok(Endpoint::builder(presets::Minimal)
-                .secret_key(secret_key)
-                .transport_config(transport)
-                .relay_mode(RelayMode::Custom(relay_map)))
-        }
-        None => Ok(Endpoint::builder(presets::N0)
+    let builder = if relay.is_empty() {
+        Endpoint::builder(presets::N0)
             .secret_key(secret_key)
-            .transport_config(transport)),
+            .transport_config(transport)
+    } else {
+        // Minimal sets only the mandatory crypto provider; we configure
+        // everything else ourselves. Custom map from all --relay URLs.
+        let relay_map = RelayMap::try_from_iter(relay.iter().map(|s| s.as_str()))
+            .with_context(|| {
+                tr_fmt!(
+                    "invalid --relay URL in list: {0}",
+                    relay.join(", ")
+                )
+            })?;
+        Endpoint::builder(presets::Minimal)
+            .secret_key(secret_key)
+            .transport_config(transport)
+            .relay_mode(RelayMode::Custom(relay_map))
+    };
+    if relay_only {
+        // iroh's own relay-only tests use clear_ip_transports on both sides.
+        // Also filter discovery publishing so we don't advertise IP candidates.
+        Ok(builder
+            .clear_ip_transports()
+            .addr_filter(iroh::address_lookup::AddrFilter::relay_only()))
+    } else {
+        Ok(builder)
     }
+}
+
+pub(crate) fn reject_relay_only_with_to_addr(relay_only: bool, to_addr: &[SocketAddr]) -> Result<()> {
+    if relay_only && !to_addr.is_empty() {
+        return Err(exit::coded(
+            exit::USAGE,
+            anyhow::anyhow!(tr!(
+                "--relay-only cannot be combined with --to-addr (direct IP hints)"
+            )),
+        ));
+    }
+    Ok(())
 }
 
 /// Build the [`EndpointAddr`] used to dial a peer: the peer's EndpointId,
@@ -1523,20 +1570,18 @@ fn build_endpoint(
 /// straight through the given addresses.
 fn build_dial_addr(
     peer_id: EndpointId,
-    relay: Option<&str>,
+    relay: &[String],
     to_addr: &[SocketAddr],
 ) -> Result<EndpointAddr> {
-    let mut addr = match relay {
-        Some(relay_url) => {
-            let relay_url = relay_url
-                .parse()
-                .with_context(|| tr_fmt!("'{0}' is not a valid RelayUrl", relay_url))?;
-            EndpointAddr::new(peer_id).with_relay_url(relay_url)
-        }
-        // Default path: rely on n0's address discovery (DNS/pkarr) to find
-        // where the peer is — unless direct hints below already say where.
-        None => EndpointAddr::from(peer_id),
-    };
+    let mut addr = EndpointAddr::from(peer_id);
+    for relay_url in relay {
+        let relay_url = relay_url
+            .parse()
+            .with_context(|| tr_fmt!("'{0}' is not a valid RelayUrl", relay_url))?;
+        addr = addr.with_relay_url(relay_url);
+    }
+    // With no custom relays, dial by EndpointId alone and let n0 discovery
+    // (or --to-addr hints below) supply reachability.
     for a in to_addr {
         addr = addr.with_ip_addr(*a);
     }
@@ -1598,14 +1643,15 @@ async fn run_serve(
     secret_key: SecretKey,
     mode: ServeMode,
     allowed: Vec<EndpointId>,
-    relay: Option<&str>,
+    relay: &[String],
+    relay_only: bool,
     max_conns: usize,
     keepalive: Duration,
     idle_timeout: Duration,
     tune: TransportTune,
     styler: Styler,
 ) -> Result<()> {
-    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune)?
+    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune, relay_only)?
         .alpns(vec![ALPN.to_vec(), PING_ALPN.to_vec()])
         .bind()
         .await
@@ -1685,6 +1731,10 @@ async fn run_serve(
             max_conns
         })),
         tasks: tasks.clone(),
+        endpoint: endpoint.clone(),
+        relay_only,
+        styler,
+        quiet: false,
     };
     let router = Router::builder(endpoint.clone())
         .accept(ALPN, handler)
@@ -1724,6 +1774,10 @@ struct ForwardHandler {
     /// Every spawned per-stream forwarder, so Ctrl+C can drain them
     /// (bounded, see DRAIN_TIMEOUT) instead of cutting them off mid-flush.
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    endpoint: Endpoint,
+    relay_only: bool,
+    styler: Styler,
+    quiet: bool,
 }
 
 impl ProtocolHandler for ForwardHandler {
@@ -1757,7 +1811,14 @@ impl ProtocolHandler for ForwardHandler {
         // here corresponds to one TCP connection on the far side (see
         // run_connect below), so we keep accepting streams until the peer
         // closes the whole connection.
-        spawn_path_stats_logger(connection.clone(), peer);
+        spawn_path_monitor(
+            connection.clone(),
+            peer,
+            self.endpoint.clone(),
+            self.relay_only,
+            self.styler,
+            self.quiet,
+        );
         loop {
             // Bound the number of concurrently forwarded streams. We acquire
             // the permit *before* accept_bi so a hostile peer flooding streams
@@ -1857,30 +1918,109 @@ async fn handle_forward_stream(
     pipe::pipe_streams(tcp, send, recv).await
 }
 
-/// Log path kind + loss every 30s until the connection closes.
+/// Path / throughput monitor for a live session.
 ///
-/// Path type comes from iroh [`Connection::paths`] (selected IP vs relay) —
-/// **not** from Quinn `udp_tx/rx`, which grow on relay too (magicsock).
-/// Debug level only.
-fn spawn_path_stats_logger(connection: Connection, peer: EndpointId) {
+/// - Every 30s: debug-log path kind + Quinn counters (path from
+///   [`Connection::paths`], not `udp_tx/rx` heuristics).
+/// - While not on a direct path and not `--relay-only`: every ~45s call
+///   [`Endpoint::network_change`] so magicsock re-STUNs / retries hole-punch
+///   (home NAT mappings drift; a single settle at connect is not enough).
+/// - If traffic is active but stuck under a low ceiling while still on relay,
+///   warn once that public relays rate-limit (self-host / wait for direct).
+pub(crate) fn spawn_path_monitor(
+    connection: Connection,
+    peer: EndpointId,
+    endpoint: Endpoint,
+    relay_only: bool,
+    styler: Styler,
+    quiet: bool,
+) {
+    /// Sample window for path stats + slow-relay detection.
+    const STATS_SECS: u64 = 30;
+    /// How often to nudge magicsock while still on relay.
+    const UPGRADE_SECS: u64 = 45;
+    /// Sustained under this (with real traffic) → treat as relay-shaped ceiling.
+    const RELAY_SLOW_BPS: u64 = 128 * 1024;
+    /// Ignore idle windows (keepalive alone).
+    const ACTIVE_MIN_BPS: u64 = 2 * 1024;
+
     tokio::spawn(async move {
-        let mut tick = time::interval(Duration::from_secs(30));
-        tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        let mut stats_tick = time::interval(Duration::from_secs(STATS_SECS));
+        stats_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        let mut upgrade_tick = time::interval(Duration::from_secs(UPGRADE_SECS));
+        upgrade_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        // Skip the immediate first ticks so we don't warn / re-STUN at t=0.
+        stats_tick.tick().await;
+        upgrade_tick.tick().await;
+
+        let mut prev_bytes = {
+            let s = connection.stats();
+            s.udp_tx.bytes.saturating_add(s.udp_rx.bytes)
+        };
+        let mut slow_relay_streak: u8 = 0;
+        let mut warned_relay_limit = false;
+        let mut was_direct = path_kind::path_kind(&connection).is_direct();
+
         loop {
             tokio::select! {
-                _ = tick.tick() => {
+                _ = stats_tick.tick() => {
                     let s = connection.stats();
                     let kind = path_kind::path_kind(&connection);
+                    let bytes = s.udp_tx.bytes.saturating_add(s.udp_rx.bytes);
+                    let delta = bytes.saturating_sub(prev_bytes);
+                    prev_bytes = bytes;
+                    let bps = delta / STATS_SECS;
+
                     tracing::debug!(
                         %peer,
                         path = kind.as_str(),
                         paths = connection.paths().len(),
+                        bps,
                         udp_tx = s.udp_tx.datagrams,
                         udp_rx = s.udp_rx.datagrams,
                         lost_packets = s.lost_packets,
                         lost_bytes = s.lost_bytes,
                         "path stats (path= from iroh paths(); udp_* are Quinn layer counters)"
                     );
+
+                    let now_direct = kind.is_direct();
+                    if now_direct && !was_direct {
+                        info!(%peer, "{}", tr!("path upgraded to direct (IP)"));
+                        if !quiet {
+                            eprintln!(
+                                "{}",
+                                styler.ok(&tr!("path upgraded to direct (IP)"))
+                            );
+                        }
+                        warned_relay_limit = false;
+                        slow_relay_streak = 0;
+                    }
+                    was_direct = now_direct;
+
+                    if !now_direct && (ACTIVE_MIN_BPS..RELAY_SLOW_BPS).contains(&bps) {
+                        slow_relay_streak = slow_relay_streak.saturating_add(1);
+                    } else {
+                        slow_relay_streak = 0;
+                    }
+                    // Two consecutive active-but-slow windows ≈ sustained.
+                    if !warned_relay_limit && slow_relay_streak >= 2 {
+                        warned_relay_limit = true;
+                        let kbps = bps / 1024;
+                        let msg = tr_fmt!(
+                            "low throughput while on relay (~{0} KB/s) — public relays rate-limit; self-host with --relay (and raise iroh-relay client limits) or wait for direct. See docs/performance.md",
+                            kbps
+                        );
+                        tracing::warn!(%peer, path = kind.as_str(), bps, "{}", msg);
+                        if !quiet {
+                            eprintln!("{}", styler.warn(&msg));
+                        }
+                    }
+                }
+                _ = upgrade_tick.tick(), if !relay_only => {
+                    if !path_kind::path_kind(&connection).is_direct() {
+                        tracing::debug!(%peer, "nudging magicsock (network_change) for path upgrade retry");
+                        endpoint.network_change().await;
+                    }
                 }
                 _ = connection.closed() => break,
             }
@@ -2099,7 +2239,8 @@ async fn run_connect(
     secret_key: SecretKey,
     to: &str,
     mode: ConnectMode,
-    relay: Option<&str>,
+    relay: &[String],
+    relay_only: bool,
     to_addr: Vec<SocketAddr>,
     max_conns: usize,
     keepalive: Duration,
@@ -2108,7 +2249,8 @@ async fn run_connect(
     ui: Ui,
     styler: Styler,
 ) -> Result<()> {
-    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune)?
+    reject_relay_only_with_to_addr(relay_only, &to_addr)?;
+    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune, relay_only)?
         .bind()
         .await
         .map_err(|e| exit::coded(exit::CONNECT, anyhow::Error::new(e).context(tr!("binding endpoint"))))?;
@@ -2176,7 +2318,14 @@ async fn run_connect(
 
     let slot = ConnSlot::new(Some(connection.clone()));
     spawn_reconnect_watcher(&slot, &endpoint, dial_addr, remote_id);
-    spawn_path_stats_logger(connection, remote_id);
+    spawn_path_monitor(
+        connection,
+        remote_id,
+        endpoint.clone(),
+        relay_only,
+        styler,
+        ui.quiet,
+    );
 
     let tcp_listener = TcpListener::bind(local_addr)
         .await
@@ -2245,12 +2394,53 @@ async fn run_connect(
 // ping: measure RTT to a remote node and report the path (direct or relay).
 // ---------------------------------------------------------------------------
 
-/// `link-p2p ping`: dial with the ping ALPN, exchange an 8-byte timestamp over
-/// a one-shot stream, and report RTT plus the connection's current path.
+/// One ping exchange: open a bi stream, write an 8-byte timestamp, read echo.
+async fn ping_exchange(connection: &iroh::endpoint::Connection) -> Result<u64> {
+    let start = std::time::Instant::now();
+    let (mut send, mut recv) = connection.open_bi().await?;
+    let ts_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    send.write_all(&ts_ms.to_be_bytes()).await?;
+    send.finish()?;
+    let mut echo = [0u8; 8];
+    recv.read_exact(&mut echo).await?;
+    let rtt_us = start.elapsed().as_micros() as u64;
+    if i64::from_be_bytes(echo) != ts_ms {
+        bail!(tr!("peer echoed a mismatched ping timestamp"));
+    }
+    Ok(rtt_us)
+}
+
+fn path_kind_human(kind: path_kind::PathKind) -> String {
+    match kind {
+        path_kind::PathKind::Direct => tr!("path: direct (IP)"),
+        path_kind::PathKind::Relay => tr!("path: relay"),
+        path_kind::PathKind::RelayWithDirectCandidate => {
+            tr!("path: relay (direct IP candidate open, not selected)")
+        }
+        path_kind::PathKind::Unknown => tr!("path: unknown"),
+    }
+}
+
+/// `link-p2p ping`: dial with the ping ALPN, exchange timestamps over one-shot
+/// streams, and report RTT plus path.
+///
+/// Magicsock often finishes the handshake on relay first and upgrades to
+/// direct in the background. Measuring RTT *before* that upgrade (then
+/// labeling the path after `settle_path_kind`) produced contradictory
+/// "direct but 600ms+" readings. We therefore report **both**:
+/// - **initial**: RTT + path snapshot right after connect (often still relay)
+/// - **settled**: wait up to 2s for a direct upgrade, then measure again
+///
+/// JSON keeps `rtt_us` / `path` as the settled values (the ones to trust for
+/// "how good is the path now?") and adds `initial_*` for diagnosis.
 async fn run_ping(
     secret_key: SecretKey,
     to: &str,
-    relay: Option<&str>,
+    relay: &[String],
+    relay_only: bool,
     to_addr: Vec<SocketAddr>,
     keepalive: Duration,
     idle_timeout: Duration,
@@ -2259,7 +2449,8 @@ async fn run_ping(
     ui: Ui,
     styler: Styler,
 ) -> Result<()> {
-    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune)?
+    reject_relay_only_with_to_addr(relay_only, &to_addr)?;
+    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune, relay_only)?
         .bind()
         .await
         .map_err(|e| exit::coded(exit::CONNECT, anyhow::Error::new(e).context(tr!("binding endpoint"))))?;
@@ -2282,61 +2473,60 @@ async fn run_ping(
         .await
         .map_err(|e| exit::coded(exit::CONNECT, anyhow::Error::new(e).context(tr!("connecting to remote endpoint"))))?;
 
-    let start = std::time::Instant::now();
-    let (mut send, mut recv) = connection.open_bi().await?;
-    let ts_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    send.write_all(&ts_ms.to_be_bytes()).await?;
-    send.finish()?;
-    let mut echo = [0u8; 8];
-    recv.read_exact(&mut echo).await?;
-    let rtt_us = start.elapsed().as_micros() as u64;
-    if i64::from_be_bytes(echo) != ts_ms {
-        bail!(tr!("peer echoed a mismatched ping timestamp"));
-    }
+    // Snapshot + measure immediately (handshake path — often still relay).
+    let initial_kind = path_kind::path_kind(&connection);
+    let initial_rtt_us = ping_exchange(&connection).await?;
+
+    // Wait for magicsock relay→direct upgrade when IP transports are enabled.
+    // With --relay-only there is nothing to wait for.
+    let settle_budget = if relay_only {
+        Duration::ZERO
+    } else {
+        Duration::from_secs(2)
+    };
+    let settled_kind = path_kind::settle_path_kind(&connection, settle_budget).await;
+    let settled_rtt_us = ping_exchange(&connection).await?;
 
     let stats = connection.stats();
-    // Magicsock often finishes the handshake on relay first; wait briefly
-    // so we don't under-report a path that is about to upgrade to direct.
-    let kind = path_kind::settle_path_kind(&connection, Duration::from_secs(2)).await;
-    let path = kind.as_str();
+    let initial_path = initial_kind.as_str();
+    let settled_path = settled_kind.as_str();
 
     match format {
         OutputFormat::Json => {
             // Always stdout — machine output for jq, even under -q.
+            // `rtt_us` / `path` are settled (trust these); `initial_*` diagnose
+            // the post-handshake race.
             println!(
-                "{{\"peer\":\"{peer}\",\"rtt_us\":{rtt},\"path\":\"{path}\"}}",
+                "{{\"peer\":\"{peer}\",\"rtt_us\":{rtt},\"path\":\"{path}\",\
+\"initial_rtt_us\":{init_rtt},\"initial_path\":\"{init_path}\",\
+\"settled_rtt_us\":{rtt},\"settled_path\":\"{path}\"}}",
                 peer = remote_id,
-                rtt = rtt_us,
-                path = path,
+                rtt = settled_rtt_us,
+                path = settled_path,
+                init_rtt = initial_rtt_us,
+                init_path = initial_path,
             );
         }
         OutputFormat::Text => {
             ui.line(styler.ok(&tr_fmt!(
-                "pong from {0}: RTT {1}µs",
-                remote_id.fmt_short(),
-                rtt_us
+                "pong from {0}",
+                remote_id.fmt_short()
             )));
-            match kind {
-                path_kind::PathKind::Direct => {
-                    ui.line(styler.dim(&tr!("path: direct (IP)")));
-                }
-                path_kind::PathKind::Relay => {
-                    ui.line(styler.dim(&tr!("path: relay")));
-                }
-                path_kind::PathKind::RelayWithDirectCandidate => {
-                    ui.line(styler.dim(&tr!(
-                        "path: relay (direct IP candidate open, not selected)"
-                    )));
-                }
-                path_kind::PathKind::Unknown => {
-                    ui.line(styler.dim(&tr!("path: unknown")));
-                }
-            }
+            ui.line(styler.dim(&tr_fmt!(
+                "initial: RTT {0}µs, {1}",
+                initial_rtt_us,
+                path_kind_human(initial_kind)
+            )));
+            ui.line(styler.dim(&tr_fmt!(
+                "settled: RTT {0}µs, {1}",
+                settled_rtt_us,
+                path_kind_human(settled_kind)
+            )));
             tracing::debug!(
-                path = path,
+                initial_path = initial_path,
+                settled_path = settled_path,
+                initial_rtt_us,
+                settled_rtt_us,
                 udp_tx = stats.udp_tx.datagrams,
                 udp_rx = stats.udp_rx.datagrams,
                 "ping path from iroh paths(); udp_* are not used for classification"

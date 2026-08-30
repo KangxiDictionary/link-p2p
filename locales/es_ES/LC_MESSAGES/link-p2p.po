@@ -816,3 +816,67 @@ msgstr "ruta: relay (candidato IP directo abierto, no seleccionado)"
 
 msgid "path: unknown"
 msgstr "ruta: desconocida"
+
+# --- ping dual RTT / --relay-only / remaining mesh ---
+msgid "--relay-only cannot be combined with --to-addr (direct IP hints)"
+msgstr "--relay-only no se puede combinar con --to-addr (sugerencias de IP directa)"
+
+msgid "Disable IP transports (no hole-punch / LAN direct); traffic stays on relay. Set on both peers for a reliable baseline. Conflicts with --to-addr. Also LINK_P2P_RELAY_ONLY."
+msgstr "Desactiva transportes IP (sin hole-punch / LAN directo); el tráfico permanece en relay. Ambos peers deben activarlo para una línea base fiable. Es incompatible con --to-addr. También LINK_P2P_RELAY_ONLY."
+
+msgid "Use a custom relay server instead of n0's public one, e.g. http://127.0.0.1:3340 (run `iroh-relay --dev` locally). Skips n0 DNS/pkarr discovery. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY."
+msgstr "Usar un relay personalizado en lugar del público de n0, p. ej. http://127.0.0.1:3340 (ejecuta `iroh-relay --dev` localmente). Omite el descubrimiento DNS/pkarr de n0. NO desactiva el hole-punch: usa --relay-only para una línea base solo-relay. También LINK_P2P_RELAY."
+
+msgid ""
+"creating TUN device failed (needs Administrator).\n"
+"Use the official signed wintun.dll from https://www.wintun.net/ (amd64 for 64-bit), placed next to this executable:\n"
+"{0}\n"
+"\"The file is not signed\" means Windows rejected the DLL signature — replace a wrong/unsigned/PATH-shadowed copy with the official one."
+msgstr ""
+"Falló la creación del dispositivo TUN (se necesita Administrador).\n"
+"Usa el wintun.dll firmado oficial de https://www.wintun.net/ (amd64 en 64 bits), junto a este ejecutable:\n"
+"{0}\n"
+"\"The file is not signed\" significa que Windows rechazó la firma del DLL: sustituye una copia incorrecta/sin firmar/oculta por PATH por la oficial."
+
+msgid "initial: RTT {0}µs, {1}"
+msgstr "inicial: RTT {0}µs, {1}"
+
+msgid "note: --max-conns is not used by TUN mode (hub accepts peers until stopped)"
+msgstr "nota: --max-conns no se usa en modo TUN (el hub acepta peers hasta detenerse)"
+
+msgid "peer left the mesh"
+msgstr "el peer dejó la malla"
+
+msgid "peer {0} joined at {1}"
+msgstr "el peer {0} se unió en {1}"
+
+msgid "pong from {0}"
+msgstr "pong de {0}"
+
+msgid "settled: RTT {0}µs, {1}"
+msgstr "establecido: RTT {0}µs, {1}"
+
+msgid "virtual IP {0} is already claimed by another peer"
+msgstr "la IP virtual {0} ya está reclamada por otro peer"
+
+msgid ""
+"wintun.dll not found next to this executable:\n"
+"{0}\n"
+"Download the official signed build from https://www.wintun.net/ (use the amd64 folder on 64-bit Windows) and copy wintun.dll here."
+msgstr ""
+"No se encontró wintun.dll junto a este ejecutable:\n"
+"{0}\n"
+"Descarga la compilación firmada oficial de https://www.wintun.net/ (carpeta amd64 en Windows de 64 bits) y copia wintun.dll aquí."
+
+# --- multi-relay / path monitor ---
+msgid "Custom relay URL(s), repeatable (failover). Replaces n0's map when set; skips n0 DNS/pkarr. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY (comma-separated)."
+msgstr "URL(s) de relay personalizadas, repetibles (failover). Al fijarlas reemplazan el mapa de n0 y omiten DNS/pkarr de n0. NO desactiva el hole-punch: usa --relay-only para solo-relay. También LINK_P2P_RELAY (separado por comas)."
+
+msgid "invalid --relay URL in list: {0}"
+msgstr "URL de --relay no válida en la lista: {0}"
+
+msgid "path upgraded to direct (IP)"
+msgstr "ruta actualizada a directa (IP)"
+
+msgid "low throughput while on relay (~{0} KB/s) — public relays rate-limit; self-host with --relay (and raise iroh-relay client limits) or wait for direct. See docs/performance.md"
+msgstr "bajo rendimiento en relay (~{0} KB/s): los relays públicos limitan velocidad; autoaloja con --relay (y sube los límites client de iroh-relay) o espera a direct. Ver docs/performance.md"

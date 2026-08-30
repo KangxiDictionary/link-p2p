@@ -839,3 +839,55 @@ msgstr "路径：中继（已有直连 IP 候选，尚未选用）"
 
 msgid "path: unknown"
 msgstr "路径：未知"
+
+# --- ping dual RTT / --relay-only / remaining mesh ---
+msgid "--relay-only cannot be combined with --to-addr (direct IP hints)"
+msgstr "--relay-only 不能与 --to-addr（直连 IP 提示）同时使用"
+
+msgid "Disable IP transports (no hole-punch / LAN direct); traffic stays on relay. Set on both peers for a reliable baseline. Conflicts with --to-addr. Also LINK_P2P_RELAY_ONLY."
+msgstr "禁用 IP 传输（无打洞/局域网直连）；流量留在 relay。双方都需设置才有可靠基线。与 --to-addr 互斥。也可用 LINK_P2P_RELAY_ONLY。"
+
+msgid "Use a custom relay server instead of n0's public one, e.g. http://127.0.0.1:3340 (run `iroh-relay --dev` locally). Skips n0 DNS/pkarr discovery. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY."
+msgstr "使用自定义 relay 服务器替代 n0 公共 relay，例如 http://127.0.0.1:3340（本地可用 `iroh-relay --dev` 启动）。跳过 n0 的 DNS/pkarr 发现。不会禁用打洞——需要真正的仅 relay 基线请用 --relay-only。也可用 LINK_P2P_RELAY。"
+
+msgid ""
+"creating TUN device failed (needs Administrator).\n"
+"Use the official signed wintun.dll from https://www.wintun.net/ (amd64 for 64-bit), placed next to this executable:\n"
+"{0}\n"
+"\"The file is not signed\" means Windows rejected the DLL signature — replace a wrong/unsigned/PATH-shadowed copy with the official one."
+msgstr ""
+"创建 TUN 设备失败（需要管理员权限）。\n"
+"请使用 https://www.wintun.net/ 的官方已签名 wintun.dll（64 位用 amd64），放在本程序同目录：\n"
+"{0}\n"
+"出现 “The file is not signed” 表示 Windows 拒绝了 DLL 签名——请用官方文件替换错误/未签名/被 PATH 抢先加载的副本。"
+
+msgid "initial: RTT {0}µs, {1}"
+msgstr "初始：RTT {0}µs，{1}"
+
+msgid "pong from {0}"
+msgstr "来自 {0} 的 pong"
+
+msgid "settled: RTT {0}µs, {1}"
+msgstr "稳定后：RTT {0}µs，{1}"
+
+msgid ""
+"wintun.dll not found next to this executable:\n"
+"{0}\n"
+"Download the official signed build from https://www.wintun.net/ (use the amd64 folder on 64-bit Windows) and copy wintun.dll here."
+msgstr ""
+"本程序同目录未找到 wintun.dll：\n"
+"{0}\n"
+"请从 https://www.wintun.net/ 下载官方已签名版本（64 位 Windows 用 amd64 目录），将 wintun.dll 复制到此处。"
+
+# --- multi-relay / path monitor ---
+msgid "Custom relay URL(s), repeatable (failover). Replaces n0's map when set; skips n0 DNS/pkarr. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY (comma-separated)."
+msgstr "自定义 relay URL（可重复，用于容灾）。设置后替换 n0 的 relay 表，并跳过 n0 DNS/pkarr。不会禁用打洞——仅 relay 基线请用 --relay-only。也可用 LINK_P2P_RELAY（逗号分隔）。"
+
+msgid "invalid --relay URL in list: {0}"
+msgstr "--relay 列表中有无效 URL：{0}"
+
+msgid "path upgraded to direct (IP)"
+msgstr "路径已升级为直连（IP）"
+
+msgid "low throughput while on relay (~{0} KB/s) — public relays rate-limit; self-host with --relay (and raise iroh-relay client limits) or wait for direct. See docs/performance.md"
+msgstr "仍在 relay 上且吞吐偏低（约 {0} KB/s）——公共 relay 会限速；请用 --relay 自建（并调高 iroh-relay 的 client 限速）或等待直连。见 docs/performance.md"

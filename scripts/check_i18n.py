@@ -27,10 +27,22 @@ def strip_comments(text: str) -> str:
 # and `\`-newline continuations that swallow the newline + following indentation.
 def rust_str(raw: str) -> str:
     # Step 1: `\` + newline + leading whitespace of next line => nothing.
-    # Do this before unicode_escape so a literal `\\` is not misread.
     s = re.sub(r"\\\n[ \t]*", "", raw)
-    # Step 2: decode the remaining escapes (\n \t \" \\ ...).
-    return bytes(s, "utf-8").decode("unicode_escape")
+    # Step 2: decode common Rust escapes. Do NOT use codecs unicode_escape on
+    # the whole string — it re-interprets UTF-8 bytes of non-ASCII (µ, —, …)
+    # as latin-1 escapes and mangles msgids.
+    out = []
+    i = 0
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s):
+            n = s[i + 1]
+            if n in "ntr\\\"'":
+                out.append({"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'" }[n])
+                i += 2
+                continue
+        out.append(s[i])
+        i += 1
+    return "".join(out)
 
 
 def extract_msgids(src_dir: Path):

@@ -1180,14 +1180,22 @@ pub async fn run_tun_serve(
     secret_key: SecretKey,
     tun_ip: Option<Ipv4Addr>,
     mtu: u16,
-    relay: Option<&str>,
+    relay: &[String],
+    relay_only: bool,
     keepalive: Duration,
     idle_timeout: Duration,
     tune: crate::TransportTune,
     allow: Option<HashSet<EndpointId>>,
     styler: Styler,
 ) -> Result<()> {
-    let endpoint = crate::build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune)?
+    let endpoint = crate::build_endpoint(
+        secret_key,
+        relay,
+        keepalive,
+        idle_timeout,
+        &tune,
+        relay_only,
+    )?
         .alpns(vec![TUN_ALPN.to_vec(), crate::PING_ALPN.to_vec()])
         .bind()
         .await
@@ -1291,6 +1299,14 @@ pub async fn run_tun_serve(
                 let tun_name = tun_name.clone();
                 let raise_gate = Arc::clone(&raise_gate);
                 let user_mtu = mtu;
+                crate::spawn_path_monitor(
+                    conn.clone(),
+                    peer_id,
+                    endpoint.clone(),
+                    relay_only,
+                    styler,
+                    false,
+                );
                 tokio::spawn(async move {
                     if let Err(e) = hub_run_spoke(
                         tun_io,
@@ -1712,7 +1728,8 @@ pub async fn run_tun_connect(
     to: &str,
     tun_ip: Option<Ipv4Addr>,
     mtu: u16,
-    relay: Option<&str>,
+    relay: &[String],
+    relay_only: bool,
     to_addr: Vec<SocketAddr>,
     keepalive: Duration,
     idle_timeout: Duration,
@@ -1720,7 +1737,15 @@ pub async fn run_tun_connect(
     allow: Option<HashSet<EndpointId>>,
     styler: Styler,
 ) -> Result<()> {
-    let endpoint = crate::build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune)?
+    crate::reject_relay_only_with_to_addr(relay_only, &to_addr)?;
+    let endpoint = crate::build_endpoint(
+        secret_key,
+        relay,
+        keepalive,
+        idle_timeout,
+        &tune,
+        relay_only,
+    )?
         .alpns(vec![TUN_ALPN.to_vec(), crate::PING_ALPN.to_vec()])
         .bind()
         .await
@@ -1903,6 +1928,14 @@ pub async fn run_tun_connect(
                 conn.max_datagram_size().unwrap_or_default(),
                 session_mtu
             ));
+            crate::spawn_path_monitor(
+                conn.clone(),
+                hub_id,
+                endpoint.clone(),
+                relay_only,
+                styler,
+                false,
+            );
 
             let (hub_tx, hub_rx) = mpsc::channel::<Bytes>(256);
             spawn_conn_sender(
