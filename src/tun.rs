@@ -949,12 +949,7 @@ type HubPeers = Arc<RwLock<HashMap<Ipv4Addr, HubPeer>>>;
 type RosterFans = Arc<RwLock<HashMap<EndpointId, mpsc::Sender<Bytes>>>>;
 
 fn path_label(conn: &Connection) -> &'static str {
-    let s = conn.stats();
-    if s.udp_tx.datagrams + s.udp_rx.datagrams > 0 {
-        "direct"
-    } else {
-        "relay"
-    }
+    crate::path_kind::path_label(conn)
 }
 
 fn check_allow(allow: Option<&HashSet<EndpointId>>, peer: EndpointId) -> Result<()> {

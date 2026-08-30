@@ -827,3 +827,15 @@ msgstr "读取流握手魔数"
 
 msgid "bad stream hello (expected LPF1, got {0})"
 msgstr "流握手魔数无效（期望 LPF1，实际 {0}）"
+
+msgid "path: direct (IP)"
+msgstr "路径：直连（IP）"
+
+msgid "path: relay"
+msgstr "路径：中继"
+
+msgid "path: relay (direct IP candidate open, not selected)"
+msgstr "路径：中继（已有直连 IP 候选，尚未选用）"
+
+msgid "path: unknown"
+msgstr "路径：未知"

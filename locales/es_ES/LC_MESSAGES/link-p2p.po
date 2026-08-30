@@ -804,3 +804,15 @@ msgstr "leyendo el hello del stream"
 
 msgid "bad stream hello (expected LPF1, got {0})"
 msgstr "hello de stream incorrecto (se esperaba LPF1, se obtuvo {0})"
+
+msgid "path: direct (IP)"
+msgstr "ruta: directa (IP)"
+
+msgid "path: relay"
+msgstr "ruta: relay"
+
+msgid "path: relay (direct IP candidate open, not selected)"
+msgstr "ruta: relay (candidato IP directo abierto, no seleccionado)"
+
+msgid "path: unknown"
+msgstr "ruta: desconocida"

@@ -800,3 +800,15 @@ msgstr "ストリーム hello を読み取り中"
 
 msgid "bad stream hello (expected LPF1, got {0})"
 msgstr "不正なストリーム hello（LPF1 のはずが {0}）"
+
+msgid "path: direct (IP)"
+msgstr "経路: 直接（IP）"
+
+msgid "path: relay"
+msgstr "経路: リレー"
+
+msgid "path: relay (direct IP candidate open, not selected)"
+msgstr "経路: リレー（直接 IP 候補あり・未選択）"
+
+msgid "path: unknown"
+msgstr "経路: 不明"

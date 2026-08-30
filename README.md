@@ -431,21 +431,24 @@ session re-establishes: dial, VIP exchange, route). Run with
 `RUST_LOG=link_p2p=debug` to watch `reconnect failed; retrying in ...` /
 `reconnected to peer` (stream mode) or `reconnecting in ...` (TUN mode).
 - **Link-quality observability**: at `RUST_LOG=link_p2p=debug`, every 30s a
-  `path stats` line logs the connection's cumulative UDP datagram counters
-  and loss — UDP counters that grow mean the direct path is in use; flat
-  UDP while traffic flows means everything is going through the relay. See
-  whether a long-running tunnel is healthy without waiting for it to fail.
+  `path stats` line logs iroh's selected path kind (`direct` / `relay` /
+  `relay+direct-candidate` from `Connection::paths`) plus Quinn loss
+  counters. **Do not** treat Quinn `udp_tx/rx` as proof of hole-punch —
+  magicsock feeds relay traffic to Quinn as UDP too.
 - `ping`: `link-p2p ping <EndpointId>` measures RTT to a running `serve`
   (the serve side answers ping probes alongside its normal forwarding) or
-  `tun serve` node, and reports whether the path is direct or relayed:
+  `tun serve` node, and reports the selected path from iroh (waits up to
+  ~2s for a relay→direct upgrade after handshake):
 
 ```bash
 $ link-p2p ping <EndpointId>
 pinging 5f7d5db174a7...
 pong from 5f7d5db174a7: RTT 1912µs
-  path: direct (UDP)
+  path: direct (IP)
 ```
 
+JSON `path` values: `direct`, `relay`, `relay+direct-candidate`, `unknown`.
+On lossy relay paths, try `--cc bbr3` before changing topology.
 ### Resource limits
 
 `--max-conns <N>` caps how many connections are forwarded concurrently

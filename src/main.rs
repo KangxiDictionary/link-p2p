@@ -17,6 +17,7 @@
 mod exit;
 mod helptext;
 mod i18n;
+mod path_kind;
 mod pipe;
 mod socks5;
 mod ssrf;
@@ -1856,12 +1857,11 @@ async fn handle_forward_stream(
     pipe::pipe_streams(tcp, send, recv).await
 }
 
-/// Log the connection's path quality every 30s until it closes, so a
-/// long-running tunnel is diagnosable without waiting for a failure: UDP
-/// datagram counters that grow mean a direct path is carrying traffic;
-/// flat UDP + growing relay means everything is going through the relay;
-/// lost_packets/bytes is the connection-level loss. Debug level — this is
-/// an observability aid, not something to spam by default.
+/// Log path kind + loss every 30s until the connection closes.
+///
+/// Path type comes from iroh [`Connection::paths`] (selected IP vs relay) —
+/// **not** from Quinn `udp_tx/rx`, which grow on relay too (magicsock).
+/// Debug level only.
 fn spawn_path_stats_logger(connection: Connection, peer: EndpointId) {
     tokio::spawn(async move {
         let mut tick = time::interval(Duration::from_secs(30));
@@ -1870,12 +1870,16 @@ fn spawn_path_stats_logger(connection: Connection, peer: EndpointId) {
             tokio::select! {
                 _ = tick.tick() => {
                     let s = connection.stats();
-                    tracing::debug!(%peer,
+                    let kind = path_kind::path_kind(&connection);
+                    tracing::debug!(
+                        %peer,
+                        path = kind.as_str(),
+                        paths = connection.paths().len(),
                         udp_tx = s.udp_tx.datagrams,
                         udp_rx = s.udp_rx.datagrams,
                         lost_packets = s.lost_packets,
                         lost_bytes = s.lost_bytes,
-                        "path stats (growing udp_tx/rx means the direct path is in use)"
+                        "path stats (path= from iroh paths(); udp_* are Quinn layer counters)"
                     );
                 }
                 _ = connection.closed() => break,
@@ -2294,11 +2298,10 @@ async fn run_ping(
     }
 
     let stats = connection.stats();
-    let path = if stats.udp_tx.datagrams + stats.udp_rx.datagrams > 0 {
-        "direct"
-    } else {
-        "relay"
-    };
+    // Magicsock often finishes the handshake on relay first; wait briefly
+    // so we don't under-report a path that is about to upgrade to direct.
+    let kind = path_kind::settle_path_kind(&connection, Duration::from_secs(2)).await;
+    let path = kind.as_str();
 
     match format {
         OutputFormat::Json => {
@@ -2316,11 +2319,28 @@ async fn run_ping(
                 remote_id.fmt_short(),
                 rtt_us
             )));
-            if path == "direct" {
-                ui.line(styler.dim(&tr!("path: direct (UDP)")));
-            } else {
-                ui.line(styler.dim(&tr!("path: relay (no direct UDP path yet)")));
+            match kind {
+                path_kind::PathKind::Direct => {
+                    ui.line(styler.dim(&tr!("path: direct (IP)")));
+                }
+                path_kind::PathKind::Relay => {
+                    ui.line(styler.dim(&tr!("path: relay")));
+                }
+                path_kind::PathKind::RelayWithDirectCandidate => {
+                    ui.line(styler.dim(&tr!(
+                        "path: relay (direct IP candidate open, not selected)"
+                    )));
+                }
+                path_kind::PathKind::Unknown => {
+                    ui.line(styler.dim(&tr!("path: unknown")));
+                }
             }
+            tracing::debug!(
+                path = path,
+                udp_tx = stats.udp_tx.datagrams,
+                udp_rx = stats.udp_rx.datagrams,
+                "ping path from iroh paths(); udp_* are not used for classification"
+            );
         }
     }
     endpoint.close().await;

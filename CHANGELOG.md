@@ -40,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Path classification**: `ping` / TUN session logs / path-stats no longer
+  treat Quinn `udp_tx/rx > 0` as "direct". iroh magicsock feeds relay as UDP
+  too; we now use `Connection::paths()` (`is_selected` / `is_ip` /
+  `is_relay`). Ping waits up to 2s for a relay→direct upgrade after
+  handshake.
 - **Fixed-forward silent hang**: download-first TCP (and any case where the
   dialer sends no bytes until the server speaks) no longer leaves serve
   stuck in `accept_bi`. Invalid/missing hellos fail immediately with a
