@@ -72,9 +72,9 @@ whereas TUN backends and edge cases can be bolted on incrementally forever.
 | Self-hosted relay (`--relay`) | done |
 | Multi `--relay` failover | done |
 | Relay-only baseline (`--relay-only`) | done |
-| Merge custom `--relay` with n0 defaults (`--no-n0-relays` to opt out) | planned (call / auto mode) |
-| `call` (symmetric dial) + local contacts / short codes | planned |
-| Persistent `config.toml` (relays, defaults) | planned |
+| Merge custom `--relay` with n0 defaults (`--no-n0-relays` to opt out) | done |
+| `call` (symmetric dial) + local contacts / short codes | done |
+| Persistent `config.toml` (relays, defaults) | done |
 | Mesh-native relay (peer forwards for unreachable peers; opt-in `--allow`) | backlog |
 | iroh presets::N0 (n0's public relay + DNS/pkarr discovery) | done |
 | Deterministic default VIP derivation (BLAKE3 → 172.24.0.0/16) | done |

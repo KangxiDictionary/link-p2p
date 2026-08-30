@@ -16,12 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server-banner flows hung in `accept_bi` until the local client FIN'd.
   **Upgrade serve and connect together** — mixed versions fail ALPN
   negotiation instead of mis-framing. Proxy/SOCKS5 and TUN unchanged.
+- **`--relay` merges with n0 by default** (keeps discovery); `--no-n0-relays`
+  restores replace-only. `config.toml` / `call` use the same rule.
 
 ### Added
 
-- **Multi `--relay`**: repeatable URLs / comma-separated `LINK_P2P_RELAY` for
-  custom `RelayMap` failover (e.g. self-hosted then n0). Still skips n0
-  discovery whenever any custom relay is set.
+- **`call` / `contact` / `config.toml`**: phone-like symmetric dial, local
+  contacts + short codes, persistent relay defaults.
+- **Multi `--relay`**: repeatable URLs / comma-separated `LINK_P2P_RELAY`.
 - **`--relay-only`** / `LINK_P2P_RELAY_ONLY`: disable IP transports
   (`clear_ip_transports` + relay-only addr filter) so traffic cannot
   hole-punch to direct. Set on both peers for a true relay baseline.
@@ -55,7 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Path monitor**: while a session stays on relay, periodically
   `Endpoint::network_change` to retry hole-punch; warn once (user-facing) when
   active throughput stays in a relay-shaped ceiling (under ~128 KB/s). Announce
-  when the path upgrades to direct.
+  when the path upgrades to direct. No IP candidate for several samples →
+  relay-permanent (upgrade interval 5m) and a user warning.
 - **Path classification**: `ping` / TUN session logs / path-stats no longer
   treat Quinn `udp_tx/rx > 0` as "direct". iroh magicsock feeds relay as UDP
   too; we now use `Connection::paths()` (`is_selected` / `is_ip` /

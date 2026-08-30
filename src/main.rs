@@ -14,11 +14,15 @@
 //! doesn't compile, it's most likely a small signature drift — check
 //! `cargo doc -p iroh --open` rather than assuming the overall approach is wrong.
 
+mod call;
+mod config;
+mod contacts;
 mod exit;
 mod helptext;
 mod i18n;
 mod path_kind;
 mod pipe;
+mod relay_probe;
 mod socks5;
 mod ssrf;
 mod style;
@@ -73,6 +77,7 @@ pub(crate) const PING_ALPN: &[u8] = b"link-p2p/ping/0";
                   no root/admin privileges — just a persistent EndpointId and a QUIC hop.",
     after_help = "See README.md and docs/windows.md (Windows) or docs/unix.md (Unix)."
 )]
+#[allow(clippy::struct_excessive_bools)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -114,6 +119,12 @@ struct Cli {
     /// `LINK_P2P_RELAY_ONLY=1`.
     #[arg(long, global = true, env = "LINK_P2P_RELAY_ONLY", default_value_t = false)]
     relay_only: bool,
+
+    /// When `--relay` is set, do **not** keep n0's public relays / discovery
+    /// (replace the map entirely). Default is to **merge** custom relays into
+    /// n0 so self-hosted + public failover both work. Also `LINK_P2P_NO_N0_RELAYS`.
+    #[arg(long = "no-n0-relays", global = true, env = "LINK_P2P_NO_N0_RELAYS", default_value_t = false)]
+    no_n0_relays: bool,
 
     /// Control colored output: auto (colors on TTY only), always, or never.
     #[arg(long, global = true, value_enum, default_value_t = ColorMode::Auto)]
@@ -175,6 +186,25 @@ enum LogFormat {
     Json,
 }
 
+#[derive(Subcommand)]
+enum ContactCommand {
+    /// Add or update a contact.
+    Add {
+        /// Local nickname.
+        name: String,
+        /// EndpointId hex or short code.
+        id: String,
+    },
+    /// Remove a contact.
+    Remove {
+        name: String,
+    },
+    /// List contacts.
+    List,
+    /// Print this node's short code (and EndpointId).
+    Code,
+}
+
 /// Machine-oriented output for status commands (`ping`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum OutputFormat {
@@ -199,13 +229,13 @@ pub(crate) struct TransportTune {
 
 /// User-facing status lines: respect `-q` and keep stdout clean in `--stdio`.
 #[derive(Clone, Copy)]
-struct Ui {
+pub(crate) struct Ui {
     quiet: bool,
     stderr_only: bool,
 }
 
 impl Ui {
-    fn line(self, s: impl AsRef<str>) {
+    pub(crate) fn line(self, s: impl AsRef<str>) {
         if self.quiet {
             return;
         }
@@ -220,7 +250,7 @@ impl Ui {
 /// Serve mode — exactly one of fixed forward or proxy. Encoded as an enum so
 /// "neither / both" cannot be represented after CLI validation.
 #[derive(Clone, Copy, Debug)]
-enum ServeMode {
+pub(crate) enum ServeMode {
     Forward(SocketAddr),
     Proxy { allow_private: bool },
 }
@@ -311,6 +341,32 @@ enum Command {
         /// Output format: text (default) or json (for jq).
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
+    },
+    /// Symmetric call: both sides publish and dial (EndpointId tie-break).
+    ///
+    /// Resolves a contact name, EndpointId, or short code. Merges config.toml
+    /// relays with n0 by default. Pair with the same flags on both peers.
+    Call {
+        /// Contact name, EndpointId, or short code.
+        to: String,
+        /// Local TCP listen address (forwards to the peer).
+        #[arg(long, conflicts_with = "stdio")]
+        listen: Option<SocketAddr>,
+        /// Local TCP target for streams the peer opens to us.
+        #[arg(long)]
+        forward: Option<SocketAddr>,
+        /// Pipe stdin/stdout (Unix). Conflicts with --listen.
+        #[cfg(unix)]
+        #[arg(long, conflicts_with = "listen")]
+        stdio: bool,
+        /// Direct address hint(s) (repeatable).
+        #[arg(long = "to-addr")]
+        to_addr: Vec<SocketAddr>,
+    },
+    /// Manage the local contacts book (names → EndpointId).
+    Contact {
+        #[command(subcommand)]
+        command: ContactCommand,
     },
     /// Print a shell completion script to stdout.
     ///
@@ -477,11 +533,15 @@ fn localized_command() -> clap::Command {
         )
         .mut_arg(
             "relay",
-            |a| helptext::set_help(a, &tr!("Custom relay URL(s), repeatable (failover). Replaces n0's map when set; skips n0 DNS/pkarr. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY (comma-separated).")),
+            |a| helptext::set_help(a, &tr!("Custom relay URL(s), repeatable. Merged with n0 by default (keeps discovery); use --no-n0-relays to replace. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY (comma-separated) and config.toml.")),
         )
         .mut_arg(
             "relay_only",
             |a| helptext::set_help(a, &tr!("Disable IP transports (no hole-punch / LAN direct); traffic stays on relay. Set on both peers for a reliable baseline. Conflicts with --to-addr. Also LINK_P2P_RELAY_ONLY.")),
+        )
+        .mut_arg(
+            "no_n0_relays",
+            |a| helptext::set_help(a, &tr!("With --relay, use only the listed relays (no n0 public relays / discovery). Default merges custom relays into n0. Also LINK_P2P_NO_N0_RELAYS and config.toml relays.no_n0.")),
         )
         .mut_arg(
             "color",
@@ -645,6 +705,78 @@ fn localized_command() -> clap::Command {
                     |a| helptext::set_help(a, &tr!("Output format: text (default) or json (for jq).")),
                 )
         })
+        .mut_subcommand("call", |s| {
+            let s = s
+                .disable_help_flag(true)
+                .arg(help_arg())
+                .about(tr!("Symmetric call: both peers publish and dial (tie-break by EndpointId)."))
+                .long_about(helptext::hard_wrap_help(&tr!(
+                    "Phone-like session: both sides run `call` with the same peer token (contact name, EndpointId, or short code). The peer with the smaller EndpointId dials; the other waits. Use --listen and/or --forward on both ends. Relays from config.toml merge with n0 unless --no-n0-relays."
+                )))
+                .mut_arg("to", |a| {
+                    helptext::set_help(
+                        a,
+                        &tr!("Contact name, EndpointId, or short code from `contact code`."),
+                    )
+                })
+                .mut_arg("listen", |a| {
+                    helptext::set_help(
+                        a,
+                        &tr!("Local TCP address to listen on; connections are forwarded to the peer."),
+                    )
+                })
+                .mut_arg("forward", |a| {
+                    helptext::set_help(
+                        a,
+                        &tr!("Local TCP target for streams the peer opens to us (optional)."),
+                    )
+                })
+                .mut_arg("to_addr", |a| {
+                    helptext::set_help(
+                        a,
+                        &tr!("Direct address hint(s) for the peer (repeatable)."),
+                    )
+                });
+            #[cfg(unix)]
+            let s = s.mut_arg("stdio", |a| {
+                helptext::set_help(
+                    a,
+                    &tr!("Pipe stdin/stdout to one stream (Unix). Conflicts with --listen."),
+                )
+            });
+            s
+        })
+        .mut_subcommand("contact", |s| {
+            s.disable_help_flag(true)
+                .arg(help_arg())
+                .about(tr!("Manage the local contacts book (names → EndpointId)."))
+                .mut_subcommand("add", |ss| {
+                    ss.disable_help_flag(true)
+                        .arg(help_arg())
+                        .about(tr!("Add or update a contact."))
+                        .mut_arg("name", |a| helptext::set_help(a, &tr!("Local nickname.")))
+                        .mut_arg(
+                            "id",
+                            |a| helptext::set_help(a, &tr!("EndpointId hex or short code.")),
+                        )
+                })
+                .mut_subcommand("remove", |ss| {
+                    ss.disable_help_flag(true)
+                        .arg(help_arg())
+                        .about(tr!("Remove a contact."))
+                        .mut_arg("name", |a| helptext::set_help(a, &tr!("Local nickname.")))
+                })
+                .mut_subcommand("list", |ss| {
+                    ss.disable_help_flag(true)
+                        .arg(help_arg())
+                        .about(tr!("List contacts."))
+                })
+                .mut_subcommand("code", |ss| {
+                    ss.disable_help_flag(true)
+                        .arg(help_arg())
+                        .about(tr!("Print this node's short code (and EndpointId)."))
+                })
+        })
         .mut_subcommand("completions", |s| {
             s.disable_help_flag(true)
                 .arg(help_arg())
@@ -700,7 +832,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
     let matches = localized_command()
         .color(color_mode.to_clap())
         .get_matches();
-    let cli = Cli::from_arg_matches(&matches)?;
+    let mut cli = Cli::from_arg_matches(&matches)?;
 
     // Completions / man are pure stdout generation — no identity file, no
     // logging, no network. Handle them before any of that machinery spins up.
@@ -818,6 +950,13 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
     }
 
     let styler = style::apply_color_mode(color_mode);
+    // Load ~/.config/link-p2p/config.toml defaults (CLI still wins / appends).
+    let user_cfg = config::load(&config::config_path()).unwrap_or_default();
+    cli.relay = config::merge_relay_urls(&cli.relay, &user_cfg);
+    cli.no_n0_relays = cli.no_n0_relays || user_cfg.relays.no_n0;
+    if !cli.relay_only {
+        cli.relay_only = user_cfg.relays.relay_only;
+    }
     // Passphrase for the identity file: --identity-passphrase wins over
     // LINK_P2P_PASSPHRASE (the env var avoids the passphrase showing up in
     // `ps`/shell history). Empty values are treated as unset.
@@ -878,6 +1017,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                 allowed,
                 &cli.relay,
                 cli.relay_only,
+                cli.no_n0_relays,
                 cli.max_conns,
                 Duration::from_secs(cli.keepalive),
                 Duration::from_secs(cli.idle_timeout),
@@ -936,6 +1076,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                 mode,
                 &cli.relay,
                 cli.relay_only,
+                cli.no_n0_relays,
                 to_addr,
                 cli.max_conns,
                 Duration::from_secs(cli.keepalive),
@@ -967,6 +1108,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                         mtu,
                         &cli.relay,
                         cli.relay_only,
+                        cli.no_n0_relays,
                         Duration::from_secs(cli.keepalive),
                         Duration::from_secs(cli.idle_timeout),
                         tune,
@@ -992,6 +1134,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                         mtu,
                         &cli.relay,
                         cli.relay_only,
+                        cli.no_n0_relays,
                         to_addr,
                         Duration::from_secs(cli.keepalive),
                         Duration::from_secs(cli.idle_timeout),
@@ -1014,6 +1157,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                 &to,
                 &cli.relay,
                 cli.relay_only,
+                cli.no_n0_relays,
                 to_addr,
                 Duration::from_secs(cli.keepalive),
                 Duration::from_secs(cli.idle_timeout),
@@ -1024,6 +1168,104 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             )
             .await
         }
+        Command::Call {
+            to,
+            listen,
+            forward,
+            #[cfg(unix)]
+            stdio,
+            to_addr,
+        } => {
+            #[cfg(unix)]
+            let local = match (listen, stdio) {
+                (Some(a), false) => call::CallLocal::Listen(a),
+                (None, true) => call::CallLocal::Stdio,
+                _ => {
+                    return Err(exit::coded(
+                        exit::USAGE,
+                        anyhow::anyhow!(tr!(
+                            "call requires exactly one of --listen or --stdio (and optional --forward)"
+                        )),
+                    ));
+                }
+            };
+            #[cfg(not(unix))]
+            let local = match listen {
+                Some(a) => call::CallLocal::Listen(a),
+                None => {
+                    return Err(exit::coded(
+                        exit::USAGE,
+                        anyhow::anyhow!(tr!("call requires --listen (and optional --forward)")),
+                    ));
+                }
+            };
+            call::run_call(
+                secret_key,
+                &to,
+                local,
+                forward,
+                &cli.relay,
+                cli.no_n0_relays,
+                cli.relay_only,
+                to_addr,
+                cli.max_conns,
+                Duration::from_secs(cli.keepalive),
+                Duration::from_secs(cli.idle_timeout),
+                tune,
+                ui,
+                styler,
+            )
+            .await
+        }
+        Command::Contact { command } => match command {
+            ContactCommand::Add { name, id } => {
+                let path = contacts::contacts_path();
+                let mut book = contacts::load(&path)?;
+                let eid = contacts::parse_endpoint_token(&id)?;
+                book.contacts.insert(
+                    name.clone(),
+                    contacts::Contact {
+                        id: eid.to_string(),
+                        relays: Vec::new(),
+                        addrs: Vec::new(),
+                    },
+                );
+                contacts::save(&path, &book)?;
+                ui.line(styler.ok(&tr_fmt!(
+                    "saved contact {0} → {1}",
+                    name,
+                    eid.fmt_short()
+                )));
+                Ok(())
+            }
+            ContactCommand::Remove { name } => {
+                let path = contacts::contacts_path();
+                let mut book = contacts::load(&path)?;
+                if book.contacts.remove(&name).is_none() {
+                    bail!(tr_fmt!("no contact named '{0}'", name));
+                }
+                contacts::save(&path, &book)?;
+                ui.line(styler.ok(&tr_fmt!("removed contact {0}", name)));
+                Ok(())
+            }
+            ContactCommand::List => {
+                let book = contacts::load(&contacts::contacts_path())?;
+                if book.contacts.is_empty() {
+                    ui.line(styler.dim(&tr!("no contacts yet — use `contact add` or pair a short code")));
+                } else {
+                    for (name, c) in &book.contacts {
+                        println!("{name}\t{}", c.id);
+                    }
+                }
+                Ok(())
+            }
+            ContactCommand::Code => {
+                let id = secret_key.public();
+                println!("ENDPOINT_ID={id}");
+                println!("SHORT_CODE={}", contacts::encode_short_code(id));
+                Ok(())
+            }
+        },
         Command::Completions { .. } | Command::Help { .. } => {
             // Completions / help return before identity setup.
             Err(anyhow::anyhow!(
@@ -1475,7 +1717,7 @@ fn harden_key_permissions(_path: &Path) -> Result<()> {
 ///
 /// Quick check: `nc -u -v -w3 8.8.8.8 53` should get a response. If it
 /// hangs or is refused, UDP outbound is blocked.
-async fn wait_online(endpoint: &Endpoint) -> Result<()> {
+pub(crate) async fn wait_online(endpoint: &Endpoint) -> Result<()> {
     const ONLINE_TIMEOUT: Duration = Duration::from_secs(30);
     match time::timeout(ONLINE_TIMEOUT, endpoint.online()).await {
         Ok(()) => Ok(()),
@@ -1498,16 +1740,14 @@ async fn wait_online(endpoint: &Endpoint) -> Result<()> {
 
 /// Build an endpoint with the given identity.
 ///
-/// With `relay` empty this uses [`presets::N0`]: n0's public relay servers
-/// plus DNS/pkarr address discovery. With one or more URLs it uses
-/// [`RelayMode::Custom`] from that list (self-hosted / multi-relay failover),
-/// skipping n0's discovery — nothing about this node is published to
-/// iroh.link. Pass several `--relay` values (e.g. your VPS then an n0 URL)
-/// for relay-side redundancy; magicsock picks among them.
+/// Build an endpoint.
 ///
-/// `relay_only` calls [`iroh::endpoint::Builder::clear_ip_transports`] so
-/// magicsock cannot hole-punch; both peers must set it for a reliable
-/// relay-only baseline (`--relay` alone still allows direct upgrade).
+/// - `relay` empty → [`presets::N0`] (public relays + discovery).
+/// - `relay` non-empty and `no_n0_relays` → [`presets::Minimal`] + custom map only.
+/// - `relay` non-empty and not `no_n0_relays` → N0 base (keeps discovery); call
+///   [`install_extra_relays`] after `bind` to add the custom URLs.
+///
+/// `relay_only` clears IP transports (true relay-only baseline).
 pub(crate) fn build_endpoint(
     secret_key: SecretKey,
     relay: &[String],
@@ -1515,15 +1755,14 @@ pub(crate) fn build_endpoint(
     idle_timeout: Duration,
     tune: &TransportTune,
     relay_only: bool,
+    no_n0_relays: bool,
 ) -> Result<iroh::endpoint::Builder> {
     let transport = transport_config(keepalive, idle_timeout, tune)?;
     let builder = if relay.is_empty() {
         Endpoint::builder(presets::N0)
             .secret_key(secret_key)
             .transport_config(transport)
-    } else {
-        // Minimal sets only the mandatory crypto provider; we configure
-        // everything else ourselves. Custom map from all --relay URLs.
+    } else if no_n0_relays {
         let relay_map = RelayMap::try_from_iter(relay.iter().map(|s| s.as_str()))
             .with_context(|| {
                 tr_fmt!(
@@ -1535,16 +1774,38 @@ pub(crate) fn build_endpoint(
             .secret_key(secret_key)
             .transport_config(transport)
             .relay_mode(RelayMode::Custom(relay_map))
+    } else {
+        // Keep n0 discovery + public relays; extras via install_extra_relays.
+        Endpoint::builder(presets::N0)
+            .secret_key(secret_key)
+            .transport_config(transport)
     };
     if relay_only {
-        // iroh's own relay-only tests use clear_ip_transports on both sides.
-        // Also filter discovery publishing so we don't advertise IP candidates.
         Ok(builder
             .clear_ip_transports()
             .addr_filter(iroh::address_lookup::AddrFilter::relay_only()))
     } else {
         Ok(builder)
     }
+}
+
+/// Insert custom relay URLs into a live endpoint that was built with n0 base.
+pub(crate) async fn install_extra_relays(
+    endpoint: &Endpoint,
+    relay: &[String],
+    no_n0_relays: bool,
+) -> Result<()> {
+    if no_n0_relays || relay.is_empty() {
+        return Ok(());
+    }
+    for raw in relay {
+        let url: iroh::RelayUrl = raw
+            .parse()
+            .with_context(|| tr_fmt!("'{0}' is not a valid RelayUrl", raw))?;
+        let cfg = std::sync::Arc::new(iroh::RelayConfig::from(url.clone()));
+        endpoint.insert_relay(url, cfg).await;
+    }
+    Ok(())
 }
 
 pub(crate) fn reject_relay_only_with_to_addr(relay_only: bool, to_addr: &[SocketAddr]) -> Result<()> {
@@ -1568,7 +1829,7 @@ pub(crate) fn reject_relay_only_with_to_addr(relay_only: bool, to_addr: &[Socket
 /// act as fallbacks for NAT traversal. Passing only direct hints and no
 /// relay means no DNS/pkarr lookup happens at all — the peer is dialed
 /// straight through the given addresses.
-fn build_dial_addr(
+pub(crate) fn build_dial_addr(
     peer_id: EndpointId,
     relay: &[String],
     to_addr: &[SocketAddr],
@@ -1645,19 +1906,21 @@ async fn run_serve(
     allowed: Vec<EndpointId>,
     relay: &[String],
     relay_only: bool,
+    no_n0_relays: bool,
     max_conns: usize,
     keepalive: Duration,
     idle_timeout: Duration,
     tune: TransportTune,
     styler: Styler,
 ) -> Result<()> {
-    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune, relay_only)?
+    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune, relay_only, no_n0_relays)?
         .alpns(vec![ALPN.to_vec(), PING_ALPN.to_vec()])
         .bind()
         .await
         .context(tr!("binding endpoint"))?;
 
     wait_online(&endpoint).await?;
+    install_extra_relays(&endpoint, relay, no_n0_relays).await?;
 
     println!("{}", styler.banner("link-p2p serve"));
     match mode {
@@ -1892,7 +2155,7 @@ impl ProtocolHandler for PingHandler {
 }
 
 /// Dial the target and pipe bytes between it and the given QUIC stream.
-async fn handle_forward_stream(
+pub(crate) async fn handle_forward_stream(
     mode: ServeMode,
     send: SendStream,
     mut recv: RecvStream,
@@ -1937,8 +2200,12 @@ pub(crate) fn spawn_path_monitor(
 ) {
     /// Sample window for path stats + slow-relay detection.
     const STATS_SECS: u64 = 30;
-    /// How often to nudge magicsock while still on relay.
+    /// How often to nudge magicsock while still on relay (and not relay-permanent).
     const UPGRADE_SECS: u64 = 45;
+    /// After this many pure-relay (no IP candidate) samples, slow upgrades.
+    const RELAY_PERM_STREAK: u8 = 4;
+    /// Backed-off upgrade interval for peers that never show a direct candidate.
+    const UPGRADE_SECS_PERMANENT: u64 = 300;
     /// Sustained under this (with real traffic) → treat as relay-shaped ceiling.
     const RELAY_SLOW_BPS: u64 = 128 * 1024;
     /// Ignore idle windows (keepalive alone).
@@ -1947,21 +2214,26 @@ pub(crate) fn spawn_path_monitor(
     tokio::spawn(async move {
         let mut stats_tick = time::interval(Duration::from_secs(STATS_SECS));
         stats_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-        let mut upgrade_tick = time::interval(Duration::from_secs(UPGRADE_SECS));
-        upgrade_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-        // Skip the immediate first ticks so we don't warn / re-STUN at t=0.
+        let mut next_upgrade = tokio::time::Instant::now() + Duration::from_secs(UPGRADE_SECS);
+        // Skip the immediate first stats tick.
         stats_tick.tick().await;
-        upgrade_tick.tick().await;
 
         let mut prev_bytes = {
             let s = connection.stats();
             s.udp_tx.bytes.saturating_add(s.udp_rx.bytes)
         };
         let mut slow_relay_streak: u8 = 0;
+        let mut no_ip_candidate_streak: u8 = 0;
         let mut warned_relay_limit = false;
+        let mut warned_relay_permanent = false;
         let mut was_direct = path_kind::path_kind(&connection).is_direct();
 
         loop {
+            let upgrade_delay = if no_ip_candidate_streak >= RELAY_PERM_STREAK {
+                Duration::from_secs(UPGRADE_SECS_PERMANENT)
+            } else {
+                Duration::from_secs(UPGRADE_SECS)
+            };
             tokio::select! {
                 _ = stats_tick.tick() => {
                     let s = connection.stats();
@@ -1993,16 +2265,41 @@ pub(crate) fn spawn_path_monitor(
                             );
                         }
                         warned_relay_limit = false;
+                        warned_relay_permanent = false;
                         slow_relay_streak = 0;
+                        no_ip_candidate_streak = 0;
                     }
                     was_direct = now_direct;
+
+                    match kind {
+                        path_kind::PathKind::Relay => {
+                            no_ip_candidate_streak =
+                                no_ip_candidate_streak.saturating_add(1);
+                        }
+                        path_kind::PathKind::Direct
+                        | path_kind::PathKind::RelayWithDirectCandidate => {
+                            no_ip_candidate_streak = 0;
+                        }
+                        path_kind::PathKind::Unknown => {}
+                    }
+                    if !warned_relay_permanent
+                        && no_ip_candidate_streak >= RELAY_PERM_STREAK
+                    {
+                        warned_relay_permanent = true;
+                        let msg = tr!(
+                            "no direct IP candidate observed — treating peer as relay-permanent (slowing hole-punch retries). CGNAT without global IPv6 often needs a self-hosted --relay"
+                        );
+                        tracing::warn!(%peer, "{}", msg);
+                        if !quiet {
+                            eprintln!("{}", styler.warn(&msg));
+                        }
+                    }
 
                     if !now_direct && (ACTIVE_MIN_BPS..RELAY_SLOW_BPS).contains(&bps) {
                         slow_relay_streak = slow_relay_streak.saturating_add(1);
                     } else {
                         slow_relay_streak = 0;
                     }
-                    // Two consecutive active-but-slow windows ≈ sustained.
                     if !warned_relay_limit && slow_relay_streak >= 2 {
                         warned_relay_limit = true;
                         let kbps = bps / 1024;
@@ -2016,9 +2313,14 @@ pub(crate) fn spawn_path_monitor(
                         }
                     }
                 }
-                _ = upgrade_tick.tick(), if !relay_only => {
+                _ = tokio::time::sleep_until(next_upgrade), if !relay_only => {
+                    next_upgrade = tokio::time::Instant::now() + upgrade_delay;
                     if !path_kind::path_kind(&connection).is_direct() {
-                        tracing::debug!(%peer, "nudging magicsock (network_change) for path upgrade retry");
+                        tracing::debug!(
+                            %peer,
+                            secs = upgrade_delay.as_secs(),
+                            "nudging magicsock (network_change) for path upgrade retry"
+                        );
                         endpoint.network_change().await;
                     }
                 }
@@ -2099,18 +2401,26 @@ impl Backoff {
 /// RECONNECT_POLL of stale sleep. `watch::Sender::send` requires the value
 /// to be cloneable; `Connection` is cheap to clone (an Arc inside).
 #[derive(Clone)]
-struct ConnSlot(Arc<watch::Sender<Option<Connection>>>);
+pub(crate) struct ConnSlot(Arc<watch::Sender<Option<Connection>>>);
 
 impl ConnSlot {
-    fn new(initial: Option<Connection>) -> Self {
+    pub(crate) fn new(initial: Option<Connection>) -> Self {
         let (tx, _rx) = watch::channel(initial);
         Self(Arc::new(tx))
     }
 
-    fn replace(&self, conn: Option<Connection>) {
+    pub(crate) fn replace(&self, conn: Option<Connection>) {
         // send() returns Err only when all receivers are dropped — at that
         // point nobody is waiting for a reconnect anyway.
         let _ = self.0.send(conn);
+    }
+
+    pub(crate) fn subscribe(&self) -> watch::Receiver<Option<Connection>> {
+        self.0.subscribe()
+    }
+
+    pub(crate) fn borrow(&self) -> Option<Connection> {
+        self.0.borrow().clone()
     }
 }
 
@@ -2123,7 +2433,7 @@ impl ConnSlot {
 ///   will redial and swap the slot.
 /// - `open_bi` fails on a still-alive connection (e.g. stream limit): give
 ///   up this stream only.
-async fn open_stream_wait(slot: &ConnSlot) -> Result<(SendStream, RecvStream)> {
+pub(crate) async fn open_stream_wait(slot: &ConnSlot) -> Result<(SendStream, RecvStream)> {
     loop {
         // A fresh receiver per attempt: starts at the current value, so if
         // a connection is already present we never wait at all.
@@ -2241,6 +2551,7 @@ async fn run_connect(
     mode: ConnectMode,
     relay: &[String],
     relay_only: bool,
+    no_n0_relays: bool,
     to_addr: Vec<SocketAddr>,
     max_conns: usize,
     keepalive: Duration,
@@ -2250,11 +2561,12 @@ async fn run_connect(
     styler: Styler,
 ) -> Result<()> {
     reject_relay_only_with_to_addr(relay_only, &to_addr)?;
-    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune, relay_only)?
+    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune, relay_only, no_n0_relays)?
         .bind()
         .await
         .map_err(|e| exit::coded(exit::CONNECT, anyhow::Error::new(e).context(tr!("binding endpoint"))))?;
     wait_online(&endpoint).await?;
+    install_extra_relays(&endpoint, relay, no_n0_relays).await?;
 
     let remote_id: EndpointId = to.parse().map_err(|e| {
         exit::coded(
@@ -2441,6 +2753,7 @@ async fn run_ping(
     to: &str,
     relay: &[String],
     relay_only: bool,
+    no_n0_relays: bool,
     to_addr: Vec<SocketAddr>,
     keepalive: Duration,
     idle_timeout: Duration,
@@ -2450,11 +2763,12 @@ async fn run_ping(
     styler: Styler,
 ) -> Result<()> {
     reject_relay_only_with_to_addr(relay_only, &to_addr)?;
-    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune, relay_only)?
+    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune, relay_only, no_n0_relays)?
         .bind()
         .await
         .map_err(|e| exit::coded(exit::CONNECT, anyhow::Error::new(e).context(tr!("binding endpoint"))))?;
     wait_online(&endpoint).await?;
+    install_extra_relays(&endpoint, relay, no_n0_relays).await?;
 
     let remote_id: EndpointId = to.parse().map_err(|e| {
         exit::coded(

@@ -891,3 +891,142 @@ msgstr "路径已升级为直连（IP）"
 
 msgid "low throughput while on relay (~{0} KB/s) — public relays rate-limit; self-host with --relay (and raise iroh-relay client limits) or wait for direct. See docs/performance.md"
 msgstr "仍在 relay 上且吞吐偏低（约 {0} KB/s）——公共 relay 会限速；请用 --relay 自建（并调高 iroh-relay 的 client 限速）或等待直连。见 docs/performance.md"
+
+# --- call / contacts / config / no-n0 ---
+msgid "'{0}' is not a contact name, EndpointId, or short code"
+msgstr "'{0}' is not a contact name, EndpointId, or short code"
+
+msgid "Add or update a contact."
+msgstr "添加或更新联系人。"
+
+msgid "Contact name, EndpointId, or short code from `contact code`."
+msgstr "联系人名字、EndpointId，或 `contact code` 给出的短码。"
+
+msgid "Custom relay URL(s), repeatable. Merged with n0 by default (keeps discovery); use --no-n0-relays to replace. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY (comma-separated) and config.toml."
+msgstr "Custom relay URL(s), repeatable. Merged with n0 by default (keeps discovery); use --no-n0-relays to replace. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY (comma-separated) and config.toml."
+
+msgid "Direct address hint(s) for the peer (repeatable)."
+msgstr "Direct address hint(s) for the peer (repeatable)."
+
+msgid "EndpointId hex or short code."
+msgstr "EndpointId 十六进制或短码。"
+
+msgid "List contacts."
+msgstr "列出联系人。"
+
+msgid "Local TCP address to listen on; connections are forwarded to the peer."
+msgstr "Local TCP address to listen on; connections are forwarded to the peer."
+
+msgid "Local TCP target for streams the peer opens to us (optional)."
+msgstr "Local TCP target for streams the peer opens to us (optional)."
+
+msgid "Local nickname."
+msgstr "本地昵称。"
+
+msgid "Manage the local contacts book (names → EndpointId)."
+msgstr "管理本地联系人簿（名字 → EndpointId）。"
+
+msgid "Phone-like session: both sides run `call` with the same peer token (contact name, EndpointId, or short code). The peer with the smaller EndpointId dials; the other waits. Use --listen and/or --forward on both ends. Relays from config.toml merge with n0 unless --no-n0-relays."
+msgstr "Phone-like session: both sides run `call` with the same peer token (contact name, EndpointId, or short code). The peer with the smaller EndpointId dials; the other waits. Use --listen and/or --forward on both ends. Relays from config.toml merge with n0 unless --no-n0-relays."
+
+msgid "Pipe stdin/stdout to one stream (Unix). Conflicts with --listen."
+msgstr "Pipe stdin/stdout to one stream (Unix). Conflicts with --listen."
+
+msgid "Print this node's short code (and EndpointId)."
+msgstr "打印本节点短码（以及 EndpointId）。"
+
+msgid "Remove a contact."
+msgstr "删除联系人。"
+
+msgid "Symmetric call: both peers publish and dial (tie-break by EndpointId)."
+msgstr "对称呼叫：双方同时发布并拨号（按 EndpointId 决胜）。"
+
+msgid "With --relay, use only the listed relays (no n0 public relays / discovery). Default merges custom relays into n0. Also LINK_P2P_NO_N0_RELAYS and config.toml relays.no_n0."
+msgstr "With --relay, use only the listed relays (no n0 public relays / discovery). Default merges custom relays into n0. Also LINK_P2P_NO_N0_RELAYS and config.toml relays.no_n0."
+
+msgid "call aborted before peer connected"
+msgstr "对端连接前呼叫已中止"
+
+msgid "call requires --listen (and optional --forward)"
+msgstr "call 需要 --listen（--forward 可选）"
+
+msgid "call requires exactly one of --listen or --stdio (and optional --forward)"
+msgstr "call 需要恰好指定 --listen 或 --stdio（--forward 可选）"
+
+msgid "calling {0}..."
+msgstr "正在呼叫 {0}……"
+
+msgid "connected to {0}"
+msgstr "已连接到 {0}"
+
+msgid "contact has invalid EndpointId '{0}'"
+msgstr "contact has invalid EndpointId '{0}'"
+
+msgid "contact has invalid address '{0}'"
+msgstr "contact has invalid address '{0}'"
+
+msgid "creating config directory {0}"
+msgstr "creating config directory {0}"
+
+msgid "invalid EndpointId in short code"
+msgstr "invalid EndpointId in short code"
+
+msgid "invalid character in short code"
+msgstr "短码含有无效字符"
+
+msgid "local TCP listener on {0} forwards to the peer"
+msgstr "本地 TCP 监听 {0}，转发到对端"
+
+msgid "no contact named '{0}'"
+msgstr "没有名为「{0}」的联系人"
+
+msgid "no contacts yet — use `contact add` or pair a short code"
+msgstr "还没有联系人——用 `contact add` 或配对短码"
+
+msgid "no direct IP candidate observed — treating peer as relay-permanent (slowing hole-punch retries). CGNAT without global IPv6 often needs a self-hosted --relay"
+msgstr "长时间未见直连 IP 候选——将该对端视为长期依赖中继（放慢打洞重试）。无全局 IPv6 的 CGNAT 节点通常需要自建 --relay"
+
+msgid "parsing config {0}"
+msgstr "parsing config {0}"
+
+msgid "parsing contacts {0}"
+msgstr "parsing contacts {0}"
+
+msgid "reading config {0}"
+msgstr "reading config {0}"
+
+msgid "reading contacts {0}"
+msgstr "reading contacts {0}"
+
+msgid "rejecting connection: unexpected peer for call"
+msgstr "拒绝连接：不是本次 call 的预期对端"
+
+msgid "removed contact {0}"
+msgstr "已删除联系人 {0}"
+
+msgid "saved contact {0} → {1}"
+msgstr "已保存联系人 {0} → {1}"
+
+msgid "serializing config"
+msgstr "序列化配置"
+
+msgid "serializing contacts"
+msgstr "序列化联系人"
+
+msgid "waiting for peer..."
+msgstr "等待对端……"
+
+msgid "we dial (EndpointId tie-break)"
+msgstr "由本端拨号（EndpointId 决胜）"
+
+msgid "we wait for peer to dial (EndpointId tie-break)"
+msgstr "等待对端拨号（EndpointId 决胜）"
+
+msgid "writing config {0}"
+msgstr "writing config {0}"
+
+msgid "writing contacts {0}"
+msgstr "writing contacts {0}"
+
+msgid "your short code: {0}"
+msgstr "你的短码：{0}"

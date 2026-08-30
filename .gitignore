@@ -4,3 +4,4 @@ locales/**/*.mo
 # Locally built test tools (see scripts/local-test.sh for how to build)
 /tools/
 /tmp.log
+__pycache__/

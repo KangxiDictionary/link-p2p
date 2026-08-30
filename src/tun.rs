@@ -1182,6 +1182,7 @@ pub async fn run_tun_serve(
     mtu: u16,
     relay: &[String],
     relay_only: bool,
+    no_n0_relays: bool,
     keepalive: Duration,
     idle_timeout: Duration,
     tune: crate::TransportTune,
@@ -1195,6 +1196,7 @@ pub async fn run_tun_serve(
         idle_timeout,
         &tune,
         relay_only,
+        no_n0_relays,
     )?
         .alpns(vec![TUN_ALPN.to_vec(), crate::PING_ALPN.to_vec()])
         .bind()
@@ -1213,6 +1215,10 @@ pub async fn run_tun_serve(
         return Err(e);
     }
     if let Err(e) = crate::wait_online(&endpoint).await {
+        endpoint.close().await;
+        return Err(e);
+    }
+    if let Err(e) = crate::install_extra_relays(&endpoint, relay, no_n0_relays).await {
         endpoint.close().await;
         return Err(e);
     }
@@ -1730,6 +1736,7 @@ pub async fn run_tun_connect(
     mtu: u16,
     relay: &[String],
     relay_only: bool,
+    no_n0_relays: bool,
     to_addr: Vec<SocketAddr>,
     keepalive: Duration,
     idle_timeout: Duration,
@@ -1745,6 +1752,7 @@ pub async fn run_tun_connect(
         idle_timeout,
         &tune,
         relay_only,
+        no_n0_relays,
     )?
         .alpns(vec![TUN_ALPN.to_vec(), crate::PING_ALPN.to_vec()])
         .bind()
@@ -1771,6 +1779,10 @@ pub async fn run_tun_connect(
         return Err(e);
     }
     if let Err(e) = crate::wait_online(&endpoint).await {
+        endpoint.close().await;
+        return Err(e);
+    }
+    if let Err(e) = crate::install_extra_relays(&endpoint, relay, no_n0_relays).await {
         endpoint.close().await;
         return Err(e);
     }

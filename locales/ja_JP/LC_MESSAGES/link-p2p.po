@@ -876,3 +876,142 @@ msgstr "パスが直通（IP）にアップグレードされました"
 
 msgid "low throughput while on relay (~{0} KB/s) — public relays rate-limit; self-host with --relay (and raise iroh-relay client limits) or wait for direct. See docs/performance.md"
 msgstr "リレー上で低スループット（約 {0} KB/s）——公開リレーはレート制限します。--relay で自前リレー（iroh-relay の client 制限を上げる）か直通を待ってください。docs/performance.md 参照"
+
+# --- call / contacts / config / no-n0 ---
+msgid "'{0}' is not a contact name, EndpointId, or short code"
+msgstr "'{0}' is not a contact name, EndpointId, or short code"
+
+msgid "Add or update a contact."
+msgstr "Add or update a contact."
+
+msgid "Contact name, EndpointId, or short code from `contact code`."
+msgstr "Contact name, EndpointId, or short code from `contact code`."
+
+msgid "Custom relay URL(s), repeatable. Merged with n0 by default (keeps discovery); use --no-n0-relays to replace. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY (comma-separated) and config.toml."
+msgstr "Custom relay URL(s), repeatable. Merged with n0 by default (keeps discovery); use --no-n0-relays to replace. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY (comma-separated) and config.toml."
+
+msgid "Direct address hint(s) for the peer (repeatable)."
+msgstr "Direct address hint(s) for the peer (repeatable)."
+
+msgid "EndpointId hex or short code."
+msgstr "EndpointId hex or short code."
+
+msgid "List contacts."
+msgstr "List contacts."
+
+msgid "Local TCP address to listen on; connections are forwarded to the peer."
+msgstr "Local TCP address to listen on; connections are forwarded to the peer."
+
+msgid "Local TCP target for streams the peer opens to us (optional)."
+msgstr "Local TCP target for streams the peer opens to us (optional)."
+
+msgid "Local nickname."
+msgstr "Local nickname."
+
+msgid "Manage the local contacts book (names → EndpointId)."
+msgstr "Manage the local contacts book (names → EndpointId)."
+
+msgid "Phone-like session: both sides run `call` with the same peer token (contact name, EndpointId, or short code). The peer with the smaller EndpointId dials; the other waits. Use --listen and/or --forward on both ends. Relays from config.toml merge with n0 unless --no-n0-relays."
+msgstr "Phone-like session: both sides run `call` with the same peer token (contact name, EndpointId, or short code). The peer with the smaller EndpointId dials; the other waits. Use --listen and/or --forward on both ends. Relays from config.toml merge with n0 unless --no-n0-relays."
+
+msgid "Pipe stdin/stdout to one stream (Unix). Conflicts with --listen."
+msgstr "Pipe stdin/stdout to one stream (Unix). Conflicts with --listen."
+
+msgid "Print this node's short code (and EndpointId)."
+msgstr "Print this node's short code (and EndpointId)."
+
+msgid "Remove a contact."
+msgstr "Remove a contact."
+
+msgid "Symmetric call: both peers publish and dial (tie-break by EndpointId)."
+msgstr "Symmetric call: both peers publish and dial (tie-break by EndpointId)."
+
+msgid "With --relay, use only the listed relays (no n0 public relays / discovery). Default merges custom relays into n0. Also LINK_P2P_NO_N0_RELAYS and config.toml relays.no_n0."
+msgstr "With --relay, use only the listed relays (no n0 public relays / discovery). Default merges custom relays into n0. Also LINK_P2P_NO_N0_RELAYS and config.toml relays.no_n0."
+
+msgid "call aborted before peer connected"
+msgstr "call aborted before peer connected"
+
+msgid "call requires --listen (and optional --forward)"
+msgstr "call requires --listen (and optional --forward)"
+
+msgid "call requires exactly one of --listen or --stdio (and optional --forward)"
+msgstr "call requires exactly one of --listen or --stdio (and optional --forward)"
+
+msgid "calling {0}..."
+msgstr "calling {0}..."
+
+msgid "connected to {0}"
+msgstr "connected to {0}"
+
+msgid "contact has invalid EndpointId '{0}'"
+msgstr "contact has invalid EndpointId '{0}'"
+
+msgid "contact has invalid address '{0}'"
+msgstr "contact has invalid address '{0}'"
+
+msgid "creating config directory {0}"
+msgstr "creating config directory {0}"
+
+msgid "invalid EndpointId in short code"
+msgstr "invalid EndpointId in short code"
+
+msgid "invalid character in short code"
+msgstr "invalid character in short code"
+
+msgid "local TCP listener on {0} forwards to the peer"
+msgstr "local TCP listener on {0} forwards to the peer"
+
+msgid "no contact named '{0}'"
+msgstr "no contact named '{0}'"
+
+msgid "no contacts yet — use `contact add` or pair a short code"
+msgstr "no contacts yet — use `contact add` or pair a short code"
+
+msgid "no direct IP candidate observed — treating peer as relay-permanent (slowing hole-punch retries). CGNAT without global IPv6 often needs a self-hosted --relay"
+msgstr "no direct IP candidate observed — treating peer as relay-permanent (slowing hole-punch retries). CGNAT without global IPv6 often needs a self-hosted --relay"
+
+msgid "parsing config {0}"
+msgstr "parsing config {0}"
+
+msgid "parsing contacts {0}"
+msgstr "parsing contacts {0}"
+
+msgid "reading config {0}"
+msgstr "reading config {0}"
+
+msgid "reading contacts {0}"
+msgstr "reading contacts {0}"
+
+msgid "rejecting connection: unexpected peer for call"
+msgstr "rejecting connection: unexpected peer for call"
+
+msgid "removed contact {0}"
+msgstr "removed contact {0}"
+
+msgid "saved contact {0} → {1}"
+msgstr "saved contact {0} → {1}"
+
+msgid "serializing config"
+msgstr "serializing config"
+
+msgid "serializing contacts"
+msgstr "serializing contacts"
+
+msgid "waiting for peer..."
+msgstr "waiting for peer..."
+
+msgid "we dial (EndpointId tie-break)"
+msgstr "we dial (EndpointId tie-break)"
+
+msgid "we wait for peer to dial (EndpointId tie-break)"
+msgstr "we wait for peer to dial (EndpointId tie-break)"
+
+msgid "writing config {0}"
+msgstr "writing config {0}"
+
+msgid "writing contacts {0}"
+msgstr "writing contacts {0}"
+
+msgid "your short code: {0}"
+msgstr "your short code: {0}"
