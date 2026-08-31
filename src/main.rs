@@ -75,7 +75,7 @@ pub(crate) const PING_ALPN: &[u8] = b"link-p2p/ping/0";
     long_about = "link-p2p exposes a local TCP service to a P2P network (or dials one) \
                   over a direct, end-to-end encrypted QUIC connection. No TUN device, \
                   no root/admin privileges — just a persistent EndpointId and a QUIC hop.",
-    after_help = "See README.md and docs/windows.md (Windows) or docs/unix.md (Unix)."
+    after_help = "See README.md and docs/user-guide/platforms.md."
 )]
 #[allow(clippy::struct_excessive_bools)]
 struct Cli {
@@ -151,7 +151,7 @@ struct Cli {
     verbose: u8,
 
     /// QUIC congestion controller: `cubic` (default) or `bbr3`. Also
-    /// `LINK_P2P_CC`. Experimental — see docs/performance.md.
+    /// `LINK_P2P_CC`. Experimental — see docs/architecture/performance.md.
     #[arg(long, global = true, env = "LINK_P2P_CC", value_enum)]
     cc: Option<CongestionControl>,
 
@@ -352,7 +352,7 @@ enum Command {
     /// Unlike `serve`/`connect`, which forward one TCP port, this bridges the
     /// whole machine: TCP, UDP and ICMP on mesh virtual IPs, with no per-port
     /// setup. Hub coordinates the roster; spokes prefer direct links — see
-    /// docs/tun-design.md.
+    /// docs/subsystems/tun.md.
     Tun {
         #[command(subcommand)]
         command: TunCommand,
@@ -512,12 +512,12 @@ fn version_arg() -> clap::Arg {
 /// Platform-specific quick start appended to `--help`.
 #[cfg(unix)]
 fn platform_after_help() -> &'static str {
-    "QUICK START:\n    link-p2p serve --forward 127.0.0.1:22\n    link-p2p connect --to <EndpointId> --listen 127.0.0.1:2222\n\nUNIX-ONLY:\n    connect --stdio, --to -, link-p2p man\n\nCOMPLETIONS:\n    link-p2p completions fish|bash|zsh > …\n\nSee docs/unix.md and README.md."
+    "QUICK START:\n    link-p2p serve --forward 127.0.0.1:22\n    link-p2p connect --to <EndpointId> --listen 127.0.0.1:2222\n\nUNIX-ONLY:\n    connect --stdio, --to -, link-p2p man\n\nCOMPLETIONS:\n    link-p2p completions fish|bash|zsh > …\n\nSee docs/user-guide/platforms.md and README.md."
 }
 
 #[cfg(windows)]
 fn platform_after_help() -> &'static str {
-    "QUICK START:\n    link-p2p serve --forward 127.0.0.1:3389\n    link-p2p connect --to <EndpointId> --listen 127.0.0.1:13389\n\nCOMPLETIONS:\n    link-p2p completions powershell | Out-File $PROFILE\\link-p2p.ps1\n\nTUN mode needs Administrator + wintun.dll beside the binary. See docs/windows.md and README.md."
+    "QUICK START:\n    link-p2p serve --forward 127.0.0.1:3389\n    link-p2p connect --to <EndpointId> --listen 127.0.0.1:13389\n\nCOMPLETIONS:\n    link-p2p completions powershell | Out-File $PROFILE\\link-p2p.ps1\n\nTUN mode needs Administrator + wintun.dll beside the binary. See docs/user-guide/platforms.md and README.md."
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -599,7 +599,7 @@ fn localized_command() -> clap::Command {
         )
         .mut_arg(
             "cc",
-            |a| helptext::set_help(a, &tr!("QUIC congestion controller: cubic (default) or bbr3. Also LINK_P2P_CC. See docs/performance.md.")),
+            |a| helptext::set_help(a, &tr!("QUIC congestion controller: cubic (default) or bbr3. Also LINK_P2P_CC. See docs/architecture/performance.md.")),
         )
         .mut_arg(
             "send_window",
@@ -671,7 +671,7 @@ fn localized_command() -> clap::Command {
                 .arg(help_arg())
                 .about(tr!("Make machines reachable at the IP layer over QUIC datagrams (mesh with hub coordination)."))
                 .long_about(helptext::hard_wrap_help(&tr!(
-                    "Make machines reachable at the IP layer over QUIC datagrams.\n\nCreates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). `tun serve` is the coordination hub (roster + fallback forward); `tun connect` dials it, learns the VIP↔EndpointId roster, and tries direct spoke↔spoke links (hub forward remains the fallback). Prefer `--cc bbr3` on lossy paths. Virtual IPs are IPv4 only — see docs/tun-design.md."
+                    "Make machines reachable at the IP layer over QUIC datagrams.\n\nCreates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). `tun serve` is the coordination hub (roster + fallback forward); `tun connect` dials it, learns the VIP↔EndpointId roster, and tries direct spoke↔spoke links (hub forward remains the fallback). Prefer `--cc bbr3` on lossy paths. Virtual IPs are IPv4 only — see docs/subsystems/tun.md."
                 )))
                 .mut_subcommand("serve", |ss| {
                     ss.disable_help_flag(true)
@@ -930,7 +930,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             out.push('\n');
         }
         out.push_str(".SH SEE ALSO\n");
-        out.push_str("docs/unix.md, docs/performance.md, README.md\n");
+        out.push_str("docs/user-guide/platforms.md, docs/architecture/performance.md, README.md\n");
         std::io::stdout()
             .write_all(out.as_bytes())
             .context(tr!("writing man page"))?;
@@ -1968,7 +1968,7 @@ fn transport_config(
         .keep_alive_interval(keepalive)
         .max_idle_timeout(Some(idle_timeout.try_into()?));
     // Defaults are CUBIC + ~100Mbps/100ms windows (noq). Override only when
-    // the operator asked — see docs/performance.md and the transport matrix.
+    // the operator asked — see docs/architecture/performance.md and the transport matrix.
     match tune.cc {
         Some(CongestionControl::Cubic) => {
             b = b.congestion_controller_factory(Arc::new(CubicConfig::default()));
@@ -2391,7 +2391,7 @@ pub(crate) fn spawn_path_monitor(
                         warned_relay_limit = true;
                         let kbps = bps / 1024;
                         let msg = tr_fmt!(
-                            "low throughput while on relay (~{0} KB/s) — public relays rate-limit; self-host with --relay (and raise iroh-relay client limits) or wait for direct. See docs/performance.md",
+                            "low throughput while on relay (~{0} KB/s) — public relays rate-limit; self-host with --relay (and raise iroh-relay client limits) or wait for direct. See docs/architecture/performance.md",
                             kbps
                         );
                         tracing::warn!(%peer, path = kind.as_str(), bps, "{}", msg);

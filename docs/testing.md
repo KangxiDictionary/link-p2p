@@ -32,13 +32,11 @@ Shared helpers live in `scripts/lib.sh` (`pass`/`fail`, `wait_endpoint_id`, loca
 | `sudo ./scripts/tun-loopback-test.sh` | TUN startup / MTU / route cleanup (same-host; not the datagram path) |
 | `./scripts/long-stability-test.sh {serve\|client}` | Long-lived stream samples (HTTP + ping); set `PEER=` / `DURATION=` |
 | `./scripts/remote-cleanup-link-p2p.sh` | Kill leftover `link-p2p` tmux/binaries only (not Tailscale) |
-| `./scripts/bench-transport-matrix.sh` | One-session transport config matrix — see `docs/performance.md` |
-| `./scripts/bench.sh` / `bench-multi.sh` | Quick / multi-pair throughput (see `docs/benchmarks.md`) |
+| `./scripts/bench-transport-matrix.sh` | Transport config matrix — see [architecture/performance.md](architecture/performance.md) |
+| `./scripts/bench.sh` / `bench-multi.sh` | Throughput benches — see [architecture/performance.md](architecture/performance.md) |
 | `./scripts/phase0-*.sh` / `phase1-*.sh` | Two-machine NAT / relay / migration — see below |
 
-TUN ICMP PMTUD notes: `docs/tun-design.md`. Ops clamp: `--mtu 1162`.
-
-Recorded runs: `docs/server-test-results.md`.
+TUN ICMP PMTUD and ops clamp (`--mtu 1162`): [subsystems/tun.md](subsystems/tun.md).
 
 ---
 

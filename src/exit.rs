@@ -1,6 +1,6 @@
 //! Process exit codes for shell / systemd / PowerShell scripting.
 //!
-//! On Unix, see `docs/unix.md`. Stable codes are enabled on all platforms.
+//! On Unix, see `docs/user-guide/platforms.md`. Stable codes are enabled on all platforms.
 //!
 //! Prefer wrapping failures with [`coded`] at the call site (locale-safe).
 //! [`code_from`]'s English substring fallback is a last resort for errors that

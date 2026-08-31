@@ -80,10 +80,10 @@ route needs `root` / `CAP_NET_ADMIN` (Linux, macOS) or an elevated process plus
 the two coexist and don't replace each other. Desktop backends are Linux
 (`/dev/net/tun` + `ip`), macOS (`utun`), and Windows (Wintun). macOS/Windows
 are best-effort until reported on real hardware — open an issue if something
-breaks. Before releases that touch TUN, run `docs/tun-acceptance.md`. On Linux,
+breaks. Before releases that touch TUN, run the checklist in
+[`docs/subsystems/tun.md`](docs/subsystems/tun.md). On Linux,
 `sudo setcap cap_net_admin+ep $(which link-p2p)` covers the
-network bits without a full root shell. Full design rationale and the
-acceptance checklist live in `docs/tun-design.md`.
+network bits without a full root shell.
 
 Two operational behaviors worth knowing:
 
@@ -153,7 +153,7 @@ and exchange candidate addresses before upgrading to a direct path. Run with
 `RUST_LOG=iroh=trace` and look for `Established` / `path_remote=Ip` in the
 logs to confirm whether a given session actually went direct or stayed on
 the relay — that distinction matters when you're reading throughput numbers
-off it (see `docs/benchmarks.md` / `docs/performance.md`).
+off it (see [`docs/architecture/performance.md`](docs/architecture/performance.md)).
 
 **IPv6 tip:** if either side has a global IPv6 address, try
 `connect --to-addr [2001:db8::1]:port` (and the matching listen/bind). That
@@ -176,7 +176,7 @@ session stays on relay; cubic vs bbr3 will not move that ceiling. Self-host
 on a small VPS (stable uplink, not a CGNAT home box), point both ends with
 `--relay`, and **raise `limits.client.rx` in the iroh-relay config** or you
 rebuild the same throttle. See `contrib/systemd/iroh-relay.service` and
-`docs/performance.md`.
+[`docs/architecture/performance.md`](docs/architecture/performance.md).
 
 ### Logging
 
@@ -253,27 +253,21 @@ Also supports `powershell` and `elvish`. Re-run after upgrading if flags change.
   per stream. That's the right default for an I/O-bound forwarder and there's
   no profiling data yet suggesting otherwise. Tuning worker thread count,
   switching to a current-thread runtime, or anything like that is a change
-  you make *in response to* a CPU/latency number from `docs/benchmarks.md` —
+  you make *in response to* a CPU/latency number from
+  [`docs/architecture/performance.md`](docs/architecture/performance.md) —
   not something to guess at ahead of time.
 
-## Unix-style CLI, Windows notes, and transport tuning
+## Platform notes and transport tuning
 
-Windows stream notes and TUN/Wintun setup (signed `wintun.dll`, translations):
-[`docs/windows.md`](docs/windows.md). Preferred Linux→Windows build:
-
-```bash
-cargo build --release --target x86_64-pc-windows-gnu
-# then copy link-p2p.exe + locales/ (+ official wintun.dll for TUN)
-```
-
-Unix-only shell plumbing (`connect --stdio`, `--to -`, `link-p2p man`) is behind
-`cfg(unix)`; see [`docs/unix.md`](docs/unix.md). Cross-platform: `ping --format json`,
-exit codes, `-q`/`-v`, `LINK_P2P_*` env defaults, shell completions.
+Linux / macOS / Windows differences (TUN privileges, Wintun, Unix-only flags,
+exit codes, env vars): [`docs/user-guide/platforms.md`](docs/user-guide/platforms.md).
 
 Before treating loopback benches as a QUIC “protocol wall”, run the one-session
 config matrix in [`scripts/bench-transport-matrix.sh`](scripts/bench-transport-matrix.sh)
-and read [`docs/performance.md`](docs/performance.md) (GSO defaults, CUBIC vs BBR3,
-windows, sysctl caveats).
+and read [`docs/architecture/performance.md`](docs/architecture/performance.md)
+(GSO defaults, CUBIC vs BBR3, windows, sysctl caveats).
+
+Cross-compile and release conventions: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Install
 
@@ -373,10 +367,10 @@ forces it on/off for scripts and pipes (`auto` is the default and respects
 - `scripts/phase*-{server,client}.sh` — optional two-machine real-network
   harness (NAT / relay / migration); see `docs/testing.md`.
 
-Prerequisites and full instructions: `docs/testing.md`.
+Prerequisites and full instructions: [`docs/testing.md`](docs/testing.md).
 
-Commit, versioning and release conventions for contributors:
-`docs/development.md`.
+Documentation index: [`docs/README.md`](docs/README.md). Commit, versioning and release conventions:
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Run
 
@@ -537,7 +531,8 @@ server`, copy the unit in, `systemctl enable --now iroh-relay`, then put
 ## Performance
 
 Loopback baseline and multi-connection scaling numbers (throughput, CPU, and
-the "is the ~650 MB/s wall crypto?" analysis) live in `docs/benchmarks.md`.
+the "is the ~650 MB/s wall crypto?" analysis) live in
+[`docs/architecture/performance.md`](docs/architecture/performance.md).
 Short version: ~2.6-3 Gbps per QUIC connection at the cost of ~2-3
 user-space cores, and connection sharding does **not** lift that ceiling.
 Re-measure after any data-plane change and on real hardware.
