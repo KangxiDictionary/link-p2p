@@ -8,9 +8,12 @@
 //! a session token against PID reuse. Mutual exclusion is `fslock` on
 //! `tun.lock`, held for the whole daemon lifetime.
 
-use std::fs::{self, OpenOptions};
+use std::fs::{self};
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -18,8 +21,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use fslock::LockFile;
 use iroh::EndpointId;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
-use tokio::net::{TcpListener, TcpStream};
+#[cfg(unix)]
+use tokio::io::{AsyncBufReadExt, BufReader as AsyncBufReader};
+use tokio::io::AsyncWriteExt;
+#[cfg(unix)]
+use tokio::net::TcpListener;
+use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
@@ -55,6 +62,7 @@ const CTL_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Socket mode for the control socket: ad-hoc is owner-only; system mode is
 /// world-connectable (the daemon itself authorizes `Shutdown` via peer creds).
+#[cfg(unix)]
 fn socket_mode(mode: RuntimeMode) -> u32 {
     if mode == RuntimeMode::System {
         0o666
@@ -371,7 +379,118 @@ mod ctl_sock {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[allow(clippy::wildcard_imports)]
+mod ctl_sock {
+    use super::*;
+    use tokio::net::windows::named_pipe::NamedPipeClient;
+
+    fn pipe_name(path: &Path) -> String {
+        path.to_string_lossy().into_owned()
+    }
+
+    pub async fn connect_timed(path: &Path, limit: Duration) -> Result<NamedPipeClient> {
+        let name = pipe_name(path);
+        let connect = async {
+            loop {
+                match crate::win_pipe::connect_client(&name) {
+                    Ok(c) => return Ok(c),
+                    Err(e) if crate::win_pipe::is_pipe_busy(&e) => {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        };
+        match timeout(limit, connect).await {
+            Ok(Ok(s)) => Ok(s),
+            Ok(Err(e)) => Err(e),
+            Err(_) => bail!(tr!("TUN control socket connect timed out")),
+        }
+    }
+
+    pub async fn handshake_status(path: &Path) -> Result<CtlResponse> {
+        let mut stream = connect_timed(path, PROBE_CONNECT_TIMEOUT).await?;
+        write_request(&mut stream, &CtlRequest::Status).await?;
+        let resp = timeout(PROBE_CONNECT_TIMEOUT, tun_ctl::read_response(&mut stream))
+            .await
+            .map_err(|_| anyhow::anyhow!(tr!("TUN control Status timed out")))??;
+        Ok(resp)
+    }
+
+    pub async fn handshake_peers(path: &Path) -> Result<CtlResponse> {
+        let mut stream = connect_timed(path, PROBE_CONNECT_TIMEOUT).await?;
+        write_request(&mut stream, &CtlRequest::Peers).await?;
+        let resp = timeout(PROBE_CONNECT_TIMEOUT, tun_ctl::read_response(&mut stream))
+            .await
+            .map_err(|_| anyhow::anyhow!(tr!("TUN control Peers timed out")))??;
+        Ok(resp)
+    }
+
+    /// Try a Status handshake. On failure return `Ok(None)` — named pipes are
+    /// not filesystem paths, so there is nothing to unlink.
+    pub async fn prepare_bind(path: &Path) -> Result<Option<CtlResponse>> {
+        match handshake_status(path).await {
+            Ok(status @ CtlResponse::Status { .. }) => Ok(Some(status)),
+            Ok(other) => bail!(tr_fmt!(
+                "unexpected Status response from TUN daemon: {0}",
+                format!("{other:?}")
+            )),
+            Err(e) if is_protocol_error(&e) => Err(e),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Accepts overlapping named-pipe instances (one per client).
+    pub struct PipeAcceptor {
+        name: String,
+        system: bool,
+    }
+
+    impl PipeAcceptor {
+        pub async fn accept(&self) -> Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+            let handle = crate::win_pipe::create_server_instance(&self.name, self.system)?;
+            let server = crate::win_pipe::into_server(handle)?;
+            server
+                .connect()
+                .await
+                .context(tr!("waiting for named-pipe client"))?;
+            Ok(server)
+        }
+    }
+
+    pub fn bind_listener(path: &Path, mode: RuntimeMode) -> Result<PipeAcceptor> {
+        Ok(PipeAcceptor {
+            name: pipe_name(path),
+            system: mode == RuntimeMode::System,
+        })
+    }
+
+    pub async fn send_shutdown(path: &Path, mode: RuntimeMode) -> Result<()> {
+        let mut stream = connect_timed(path, PROBE_CONNECT_TIMEOUT)
+            .await
+            .map_err(|_| tun_ctl::not_running(mode))?;
+        write_request(&mut stream, &CtlRequest::Shutdown).await?;
+        let resp = timeout(ready_timeout(), tun_ctl::read_response(&mut stream))
+            .await
+            .map_err(|_| {
+                exit::coded(
+                    exit::TIMEOUT,
+                    anyhow::anyhow!(tr!("TUN daemon Shutdown timed out")),
+                )
+            })??;
+        match resp {
+            CtlResponse::Ok => Ok(()),
+            CtlResponse::Err { code, message } => Err(exit::coded(code, anyhow::anyhow!(message))),
+            other => bail!(tr_fmt!(
+                "unexpected Shutdown response: {0}",
+                format!("{other:?}")
+            )),
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 mod ctl_sock {
     use super::*;
 
@@ -437,6 +556,9 @@ pub async fn probe(mode: RuntimeMode) -> Result<Liveness> {
                     }
                 }
             }
+            // Unix: unlink a stale socket file. Windows named pipes are not
+            // filesystem paths — never remove_file the pipe name.
+            #[cfg(unix)]
             if sock.exists() {
                 let _ = fs::remove_file(&sock);
             }
@@ -468,14 +590,13 @@ fn ensure_runtime_dir(mode: RuntimeMode) -> Result<PathBuf> {
             }
         }
         RuntimeMode::System => {
-            if tun_ctl::uses_unix_socket(mode) {
-                fs::create_dir_all(&dir).with_context(|| {
-                    tr_fmt!(
-                        "creating system runtime dir {0} (needs root or RuntimeDirectory=)",
-                        dir.display().to_string()
-                    )
-                })?;
-            }
+            // Unix: /run or /var/run. Windows: %ProgramData%\link-p2p (lock file).
+            fs::create_dir_all(&dir).with_context(|| {
+                tr_fmt!(
+                    "creating system runtime dir {0} (needs root or RuntimeDirectory=)",
+                    dir.display().to_string()
+                )
+            })?;
         }
     }
     Ok(dir)
@@ -721,7 +842,10 @@ async fn cleanup_residuals_if_dead(mode: RuntimeMode) {
     match probe(mode).await {
         Ok(Liveness::NotRunning | Liveness::Running { .. }) => {}
         Err(_) => {
-            let _ = fs::remove_file(tun_ctl::socket_path(mode));
+            #[cfg(unix)]
+            {
+                let _ = fs::remove_file(tun_ctl::socket_path(mode));
+            }
             if let Some(p) = tun_ctl::pid_path(mode) {
                 let _ = fs::remove_file(p);
             }
@@ -782,6 +906,13 @@ pub async fn cmd_up_background(
         }
         Ok(())
     }
+}
+
+/// Ask a running daemon to shut down via the control protocol.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub async fn send_ctl_shutdown(mode: RuntimeMode) -> Result<()> {
+    let sock = tun_ctl::socket_path(mode);
+    ctl_sock::send_shutdown(&sock, mode).await
 }
 
 /// Supervisor-managed foreground daemon (`tun up --foreground --system`).
@@ -967,7 +1098,10 @@ pub async fn request_shutdown_mode(mode: RuntimeMode) -> Result<()> {
             let _ = rec;
         }
     }
-    let _ = fs::remove_file(tun_ctl::socket_path(mode));
+    #[cfg(unix)]
+    {
+        let _ = fs::remove_file(tun_ctl::socket_path(mode));
+    }
     if let Some(p) = tun_ctl::pid_path(mode) {
         let _ = fs::remove_file(p);
     }
@@ -1055,14 +1189,35 @@ async fn run_worker_inner(
             }
         }
     };
-    #[cfg(not(unix))]
+
+    #[cfg(windows)]
+    let listener = {
+        let _ = detach;
+        let sock = tun_ctl::socket_path(mode);
+        if let Some(CtlResponse::Status { .. }) = ctl_sock::prepare_bind(&sock).await? {
+            drop_lock(&mut lock);
+            bail!(exit::coded(
+                exit::USAGE,
+                anyhow::anyhow!(tr!("TUN daemon is already running (try: link-p2p tun status)")),
+            ));
+        }
+        match ctl_sock::bind_listener(&sock, mode) {
+            Ok(l) => l,
+            Err(e) => {
+                drop_lock(&mut lock);
+                return Err(e);
+            }
+        }
+    };
+
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (role, session, skeleton, detach, data_plane);
         drop_lock(&mut lock);
         bail!(tr!("TUN daemon worker is Unix-only in this build"));
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         if let Some(pid_path) = tun_ctl::pid_path(mode) {
             let rec = PidRecord {
@@ -1071,7 +1226,10 @@ async fn run_worker_inner(
                 started_unix_ms: now_unix_ms(),
             };
             if let Err(e) = rec.write(&pid_path) {
-                let _ = fs::remove_file(tun_ctl::socket_path(mode));
+                #[cfg(unix)]
+                {
+                    let _ = fs::remove_file(tun_ctl::socket_path(mode));
+                }
                 drop_lock(&mut lock);
                 return Err(e);
             }
@@ -1114,6 +1272,28 @@ async fn run_skeleton_control(
     serve_ctl_until_shutdown(listener, hooks, /*require_privilege_for_shutdown=*/ false).await
 }
 
+#[cfg(windows)]
+async fn run_skeleton_control(
+    listener: ctl_sock::PipeAcceptor,
+    role: &str,
+    session: &str,
+) -> Result<()> {
+    if let Ok(addr) = std::env::var(ENV_READY) {
+        let mut stream = connect_ready(&addr).await?;
+        stream
+            .write_all(format!("{}\n", ready_line("OK")).as_bytes())
+            .await
+            .context(tr!("sending TUN ready OK"))?;
+    }
+
+    let state = crate::tun::TunLiveState::new(role, session);
+    state.set_vip(Ipv4Addr::new(172, 24, 0, 1)).await;
+
+    let (hooks, _ready_rx) = crate::tun::TunHooks::new(Arc::clone(&state));
+    let hooks = Arc::new(hooks);
+    serve_ctl_until_shutdown(listener, hooks, /*require_privilege_for_shutdown=*/ false).await
+}
+
 /// Real TUN + roster under the same lock/socket/ready contract as the skeleton.
 #[cfg(unix)]
 async fn run_live_control_and_data(
@@ -1144,6 +1324,50 @@ async fn run_live_control_and_data(
         }
     });
 
+    join_live_control_and_data(hooks, ctl, data, ready_rx, mode).await
+}
+
+#[cfg(windows)]
+async fn run_live_control_and_data(
+    listener: ctl_sock::PipeAcceptor,
+    role: &str,
+    session: &str,
+    mode: RuntimeMode,
+    data_plane: DataPlaneSource,
+) -> Result<()> {
+    let state = crate::tun::TunLiveState::new(role, session);
+    let (hooks, ready_rx) = crate::tun::TunHooks::new(Arc::clone(&state));
+    let hooks = Arc::new(hooks);
+
+    let ctl_hooks = Arc::clone(&hooks);
+    let require_privilege = mode == RuntimeMode::System;
+    let ctl = tokio::spawn(async move {
+        serve_ctl_until_shutdown(listener, ctl_hooks, require_privilege).await
+    });
+
+    let data_hooks = Arc::clone(&hooks);
+    let role_owned = role.to_string();
+    let data = tokio::spawn(async move {
+        match data_plane {
+            DataPlaneSource::Env => run_live_data_plane(&role_owned, data_hooks).await,
+            DataPlaneSource::Explicit(opts, ui, styler) => {
+                run_live_data_plane_explicit(&role_owned, data_hooks, opts, ui, styler).await
+            }
+        }
+    });
+
+    join_live_control_and_data(hooks, ctl, data, ready_rx, mode).await
+}
+
+/// Shared ready/shutdown join for live control+data (Unix socket or Windows pipe).
+#[cfg(any(unix, windows))]
+async fn join_live_control_and_data(
+    hooks: Arc<crate::tun::TunHooks>,
+    ctl: tokio::task::JoinHandle<Result<()>>,
+    data: tokio::task::JoinHandle<Result<()>>,
+    ready_rx: tokio::sync::oneshot::Receiver<Result<()>>,
+    mode: RuntimeMode,
+) -> Result<()> {
     let ready_addr = std::env::var(ENV_READY).ok();
     let log_hint = tun_ctl::log_path(mode)
         .map(|p| p.display().to_string())
@@ -1311,7 +1535,82 @@ fn peer_is_privileged(stream: &tokio::net::UnixStream) -> bool {
     }
 }
 
-#[cfg(unix)]
+#[cfg(windows)]
+async fn serve_ctl_until_shutdown(
+    acceptor: ctl_sock::PipeAcceptor,
+    hooks: Arc<crate::tun::TunHooks>,
+    require_privilege_for_shutdown: bool,
+) -> Result<()> {
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let mut tasks = JoinSet::new();
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => break,
+            accepted = acceptor.accept() => {
+                let Ok(stream) = accepted else { continue };
+                let hooks = Arc::clone(&hooks);
+                let shutdown_tx = shutdown_tx.clone();
+                tasks.spawn(handle_one_connection(
+                    stream,
+                    hooks,
+                    shutdown_tx,
+                    require_privilege_for_shutdown,
+                ));
+            }
+        }
+    }
+
+    let drain = tokio::time::sleep(CTL_DRAIN_TIMEOUT);
+    tokio::pin!(drain);
+    loop {
+        tokio::select! {
+            _ = &mut drain => break,
+            res = tasks.join_next() => {
+                if res.is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn handle_one_connection(
+    mut stream: tokio::net::windows::named_pipe::NamedPipeServer,
+    hooks: Arc<crate::tun::TunHooks>,
+    shutdown_tx: watch::Sender<bool>,
+    require_privilege: bool,
+) {
+    let req = match timeout(CTL_READ_TIMEOUT, tun_ctl::read_request(&mut stream)).await {
+        Ok(Ok(r)) => r,
+        _ => return,
+    };
+
+    let resp = match req {
+        CtlRequest::Status => hooks.state.status_response().await,
+        CtlRequest::Peers => hooks.state.peers_response().await,
+        CtlRequest::Shutdown => {
+            if require_privilege && !crate::win_pipe::peer_is_admin(&stream) {
+                CtlResponse::Err {
+                    code: exit::DENIED,
+                    message: tr!(
+                        "permission denied: only an elevated administrator may stop the TUN daemon"
+                    ),
+                }
+            } else {
+                let _ = shutdown_tx.send(true);
+                hooks.request_shutdown();
+                CtlResponse::Ok
+            }
+        }
+    };
+    let _ = timeout(CTL_READ_TIMEOUT, write_response(&mut stream, &resp)).await;
+}
+
+#[cfg(any(unix, windows))]
 async fn run_live_data_plane(role: &str, hooks: Arc<crate::tun::TunHooks>) -> Result<()> {
     // Quiet logging into tun.log (stdio already redirected by parent spawn).
     let ui = crate::Ui {
@@ -1399,7 +1698,7 @@ async fn run_live_data_plane(role: &str, hooks: Arc<crate::tun::TunHooks>) -> Re
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn run_live_data_plane_explicit(
     role: &str,
     hooks: Arc<crate::tun::TunHooks>,
@@ -1477,7 +1776,11 @@ fn parse_allow_env() -> Result<Option<std::collections::HashSet<iroh::EndpointId
 }
 
 fn cleanup_worker_files(mode: RuntimeMode) {
-    let _ = fs::remove_file(tun_ctl::socket_path(mode));
+    // Named pipes are not filesystem files — only unlink Unix sockets.
+    #[cfg(unix)]
+    {
+        let _ = fs::remove_file(tun_ctl::socket_path(mode));
+    }
     if let Some(p) = tun_ctl::pid_path(mode) {
         let _ = fs::remove_file(p);
     }

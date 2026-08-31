@@ -1463,3 +1463,24 @@ msgstr "Marcar un hub `tun serve`, instalar 172.24.0.0/16 en el TUN, recibir el 
 
 msgid "permission denied: only root or the service account may stop the TUN daemon"
 msgstr "permiso denegado: solo root o la cuenta de servicio pueden detener el daemon TUN"
+
+msgid "this command must be run as Administrator (elevated PowerShell / cmd)"
+msgstr "este comando debe ejecutarse como Administrador (PowerShell / cmd elevado)"
+
+msgid "refusing service install: binary is under AppData (install to Program Files first)"
+msgstr "rechazando instalación del servicio: el binario está bajo AppData (instale primero en Program Files)"
+
+msgid "timed out waiting for link-p2p-tun service to stop"
+msgstr "tiempo de espera agotado esperando que el servicio link-p2p-tun se detenga"
+
+msgid "removed {0} (identity under ProgramData/link-p2p was kept)"
+msgstr "eliminado {0} (se conservó identity en ProgramData/link-p2p)"
+
+msgid "Install or remove a TUN system service (Linux systemd; macOS LaunchDaemon; Windows SCM)."
+msgstr "Instalar o eliminar un servicio TUN del sistema (Linux systemd; macOS LaunchDaemon; Windows SCM)."
+
+msgid "Manage a platform service for `tun up --foreground --system`. Requires root/Administrator. Refuses to install if this binary is under a user-writable path. Identity defaults to /etc/link-p2p/identity.key (Unix) or %ProgramData%/link-p2p/identity.key (Windows). macOS runs as root LaunchDaemon; Linux uses a dedicated service user with CAP_NET_ADMIN; Windows runs as LocalSystem."
+msgstr "Gestiona un servicio de plataforma para `tun up --foreground --system`. Requiere root/Administrador. Rechaza instalar si el binario está en una ruta escribible por usuarios. Identity por defecto /etc/link-p2p/identity.key (Unix) o %ProgramData%/link-p2p/identity.key (Windows). macOS como LaunchDaemon root; Linux con usuario dedicado y CAP_NET_ADMIN; Windows como LocalSystem."
+
+msgid "tun service install is not supported on this platform yet"
+msgstr "tun service install aún no está soportado en esta plataforma"

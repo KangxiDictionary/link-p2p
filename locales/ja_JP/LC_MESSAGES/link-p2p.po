@@ -1459,3 +1459,24 @@ msgstr "`tun serve` hub にダイヤルし、TUN に 172.24.0.0/16 を入れ、�
 
 msgid "permission denied: only root or the service account may stop the TUN daemon"
 msgstr "権限がありません：TUN daemon を停止できるのは root またはサービスアカウントのみです"
+
+msgid "this command must be run as Administrator (elevated PowerShell / cmd)"
+msgstr "このコマンドは管理者として実行してください（昇格した PowerShell / cmd）"
+
+msgid "refusing service install: binary is under AppData (install to Program Files first)"
+msgstr "サービスインストールを拒否: バイナリが AppData 配下です（先に Program Files へインストールしてください）"
+
+msgid "timed out waiting for link-p2p-tun service to stop"
+msgstr "link-p2p-tun サービスの停止待機がタイムアウトしました"
+
+msgid "removed {0} (identity under ProgramData/link-p2p was kept)"
+msgstr "{0} を削除しました（ProgramData/link-p2p の identity は保持）"
+
+msgid "Install or remove a TUN system service (Linux systemd; macOS LaunchDaemon; Windows SCM)."
+msgstr "TUN システムサービスのインストール/削除（Linux systemd; macOS LaunchDaemon; Windows SCM）。"
+
+msgid "Manage a platform service for `tun up --foreground --system`. Requires root/Administrator. Refuses to install if this binary is under a user-writable path. Identity defaults to /etc/link-p2p/identity.key (Unix) or %ProgramData%/link-p2p/identity.key (Windows). macOS runs as root LaunchDaemon; Linux uses a dedicated service user with CAP_NET_ADMIN; Windows runs as LocalSystem."
+msgstr "`tun up --foreground --system` 用のプラットフォームサービスを管理。root/管理者必須。ユーザー書き込み可能なパスのバイナリは拒否。identity 既定は /etc/link-p2p/identity.key（Unix）または %ProgramData%/link-p2p/identity.key（Windows）。macOS は root LaunchDaemon、Linux は CAP_NET_ADMIN 付き専用ユーザー、Windows は LocalSystem。"
+
+msgid "tun service install is not supported on this platform yet"
+msgstr "このプラットフォームでは tun service install は未対応です"

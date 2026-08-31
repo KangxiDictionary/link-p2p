@@ -31,6 +31,10 @@ mod tun_ctl;
 mod tun_daemon;
 mod tun_roster;
 mod tun_service;
+#[cfg(windows)]
+mod win_pipe;
+#[cfg(windows)]
+mod win_service;
 
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
@@ -447,6 +451,9 @@ enum TunCommand {
         /// System-service paths (e.g. `/run/link-p2p/tun.sock`). Requires `--foreground`.
         #[arg(long)]
         system: bool,
+        /// Internal: running under Windows SCM (set only in the registered service command line).
+        #[arg(long, hide = true)]
+        windows_service: bool,
         /// Override this node's virtual IP (default: derived from its
         /// EndpointId, inside 172.24.0.0/16).
         #[arg(long)]
@@ -887,10 +894,10 @@ fn localized_command() -> clap::Command {
                     ss.disable_help_flag(true)
                         .arg(help_arg())
                         .about(tr!(
-                            "Install or remove a TUN system service (Linux systemd; macOS LaunchDaemon)."
+                            "Install or remove a TUN system service (Linux systemd; macOS LaunchDaemon; Windows SCM)."
                         ))
                         .long_about(helptext::hard_wrap_help(&tr!(
-                            "Manage a platform service for `tun up --foreground --system`. Requires root. Refuses to install if this binary is under a user-writable path. Identity defaults to /etc/link-p2p/identity.key (copied from the sudo caller's config when missing). macOS runs as root LaunchDaemon; Linux uses a dedicated service user with CAP_NET_ADMIN."
+                            "Manage a platform service for `tun up --foreground --system`. Requires root/Administrator. Refuses to install if this binary is under a user-writable path. Identity defaults to /etc/link-p2p/identity.key (Unix) or %ProgramData%/link-p2p/identity.key (Windows). macOS runs as root LaunchDaemon; Linux uses a dedicated service user with CAP_NET_ADMIN; Windows runs as LocalSystem."
                         )))
                         .mut_subcommand("install", |sss| {
                             sss.disable_help_flag(true)
@@ -1066,8 +1073,7 @@ fn localized_command() -> clap::Command {
         .arg(version_arg())
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     // Language selection + catalog load first, before any output; falls
     // back to English when the language/catalog isn't available.
     i18n::init();
@@ -1077,7 +1083,23 @@ async fn main() {
     let color_mode = style::detect_color_mode();
     let styler = style::apply_color_mode(color_mode);
 
-    if let Err(e) = real_main(color_mode).await {
+    // Windows SCM must own the process main thread via
+    // StartServiceCtrlDispatcher — do not nest that under #[tokio::main].
+    #[cfg(windows)]
+    if std::env::args_os().any(|a| a == "--windows-service") {
+        if let Err(e) = win_service::run_dispatcher() {
+            eprintln!("{}: {e:#}", styler.err(&tr!("error")));
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let result = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(real_main(color_mode));
+    if let Err(e) = result {
         eprintln!("{}: {e:#}", styler.err(&tr!("error")));
         std::process::exit(exit::code_from(&e));
     }
@@ -1393,6 +1415,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                     to,
                     foreground,
                     system,
+                    windows_service: _,
                     tun_ip,
                     mtu,
                     allow,
@@ -3607,6 +3630,10 @@ mod tests {
         }
 
         for arg in loc.get_arguments() {
+            // Hidden args (internal flags) are not user-facing help.
+            if arg.is_hide_set() {
+                continue;
+            }
             // Built-in / structural args with no help text are skipped.
             let Some(h) = arg.get_help() else { continue };
             let id = arg.get_id();

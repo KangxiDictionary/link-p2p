@@ -12,17 +12,17 @@
 //! | Resource | [`RuntimeMode::AdHoc`] | [`RuntimeMode::System`] |
 //! |---|---|---|
 //! | Control (Unix) | `$CONFIG/link-p2p/tun.sock` | Linux: `/run/link-p2p/tun.sock`; macOS: `/var/run/link-p2p/tun.sock` |
-//! | Control (Windows) | hashed pipe under user config | `\\.\pipe\link-p2p-tun-system` (DACL TBD) |
-//! | Lock | `tun.lock` beside socket | same runtime dir |
+//! | Control (Windows) | hashed pipe under user config | `\\.\pipe\link-p2p-tun-system` ([`WINDOWS_SYSTEM_PIPE_SDDL`]) |
+//! | Lock | `tun.lock` beside socket | same runtime dir (`%ProgramData%\link-p2p` on Windows) |
 //! | Pid file | `tun.pid` (hint + session persistence) | **none** (supervisor owns the process) |
-//! | Log file | `tun.log` (not rotated) | **none** (journald / plist paths) |
+//! | Log file | `tun.log` (not rotated) | **none** (journald / plist / SCM paths) |
 //! | Session token | in pid file + Status | **in-memory only**, still in Status |
 //!
 //! Path helpers ([`socket_path`], [`lock_path`], …) are **pure** — they never
 //! touch the filesystem or require privilege. Bind/create is the caller's job.
 //!
 //! **Identity** is separate from control paths: system services must pass
-//! `--identity /etc/link-p2p/identity.key` (or equivalent); do not rely on the
+//! `--identity` (see [`default_system_identity_path`]); do not rely on the
 //! service account's `$HOME/.config/link-p2p/identity.key`.
 
 use std::fmt;
@@ -81,14 +81,40 @@ fn system_runtime_dir() -> PathBuf {
     }
     #[cfg(windows)]
     {
-        // Named pipe — not a filesystem directory; socket_path() handles this.
-        PathBuf::from(r"\\.\pipe\link-p2p-tun-system")
+        // Lock / identity live under ProgramData; the named pipe path is
+        // separate (see [`socket_path`] / [`windows_system_pipe_name`]).
+        match std::env::var_os("ProgramData") {
+            Some(pd) => PathBuf::from(pd).join("link-p2p"),
+            None => PathBuf::from(r"C:\ProgramData\link-p2p"),
+        }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         PathBuf::from("/run/link-p2p")
     }
 }
+
+/// Default identity key path for supervisor-managed (`--system`) installs.
+///
+/// Windows: `%ProgramData%\link-p2p\identity.key`. Elsewhere:
+/// `/etc/link-p2p/identity.key`.
+pub fn default_system_identity_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        system_runtime_dir().join("identity.key")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/etc/link-p2p/identity.key")
+    }
+}
+
+/// SDDL for the Windows system named pipe (`\\.\pipe\link-p2p-tun-system`).
+///
+/// `BUILTIN\Users` get connect (GR/GW); SYSTEM and Administrators get full
+/// control. Privileged ctl ops (`Shutdown`) are still gated in-process via
+/// impersonation — DACL alone is not enough.
+pub const WINDOWS_SYSTEM_PIPE_SDDL: &str = "D:(A;;GRGW;;;BU)(A;;GA;;;SY)(A;;GA;;;BA)";
 
 /// Unix domain socket path, or Windows named pipe path.
 pub fn socket_path(mode: RuntimeMode) -> PathBuf {
@@ -457,7 +483,10 @@ mod tests {
     fn adhoc_paths_under_config_dir() {
         let base = crate::config::config_dir();
         let mode = RuntimeMode::AdHoc;
+        #[cfg(not(windows))]
         assert_eq!(socket_path(mode), base.join("tun.sock"));
+        #[cfg(windows)]
+        assert_eq!(socket_path(mode).to_string_lossy(), windows_adhoc_pipe_name());
         assert_eq!(pid_path(mode), Some(base.join("tun.pid")));
         assert_eq!(log_path(mode), Some(base.join("tun.log")));
         assert_eq!(lock_path(mode), base.join("tun.lock"));
@@ -489,7 +518,29 @@ mod tests {
                 windows_adhoc_pipe_name(),
                 windows_system_pipe_name()
             );
+            let sys_dir = runtime_dir(RuntimeMode::System);
+            assert_eq!(lock_path(RuntimeMode::System), sys_dir.join("tun.lock"));
+            assert!(
+                sys_dir.to_string_lossy().contains("link-p2p"),
+                "system runtime dir should be under ProgramData\\link-p2p, got {sys_dir:?}"
+            );
+            // Pipe path must not be used as the lock directory.
+            assert!(!sys_dir.to_string_lossy().contains(r"\\.\pipe"));
         }
+
+        // Identity defaults must not collide with ad-hoc config identity.
+        let sys_id = default_system_identity_path();
+        let adhoc_id = crate::config::config_dir().join("identity.key");
+        assert_ne!(sys_id, adhoc_id);
+        assert_ne!(runtime_dir(RuntimeMode::System), runtime_dir(RuntimeMode::AdHoc));
+    }
+
+    #[test]
+    fn windows_system_pipe_sddl_constant() {
+        assert_eq!(
+            WINDOWS_SYSTEM_PIPE_SDDL,
+            "D:(A;;GRGW;;;BU)(A;;GA;;;SY)(A;;GA;;;BA)"
+        );
     }
 
     #[test]
@@ -498,6 +549,7 @@ mod tests {
         let _ = runtime_dir(RuntimeMode::System);
         let _ = socket_path(RuntimeMode::System);
         let _ = lock_path(RuntimeMode::System);
+        let _ = default_system_identity_path();
     }
 
     #[test]

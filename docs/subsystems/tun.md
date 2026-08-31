@@ -128,7 +128,7 @@ Selected **only** via `--system` on CLI — not euid heuristics, not env vars.
 | Pid file | `tun.pid` | **none** |
 | Log | `tun.log` (not rotated) | **none** (journald / plist) |
 | Session | pid + Status | **memory only**, still in Status |
-| Identity | default config dir | **`--identity` required** (e.g. `/etc/link-p2p/identity.key`) |
+| Identity | default config dir | **`--identity` required** (Unix: `/etc/link-p2p/identity.key`; Windows: `%ProgramData%\link-p2p\identity.key`) |
 
 Path helpers are pure (no IO). `tun up --system` requires `--foreground`.
 Service example: `link-p2p tun up --foreground --role hub --system --identity /etc/link-p2p/identity.key`.
@@ -184,10 +184,10 @@ admin-only **`Shutdown`** (and any future privileged ops) in the daemon by
 inspecting the peer cred on Unix (`SO_PEERCRED` / `getpeereid`) rather than
 relying on file mode alone. macOS system mode needs the same audit (`/var/run/link-p2p/tun.sock`).
 
-#### Step 3 design — Windows SCM (locked; implementation next)
+#### Step 3 — Windows SCM (**implemented**; verify on real hardware)
 
-Prerequisites: ad-hoc Windows named-pipe control in `tun_ctl`/`tun_daemon` (same
-LPC1 protocol as Unix). TUN data plane via Wintun is already in tree.
+Prerequisites: Windows named-pipe control in `tun_ctl`/`tun_daemon`/`win_pipe`
+(same LPC1 protocol as Unix). TUN data plane via Wintun is already in tree.
 
 **Service account: LocalSystem** — no dedicated low-privilege Windows account.
 Linux `AmbientCapabilities=CAP_NET_ADMIN` has no Windows equivalent; Wintun adapter

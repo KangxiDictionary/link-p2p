@@ -1474,3 +1474,24 @@ msgstr "拨号到 `tun serve` hub，在 TUN 上安装 172.24.0.0/16，接收 mes
 
 msgid "permission denied: only root or the service account may stop the TUN daemon"
 msgstr "权限不足：只有 root 或服务账号才能停止 TUN daemon"
+
+msgid "this command must be run as Administrator (elevated PowerShell / cmd)"
+msgstr "此命令须以管理员身份运行（提升权限的 PowerShell / cmd）"
+
+msgid "refusing service install: binary is under AppData (install to Program Files first)"
+msgstr "拒绝服务安装：二进制位于 AppData 下（请先安装到 Program Files）"
+
+msgid "timed out waiting for link-p2p-tun service to stop"
+msgstr "等待 link-p2p-tun 服务停止超时"
+
+msgid "removed {0} (identity under ProgramData/link-p2p was kept)"
+msgstr "已移除 {0}（ProgramData/link-p2p 下的 identity 已保留）"
+
+msgid "Install or remove a TUN system service (Linux systemd; macOS LaunchDaemon; Windows SCM)."
+msgstr "安装或移除 TUN 系统服务（Linux systemd；macOS LaunchDaemon；Windows SCM）。"
+
+msgid "Manage a platform service for `tun up --foreground --system`. Requires root/Administrator. Refuses to install if this binary is under a user-writable path. Identity defaults to /etc/link-p2p/identity.key (Unix) or %ProgramData%/link-p2p/identity.key (Windows). macOS runs as root LaunchDaemon; Linux uses a dedicated service user with CAP_NET_ADMIN; Windows runs as LocalSystem."
+msgstr "为 `tun up --foreground --system` 管理平台服务。须 root/管理员。若二进制位于用户可写路径则拒绝安装。身份默认 /etc/link-p2p/identity.key（Unix）或 %ProgramData%/link-p2p/identity.key（Windows）。macOS 以 root LaunchDaemon 运行；Linux 使用带 CAP_NET_ADMIN 的专用服务用户；Windows 以 LocalSystem 运行。"
+
+msgid "tun service install is not supported on this platform yet"
+msgstr "此平台尚不支持 tun service install"

@@ -17,7 +17,12 @@ pub const UNIT_NAME: &str = "link-p2p-tun.service";
 pub const LAUNCHD_LABEL: &str = "com.link-p2p.tun";
 pub const PLIST_NAME: &str = "com.link-p2p.tun.plist";
 pub const DEFAULT_SERVICE_USER: &str = "link-p2p";
+
+#[cfg(windows)]
+pub const DEFAULT_IDENTITY_PATH: &str = r"C:\ProgramData\link-p2p\identity.key";
+#[cfg(not(windows))]
 pub const DEFAULT_IDENTITY_PATH: &str = "/etc/link-p2p/identity.key";
+
 const MACOS_LOG_DIR: &str = "/var/log/link-p2p";
 
 /// Options for `tun service install`.
@@ -186,11 +191,19 @@ pub fn check_service_binary_path(path: &Path) -> Result<()> {
             )),
         ));
     }
-    if lower.starts_with("/users/") {
+    if lower.starts_with("/users/") || lower.contains(r"\users\") {
         bail!(exit::coded(
             exit::USAGE,
             anyhow::anyhow!(tr!(
                 "refusing service install: binary is under /Users (install to /usr/local/bin first)"
+            )),
+        ));
+    }
+    if lower.contains(r"\appdata\") || lower.contains("/appdata/") {
+        bail!(exit::coded(
+            exit::USAGE,
+            anyhow::anyhow!(tr!(
+                "refusing service install: binary is under AppData (install to Program Files first)"
             )),
         ));
     }
@@ -243,7 +256,7 @@ fn plist_path() -> PathBuf {
     PathBuf::from("/Library/LaunchDaemons").join(PLIST_NAME)
 }
 
-fn require_root() -> Result<()> {
+fn require_elevated() -> Result<()> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         if !nix::unistd::geteuid().is_root() {
@@ -256,13 +269,16 @@ fn require_root() -> Result<()> {
         }
         return Ok(());
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
     {
-        let _ = ();
+        return crate::win_service::require_admin();
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
         bail!(exit::coded(
             exit::USAGE,
             anyhow::anyhow!(tr!(
-                "tun service install is not supported on this platform yet (Windows SCM coming later)"
+                "tun service install is not supported on this platform yet"
             )),
         ));
     }
@@ -381,7 +397,8 @@ fn secure_identity_for_service(_path: &Path, _service_user: &str) -> Result<()> 
 
 /// `link-p2p tun service install`
 pub fn cmd_install(opts: InstallOpts, styler: &Styler) -> Result<()> {
-    require_root()?;
+    // Privilege check first — before any /etc or ProgramData writes (rc=USAGE).
+    require_elevated()?;
 
     let exe = validate_service_binary(&std::env::current_exe().context(tr!("current_exe"))?)?;
     tun_daemon::resolve_up_role(Some(opts.role.as_str()), opts.to.as_deref())?;
@@ -406,11 +423,42 @@ pub fn cmd_install(opts: InstallOpts, styler: &Styler) -> Result<()> {
     {
         return cmd_install_macos(exe, opts, styler);
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        return cmd_install_windows(exe, opts, styler);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = (exe, opts, styler);
-        unreachable!("require_root already rejected this platform");
+        unreachable!("require_elevated already rejected this platform");
     }
+}
+
+#[cfg(windows)]
+fn cmd_install_windows(exe: PathBuf, opts: InstallOpts, styler: &Styler) -> Result<()> {
+    // Ensure ProgramData runtime dir exists for tun.lock.
+    let runtime = crate::tun_ctl::runtime_dir(crate::tun_ctl::RuntimeMode::System);
+    fs::create_dir_all(&runtime).with_context(|| {
+        tr_fmt!("creating {0}", runtime.display().to_string())
+    })?;
+
+    crate::win_service::install_scm(&exe, &opts)?;
+
+    println!(
+        "{}",
+        styler.ok(&tr_fmt!(
+            "installed and started {0} (control: link-p2p tun status --system)",
+            crate::win_service::SERVICE_NAME
+        ))
+    );
+    println!(
+        "  {}",
+        tr_fmt!(
+            "identity: {0} (EndpointId is stable across service restarts)",
+            opts.identity.display().to_string()
+        )
+    );
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -500,7 +548,7 @@ fn cmd_install_macos(exe: PathBuf, opts: InstallOpts, styler: &Styler) -> Result
 
 /// `link-p2p tun service uninstall`
 pub fn cmd_uninstall(styler: &Styler) -> Result<()> {
-    require_root()?;
+    require_elevated()?;
 
     #[cfg(target_os = "linux")]
     {
@@ -543,6 +591,18 @@ pub fn cmd_uninstall(styler: &Styler) -> Result<()> {
         );
     }
 
+    #[cfg(windows)]
+    {
+        crate::win_service::uninstall_scm()?;
+        println!(
+            "{}",
+            styler.ok(&tr_fmt!(
+                "removed {0} (identity under ProgramData/link-p2p was kept)",
+                crate::win_service::SERVICE_NAME
+            ))
+        );
+    }
+
     Ok(())
 }
 
@@ -569,7 +629,15 @@ pub fn sudo_caller_identity_path() -> Option<PathBuf> {
     path.filter(|p| p.is_file())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn sudo_caller_identity_path() -> Option<PathBuf> {
+    // Elevated install: prefer the installing user's LocalAppData key.
+    let local = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty())?;
+    let p = PathBuf::from(local).join("link-p2p").join("identity.key");
+    p.is_file().then_some(p)
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn sudo_caller_identity_path() -> Option<PathBuf> {
     None
 }

@@ -154,7 +154,7 @@ Mode is selected only via `--system` (CLI flag, not env).
 | 0 | `RuntimeMode` + path SSOT + `--system` CLI | **done** (pure path tests; system skips pid/log; session in Status) |
 | 1 | Linux `tun service install/uninstall` | **done** (`link-p2p-tun.service`, binary path gate, identity bootstrap) |
 | 2 | macOS LaunchDaemon + log rotation docs | **implemented** (plist + newsyslog note; `launchctl` path not verified on real macOS) |
-| 3 | Windows SCM + named pipe ACL | **designed** (LocalSystem, SDDL above, `--windows-service` SCM path, ProgramData identity; see `tun.md`) |
+| 3 | Windows SCM + named pipe ACL | **implemented** (LocalSystem, SDDL + impersonation, `--windows-service`, ProgramData identity; verify on real Windows) |
 
 Service `ExecStart` must use `tun up --foreground --role … --system --identity …`
 — never background fork. Binary must live in an admin-only path (install-time check).
