@@ -24,13 +24,16 @@ use bytes::Bytes;
 use iroh::endpoint::Connection;
 use iroh::protocol::ProtocolHandler;
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, oneshot, Notify, RwLock};
 use tokio::time::{self, Duration};
 use tracing::{info, warn};
 use tun2::AbstractDevice;
 
+use std::sync::Mutex as StdMutex;
+
 use crate::i18n::{tr, tr_fmt};
 use crate::style::Styler;
+use crate::tun_ctl::{CtlPeer, CtlResponse};
 use crate::tun_roster::{
     encode_joined, encode_left, encode_snapshot, read_msg, should_dial, write_msg, RosterEntry,
     RosterMsg,
@@ -54,6 +57,93 @@ const VIP_BASE: u32 = 0xAC18_0000; // 172.24.0.0
 const VIP_HOST_BITS: u32 = 0x0000_FFFF;
 /// Whole mesh prefix spokes install on the TUN (hub keeps per-peer /32s).
 const VIP_PREFIX: &str = "172.24.0.0/16";
+
+/// Live snapshot for the daemon control plane (`Status` / `Peers`).
+#[derive(Debug)]
+pub struct TunLiveState {
+    pub role: String,
+    pub session: String,
+    started: Instant,
+    vip: RwLock<Option<Ipv4Addr>>,
+    path_kind: RwLock<String>,
+    peers: RwLock<Vec<CtlPeer>>,
+}
+
+impl TunLiveState {
+    pub fn new(role: impl Into<String>, session: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self {
+            role: role.into(),
+            session: session.into(),
+            started: Instant::now(),
+            vip: RwLock::new(None),
+            path_kind: RwLock::new("unknown".into()),
+            peers: RwLock::new(Vec::new()),
+        })
+    }
+
+    pub async fn set_vip(&self, vip: Ipv4Addr) {
+        *self.vip.write().await = Some(vip);
+    }
+
+    pub async fn set_path_kind(&self, kind: &str) {
+        *self.path_kind.write().await = kind.to_string();
+    }
+
+    pub async fn set_peers(&self, peers: Vec<CtlPeer>) {
+        *self.peers.write().await = peers;
+    }
+
+    pub async fn status_response(&self) -> CtlResponse {
+        CtlResponse::Status {
+            role: self.role.clone(),
+            uptime_secs: self.started.elapsed().as_secs(),
+            vip: self.vip.read().await.unwrap_or(Ipv4Addr::UNSPECIFIED),
+            path_kind: self.path_kind.read().await.clone(),
+            session: self.session.clone(),
+        }
+    }
+
+    pub async fn peers_response(&self) -> CtlResponse {
+        CtlResponse::Peers {
+            peers: self.peers.read().await.clone(),
+        }
+    }
+}
+
+/// Hooks so a TUN data-plane future can be driven by the daemon worker:
+/// cancel on `Shutdown`, publish live Status/Peers, and fire ready after TUN
+/// create (parent must not return success before the interface exists).
+pub struct TunHooks {
+    pub cancel: Arc<Notify>,
+    pub state: Arc<TunLiveState>,
+    ready: StdMutex<Option<oneshot::Sender<Result<()>>>>,
+}
+
+impl TunHooks {
+    pub fn new(state: Arc<TunLiveState>) -> (Self, oneshot::Receiver<Result<()>>) {
+        let (tx, rx) = oneshot::channel();
+        (
+            Self {
+                cancel: Arc::new(Notify::new()),
+                state,
+                ready: StdMutex::new(Some(tx)),
+            },
+            rx,
+        )
+    }
+
+    pub fn signal_ready(&self, result: Result<()>) {
+        if let Ok(mut g) = self.ready.lock() {
+            if let Some(tx) = g.take() {
+                let _ = tx.send(result);
+            }
+        }
+    }
+
+    pub fn request_shutdown(&self) {
+        self.cancel.notify_waiters();
+    }
+}
 
 fn vip_in_mesh(ip: Ipv4Addr) -> bool {
     u32::from(ip) & !VIP_HOST_BITS == VIP_BASE
@@ -1190,8 +1280,9 @@ pub async fn run_tun_serve(
     allow: Option<HashSet<EndpointId>>,
     ui: crate::Ui,
     styler: Styler,
+    hooks: Option<Arc<TunHooks>>,
 ) -> Result<()> {
-    let endpoint = crate::build_endpoint(
+    let endpoint = match crate::build_endpoint(
         secret_key,
         relay,
         keepalive,
@@ -1199,38 +1290,65 @@ pub async fn run_tun_serve(
         &tune,
         relay_only,
         no_n0_relays,
-    )?
-        .alpns(vec![TUN_ALPN.to_vec(), crate::PING_ALPN.to_vec()])
-        .bind()
-        .await
-        .map_err(|e| {
-            crate::exit::coded(
-                crate::exit::CONNECT,
-                anyhow::Error::new(e).context(tr!("binding endpoint")),
-            )
-        })?;
+    ) {
+        Ok(b) => b
+            .alpns(vec![TUN_ALPN.to_vec(), crate::PING_ALPN.to_vec()])
+            .bind()
+            .await
+            .map_err(|e| {
+                crate::exit::coded(
+                    crate::exit::CONNECT,
+                    anyhow::Error::new(e).context(tr!("binding endpoint")),
+                )
+            }),
+        Err(e) => Err(e),
+    };
+    let endpoint = match endpoint {
+        Ok(e) => e,
+        Err(e) => {
+            if let Some(h) = &hooks {
+                h.signal_ready(Err(anyhow::anyhow!("{e:#}")));
+            }
+            return Err(e);
+        }
+    };
 
     let own_id = endpoint.id();
     let own_vip = tun_ip.unwrap_or_else(|| derive_vip(own_id));
+    let signal_err = |e: &anyhow::Error| {
+        if let Some(h) = &hooks {
+            h.signal_ready(Err(anyhow::anyhow!("{e:#}")));
+        }
+    };
     if let Err(e) = ensure_vip_free(own_vip) {
+        signal_err(&e);
         endpoint.close().await;
         return Err(e);
     }
     if let Err(e) = crate::wait_online(&endpoint).await {
+        signal_err(&e);
         endpoint.close().await;
         return Err(e);
     }
     if let Err(e) = crate::install_extra_relays(&endpoint, relay, no_n0_relays).await {
+        signal_err(&e);
         endpoint.close().await;
         return Err(e);
     }
     let (tun, tun_name) = match create_tun_device(own_vip, mtu) {
         Ok(x) => x,
         Err(e) => {
+            if let Some(h) = &hooks {
+                h.signal_ready(Err(anyhow::anyhow!("{e:#}")));
+            }
             endpoint.close().await;
             return Err(e);
         }
     };
+    if let Some(h) = &hooks {
+        h.state.set_vip(own_vip).await;
+        h.signal_ready(Ok(()));
+    }
     let (tun_io, from_tun) = spawn_tun_io(tun, mtu);
     let raise_gate = new_mtu_raise_gate();
     let peers: HubPeers = Arc::new(RwLock::new(HashMap::new()));
@@ -1238,36 +1356,42 @@ pub async fn run_tun_serve(
 
     tokio::spawn(hub_tun_to_peers(from_tun, own_vip, Arc::clone(&peers)));
 
-    ui.line(styler.banner("link-p2p tun serve"));
-    ui.line(format!(
-        "  {}",
-        styler.dim(&tr!("your virtual IP (the peer reaches you here):"))
-    ));
-    ui.line(format!("    {}", styler.highlight(&own_vip.to_string())));
-    ui.line(format!(
-        "  {}",
-        styler.dim(&tr!(
-            "your EndpointId (give this to peers running `tun connect --to`):"
-        ))
-    ));
-    let ep_hex = own_id.to_string();
-    ui.line(format!("    {}", styler.highlight(&ep_hex)));
-    // Machine-readable for scripts / e2e — always stdout, even under `-q`.
-    println!("ENDPOINT_ID={ep_hex}");
-    ui.line(format!(
-        "  {}",
-        styler.dim(&tr!(
-            "hub mode: roster + fallback forward; spokes may peer directly"
-        ))
-    ));
-    if allow.is_some() {
+    if hooks.is_none() {
+        ui.line(styler.banner("link-p2p tun serve"));
         ui.line(format!(
             "  {}",
-            styler.dim(&tr!("only accepting connections from the --allow list"))
+            styler.dim(&tr!("your virtual IP (the peer reaches you here):"))
         ));
+        ui.line(format!("    {}", styler.highlight(&own_vip.to_string())));
+        ui.line(format!(
+            "  {}",
+            styler.dim(&tr!(
+                "your EndpointId (give this to peers running `tun connect --to`):"
+            ))
+        ));
+        let ep_hex = own_id.to_string();
+        ui.line(format!("    {}", styler.highlight(&ep_hex)));
+        // Machine-readable for scripts / e2e — always stdout, even under `-q`.
+        println!("ENDPOINT_ID={ep_hex}");
+        ui.line(format!(
+            "  {}",
+            styler.dim(&tr!(
+                "hub mode: roster + fallback forward; spokes may peer directly"
+            ))
+        ));
+        if allow.is_some() {
+            ui.line(format!(
+                "  {}",
+                styler.dim(&tr!("only accepting connections from the --allow list"))
+            ));
+        }
+        ui.line("");
+        ui.line(styler.dim(&tr!("Press Ctrl+C to stop.")));
+    } else {
+        // Daemon: still emit machine-readable id on stdout of the worker (→ tun.log).
+        let ep_hex = own_id.to_string();
+        println!("ENDPOINT_ID={ep_hex}");
     }
-    ui.line("");
-    ui.line(styler.dim(&tr!("Press Ctrl+C to stop.")));
 
     loop {
         tokio::select! {
@@ -1308,6 +1432,7 @@ pub async fn run_tun_serve(
                 let tun_name = tun_name.clone();
                 let raise_gate = Arc::clone(&raise_gate);
                 let user_mtu = mtu;
+                let hooks_s = hooks.clone();
                 crate::spawn_path_monitor(
                     conn.clone(),
                     peer_id,
@@ -1330,6 +1455,7 @@ pub async fn run_tun_serve(
                         user_mtu,
                         raise_gate,
                         quiet,
+                        hooks_s,
                     )
                     .await
                     {
@@ -1337,8 +1463,17 @@ pub async fn run_tun_serve(
                     }
                 });
             }
-            _ = tokio::signal::ctrl_c() => {
+            _ = tokio::signal::ctrl_c(), if hooks.is_none() => {
                 ui.line(styler.warn(&tr!("shutting down...")));
+                break;
+            }
+            _ = async {
+                match &hooks {
+                    Some(h) => h.cancel.notified().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                info!("{}", tr!("TUN daemon Shutdown requested"));
                 break;
             }
         }
@@ -1359,6 +1494,7 @@ async fn hub_run_spoke(
     user_mtu: u16,
     raise_gate: MtuRaiseGate,
     quiet: bool,
+    hooks: Option<Arc<TunHooks>>,
 ) -> Result<()> {
     let peer_vip = exchange_peer_vip(&conn, own_vip, false).await?;
     if peer_vip == own_vip || !vip_in_mesh(peer_vip) {
@@ -1445,6 +1581,11 @@ async fn hub_run_spoke(
     }));
     broadcast_roster(&fans, joined).await;
 
+    if let Some(h) = &hooks {
+        h.state.set_path_kind(path_label(&conn)).await;
+        refresh_hub_peers_state(&h.state, &peers).await;
+    }
+
     // Fan-out task: roster updates for this spoke.
     let ctrl_send_task = {
         let mut ctrl_send = ctrl_send;
@@ -1472,11 +1613,26 @@ async fn hub_run_spoke(
         id: peer_id,
     }));
     broadcast_roster(&fans, left).await;
+    if let Some(h) = &hooks {
+        refresh_hub_peers_state(&h.state, &peers).await;
+    }
     if let Err(e) = del_peer_route(&tun_name, peer_vip) {
         warn!(%peer_id, error = %e, "{}", tr!("could not remove peer route"));
     }
     info!(%peer_id, %peer_vip, "{}", tr!("peer left the mesh"));
     Ok(())
+}
+
+async fn refresh_hub_peers_state(state: &TunLiveState, peers: &HubPeers) {
+    let map = peers.read().await;
+    let list: Vec<CtlPeer> = map
+        .iter()
+        .map(|(vip, p)| CtlPeer {
+            vip: *vip,
+            id: p.id.to_string(),
+        })
+        .collect();
+    state.set_peers(list).await;
 }
 
 /// Spoke-side mesh table: hub fallback + optional direct peer connections.
@@ -1755,6 +1911,7 @@ pub async fn run_tun_connect(
     allow: Option<HashSet<EndpointId>>,
     ui: crate::Ui,
     styler: Styler,
+    hooks: Option<Arc<TunHooks>>,
 ) -> Result<()> {
     crate::reject_relay_only_with_to_addr(relay_only, &to_addr)?;
     let endpoint = crate::build_endpoint(
@@ -1779,22 +1936,34 @@ pub async fn run_tun_connect(
     let hub_id: EndpointId = match to.parse() {
         Ok(id) => id,
         Err(e) => {
+            let err = anyhow::Error::new(e)
+                .context(tr_fmt!("'{0}' is not a valid EndpointId", to));
+            if let Some(h) = &hooks {
+                h.signal_ready(Err(anyhow::anyhow!("{err:#}")));
+            }
             endpoint.close().await;
-            return Err(anyhow::Error::new(e)
-                .context(tr_fmt!("'{0}' is not a valid EndpointId", to)));
+            return Err(err);
         }
     };
     let own_id = endpoint.id();
     let own_vip = tun_ip.unwrap_or_else(|| derive_vip(own_id));
+    let signal_err = |e: &anyhow::Error| {
+        if let Some(h) = &hooks {
+            h.signal_ready(Err(anyhow::anyhow!("{e:#}")));
+        }
+    };
     if let Err(e) = ensure_vip_free(own_vip) {
+        signal_err(&e);
         endpoint.close().await;
         return Err(e);
     }
     if let Err(e) = crate::wait_online(&endpoint).await {
+        signal_err(&e);
         endpoint.close().await;
         return Err(e);
     }
     if let Err(e) = crate::install_extra_relays(&endpoint, relay, no_n0_relays).await {
+        signal_err(&e);
         endpoint.close().await;
         return Err(e);
     }
@@ -1802,11 +1971,12 @@ pub async fn run_tun_connect(
     let dial_addr = match crate::build_dial_addr(hub_id, relay, &to_addr) {
         Ok(a) => a,
         Err(e) => {
+            signal_err(&e);
             endpoint.close().await;
             return Err(e);
         }
     };
-    if !to_addr.is_empty() {
+    if !to_addr.is_empty() && hooks.is_none() {
         ui.line(format!(
             "  {}",
             styler.dim(&tr_fmt!(
@@ -1823,10 +1993,16 @@ pub async fn run_tun_connect(
     let (tun, tun_name) = match create_tun_device(own_vip, mtu) {
         Ok(x) => x,
         Err(e) => {
+            signal_err(&e);
             endpoint.close().await;
             return Err(e);
         }
     };
+    if let Some(h) = &hooks {
+        h.state.set_vip(own_vip).await;
+        // Spoke ready after TUN exists; hub dial may still be in progress.
+        h.signal_ready(Ok(()));
+    }
     let (tun_io, mut from_tun) = spawn_tun_io(tun, mtu);
     let raise_gate = new_mtu_raise_gate();
     let mesh: SharedSpokeMesh = Arc::new(RwLock::new(SpokeMesh::new(own_id, own_vip)));
@@ -1914,8 +2090,18 @@ pub async fn run_tun_connect(
         if let Some(d) = delay {
             tokio::select! {
                 _ = time::sleep(d) => {}
-                _ = tokio::signal::ctrl_c() => {
+                _ = tokio::signal::ctrl_c(), if hooks.is_none() => {
                     ui.line(styler.warn(&tr!("shutting down...")));
+                    endpoint.close().await;
+                    return Ok(());
+                }
+                _ = async {
+                    match &hooks {
+                        Some(h) => h.cancel.notified().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    info!("{}", tr!("TUN daemon Shutdown requested"));
                     endpoint.close().await;
                     return Ok(());
                 }
@@ -1961,6 +2147,10 @@ pub async fn run_tun_connect(
                 ui.quiet,
             );
 
+            if let Some(h) = &hooks {
+                h.state.set_path_kind(path_label(&conn)).await;
+            }
+
             let (hub_tx, hub_rx) = mpsc::channel::<Bytes>(256);
             spawn_conn_sender(
                 tun_io.clone(),
@@ -1981,14 +2171,30 @@ pub async fn run_tun_connect(
 
             if !connected_once {
                 connected_once = true;
-                ui.line(styler.ok(&tr_fmt!("connected. your virtual IP: {0}", own_vip)));
-                ui.line(styler.dim(&tr_fmt!(
-                    "hub {0} is at {1} (path {2}); peers may connect directly",
-                    hub_id.fmt_short(),
-                    hub_vip,
-                    path_label(&conn)
-                )));
-                ui.line(styler.dim(&tr!("Press Ctrl+C to stop.")));
+                if hooks.is_none() {
+                    ui.line(styler.ok(&tr_fmt!("connected. your virtual IP: {0}", own_vip)));
+                    ui.line(styler.dim(&tr_fmt!(
+                        "hub {0} is at {1} (path {2}); peers may connect directly",
+                        hub_id.fmt_short(),
+                        hub_vip,
+                        path_label(&conn)
+                    )));
+                    ui.line(styler.dim(&tr!("Press Ctrl+C to stop.")));
+                }
+            }
+
+            if let Some(h) = &hooks {
+                let peers: Vec<CtlPeer> = mesh
+                    .read()
+                    .await
+                    .roster
+                    .iter()
+                    .map(|(id, vip)| CtlPeer {
+                        vip: *vip,
+                        id: id.to_string(),
+                    })
+                    .collect();
+                h.state.set_peers(peers).await;
             }
 
             // Roster reader
@@ -2053,8 +2259,17 @@ pub async fn run_tun_connect(
             let end = loop {
                 tokio::select! {
                     biased;
-                    _ = tokio::signal::ctrl_c() => {
+                    _ = tokio::signal::ctrl_c(), if hooks.is_none() => {
                         ui.line(styler.warn(&tr!("shutting down...")));
+                        break SessionEnd::CtrlC;
+                    }
+                    _ = async {
+                        match &hooks {
+                            Some(h) => h.cancel.notified().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        info!("{}", tr!("TUN daemon Shutdown requested"));
                         break SessionEnd::CtrlC;
                     }
                     _ = conn.closed() => {
@@ -2069,6 +2284,9 @@ pub async fn run_tun_connect(
                             &mut session_mtu,
                             raise_after_now(&raise_gate),
                         );
+                        if let Some(h) = &hooks {
+                            h.state.set_path_kind(path_label(&conn)).await;
+                        }
                     }
                 }
             };

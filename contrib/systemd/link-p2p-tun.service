@@ -1,0 +1,34 @@
+# systemd unit for link-p2p TUN mesh daemon (hub or spoke).
+#
+# Prefer installing via the CLI (writes this file with the correct binary path):
+#
+#   sudo cp target/release/link-p2p /usr/local/bin/
+#   sudo link-p2p tun service install --role hub
+#   link-p2p tun status --system
+#
+# Manual install: edit ExecStart below, then:
+#
+#   sudo cp contrib/systemd/link-p2p-tun.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now link-p2p-tun.service
+#
+# Identity must live outside the service user's $HOME — default /etc/link-p2p/identity.key.
+
+[Unit]
+Description=link-p2p TUN mesh daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/link-p2p tun up --foreground --system --role hub --identity /etc/link-p2p/identity.key
+User=link-p2p
+RuntimeDirectory=link-p2p
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=true
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

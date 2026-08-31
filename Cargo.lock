@@ -933,6 +933,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fslock"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04412b8935272e3a9bae6f48c7bfff74c2911f60525404edfdd28e49884c3bfb"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1848,10 +1858,13 @@ dependencies = [
  "clap",
  "clap_complete",
  "console",
+ "fslock",
  "getrandom 0.4.3",
  "iroh",
+ "nix",
  "noq-proto",
  "serde",
+ "serde_json",
  "socket2",
  "sys-locale",
  "tokio",

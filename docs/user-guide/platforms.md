@@ -73,6 +73,8 @@ Requirements:
 ```powershell
 .\link-p2p.exe tun serve
 .\link-p2p.exe tun connect --to <EndpointId>
+# or: .\link-p2p.exe tun up --foreground --role hub
+# Background `tun up` (no --foreground) is not yet supported on Windows.
 ```
 
 **“The file is not signed”** — wrong or unsigned DLL, or an older DLL on `PATH`.
@@ -115,7 +117,7 @@ link-p2p man | gzip -c > /usr/local/share/man/man1/link-p2p.1.gz
 | `ping --format json` | yes | yes |
 | `LINK_P2P_*` env vars | yes | yes |
 | `-q` / `-v` | yes | yes |
-| Exit codes 0–5 | yes | yes (`$LASTEXITCODE`) |
+| Exit codes 0–6 | yes | yes (`$LASTEXITCODE`) |
 | `connect --stdio` | yes | **no** |
 | `--to -` | yes | **no** |
 | `link-p2p man` | yes | **no** — use `--help` |
@@ -124,12 +126,13 @@ link-p2p man | gzip -c > /usr/local/share/man/man1/link-p2p.1.gz
 
 | Code | Meaning |
 |---|---|
-| 0 | Success |
+| 0 | Success (`tun down` when already stopped is also 0) |
 | 1 | Other / unexpected error |
-| 2 | Usage / bad arguments |
-| 3 | Connect failed |
-| 4 | Timeout |
+| 2 | Usage / bad arguments (includes `tun up` while already running) |
+| 3 | Connect failed (`tun up` when daemon reports init failure) |
+| 4 | Timeout (`tun up` ready wait; online wait elsewhere) |
 | 5 | Denied (peer not on `--allow`) |
+| 6 | TUN daemon not running (`tun status` / `tun peers` only — not `tun down`) |
 
 ### Environment (CLI flags win)
 

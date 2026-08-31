@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchDaemon for link-p2p TUN mesh daemon (hub or spoke).
+
+  Prefer installing via the CLI (writes this file with the correct binary path):
+
+    sudo cp target/release/link-p2p /usr/local/bin/
+    sudo link-p2p tun service install --role hub
+    link-p2p tun status --system
+
+  Manual install: edit ProgramArguments below, then:
+
+    sudo cp contrib/launchd/com.link-p2p.tun.plist /Library/LaunchDaemons/
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.link-p2p.tun.plist
+
+  Identity must live at a fixed path — default /etc/link-p2p/identity.key.
+  Logs go to /var/log/link-p2p/ (configure newsyslog; see docs/subsystems/tun.md).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.link-p2p.tun</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/link-p2p</string>
+        <string>tun</string>
+        <string>up</string>
+        <string>--foreground</string>
+        <string>--system</string>
+        <string>--role</string>
+        <string>hub</string>
+        <string>--identity</string>
+        <string>/etc/link-p2p/identity.key</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/var/log/link-p2p/tun.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/link-p2p/tun.err.log</string>
+</dict>
+</plist>

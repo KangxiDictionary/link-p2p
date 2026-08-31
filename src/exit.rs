@@ -22,6 +22,8 @@ pub const CONNECT: i32 = 3;
 pub const TIMEOUT: i32 = 4;
 /// Peer rejected by `--allow` (or equivalent authorization).
 pub const DENIED: i32 = 5;
+/// TUN daemon is not running (control socket missing / unreachable).
+pub const DAEMON_NOT_RUNNING: i32 = 6;
 
 /// An error that carries a stable process exit code.
 #[derive(Debug)]

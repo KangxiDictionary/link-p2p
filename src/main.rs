@@ -27,7 +27,10 @@ mod socks5;
 mod ssrf;
 mod style;
 mod tun;
+mod tun_ctl;
+mod tun_daemon;
 mod tun_roster;
+mod tun_service;
 
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
@@ -430,6 +433,60 @@ enum Command {
 /// Subcommands of `link-p2p tun`.
 #[derive(Subcommand)]
 enum TunCommand {
+    /// Start the TUN mesh (background daemon, or `--foreground` like serve/connect).
+    Up {
+        /// `hub` or `spoke`. Default: `spoke` if `--to` is set, otherwise `hub`.
+        #[arg(long)]
+        role: Option<String>,
+        /// Hub EndpointId when role is spoke (also implies `--role spoke` if role omitted).
+        #[arg(long, env = "LINK_P2P_TO")]
+        to: Option<String>,
+        /// Run in the foreground (same as `tun serve` / `tun connect`). Do not daemonize.
+        #[arg(long)]
+        foreground: bool,
+        /// System-service paths (e.g. `/run/link-p2p/tun.sock`). Requires `--foreground`.
+        #[arg(long)]
+        system: bool,
+        /// Override this node's virtual IP (default: derived from its
+        /// EndpointId, inside 172.24.0.0/16).
+        #[arg(long)]
+        tun_ip: Option<Ipv4Addr>,
+        /// Upper bound for the TUN interface MTU (default 1280). The final
+        /// MTU is min(this, the negotiated QUIC datagram max); values above
+        /// 1280 are refused.
+        #[arg(long, default_value_t = 1280)]
+        mtu: u16,
+        /// Only accept TUN mesh connections from these EndpointIds
+        /// (repeatable). Default: anyone who knows this hub's EndpointId.
+        /// Also `LINK_P2P_ALLOW` (comma-separated).
+        #[arg(long)]
+        allow: Vec<String>,
+        /// Direct address hint(s) for the hub (spoke / foreground only).
+        #[arg(long = "to-addr")]
+        to_addr: Vec<SocketAddr>,
+    },
+    /// Stop the background TUN daemon (idempotent if already stopped).
+    Down {
+        /// Talk to the system-service daemon (fixed runtime paths).
+        #[arg(long)]
+        system: bool,
+    },
+    /// Show daemon role / VIP / path / uptime.
+    Status {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+        /// Query the system-service daemon (fixed runtime paths).
+        #[arg(long)]
+        system: bool,
+    },
+    /// List mesh peers known to the local daemon.
+    Peers {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+        /// Query the system-service daemon (fixed runtime paths).
+        #[arg(long)]
+        system: bool,
+    },
     /// Exposed side: coordination hub for a virtual IP mesh. Accepts many
     /// concurrent peers, broadcasts the VIP↔EndpointId roster, bridges this
     /// machine to each, and forwards when spokes have no direct path.
@@ -474,6 +531,33 @@ enum TunCommand {
         #[arg(long)]
         allow: Vec<String>,
     },
+    /// Install or remove a system service (Linux: systemd; macOS: LaunchDaemon).
+    Service {
+        #[command(subcommand)]
+        command: TunServiceCommand,
+    },
+}
+
+/// `tun service` subcommands.
+#[derive(Subcommand, Clone)]
+enum TunServiceCommand {
+    /// Write the platform service definition and enable it.
+    Install {
+        /// `hub` or `spoke`. Default: spoke if `--to` is set, otherwise hub.
+        #[arg(long)]
+        role: Option<String>,
+        /// Hub EndpointId when role is spoke.
+        #[arg(long, env = "LINK_P2P_TO")]
+        to: Option<String>,
+        /// Identity key path for the service (stable EndpointId).
+        #[arg(long, default_value = tun_service::DEFAULT_IDENTITY_PATH)]
+        identity: PathBuf,
+        /// Unix account the Linux systemd service runs as (ignored on macOS — runs as root).
+        #[arg(long, default_value = tun_service::DEFAULT_SERVICE_USER)]
+        user: String,
+    },
+    /// Disable and remove the service unit (keeps `/etc/link-p2p/identity.key`).
+    Uninstall,
 }
 
 /// Localized `-h/--help` argument, replacing clap's built-in one (whose
@@ -671,14 +755,92 @@ fn localized_command() -> clap::Command {
                 .arg(help_arg())
                 .about(tr!("Make machines reachable at the IP layer over QUIC datagrams (mesh with hub coordination)."))
                 .long_about(helptext::hard_wrap_help(&tr!(
-                    "Make machines reachable at the IP layer over QUIC datagrams.\n\nCreates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). `tun serve` is the coordination hub (roster + fallback forward); `tun connect` dials it, learns the VIP↔EndpointId roster, and tries direct spoke↔spoke links (hub forward remains the fallback). Prefer `--cc bbr3` on lossy paths. Virtual IPs are IPv4 only — see docs/subsystems/tun.md."
+                    "Make machines reachable at the IP layer over QUIC datagrams.\n\nCreates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). Preferred day-to-day commands: `tun up` / `tun down` / `tun status` / `tun peers`. Foreground debug aliases remain: `tun serve` (hub) and `tun connect` (spoke) — same as `tun up --foreground --role hub|spoke`. Prefer `--cc bbr3` on lossy paths. Virtual IPs are IPv4 only — see docs/subsystems/tun.md."
                 )))
+                .mut_subcommand("up", |ss| {
+                    ss.disable_help_flag(true)
+                        .arg(help_arg())
+                        .about(tr!("Start the TUN mesh daemon (or run foreground with --foreground)."))
+                        .long_about(helptext::hard_wrap_help(&tr!(
+                            "Start the TUN mesh.\n\nWithout `--foreground`, spawns a background daemon and returns after it is ready (Unix today; on Windows use `--foreground`). With `--foreground`, blocks like `tun serve` / `tun connect` (same code paths).\n\nRole defaults: if `--to` is set, role is `spoke`; otherwise `hub`. Do not pass `--role hub` together with `--to`. `--role spoke` requires `--to <hub EndpointId>`.\n\nAlready-running daemon → usage error (exit 2). Ready timeout → exit 4 (check tun.log). Init failure reported by the child → exit 3."
+                        )))
+                        .mut_arg(
+                            "role",
+                            |a| helptext::set_help(a, &tr!("`hub` or `spoke`. Default: spoke if `--to` is set, otherwise hub.")),
+                        )
+                        .mut_arg(
+                            "to",
+                            |a| helptext::set_help(a, &peer_to_help()),
+                        )
+                        .mut_arg(
+                            "foreground",
+                            |a| helptext::set_help(a, &tr!("Run in the foreground instead of daemonizing (alias of `tun serve` / `tun connect`).")),
+                        )
+                        .mut_arg(
+                            "system",
+                            |a| helptext::set_help(a, &tr!("Use system-service paths (e.g. `/run/link-p2p/tun.sock`). Requires `--foreground`; pin identity with `--identity`.")),
+                        )
+                        .mut_arg(
+                            "tun_ip",
+                            |a| helptext::set_help(a, &tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16).")),
+                        )
+                        .mut_arg(
+                            "mtu",
+                            |a| helptext::set_help(a, &tr!("Upper bound for the TUN interface MTU (default 1280). The final MTU is min(this, the negotiated QUIC datagram max); values above 1280 are refused.")),
+                        )
+                        .mut_arg(
+                            "allow",
+                            |a| helptext::set_help(a, &tr!("Only accept TUN mesh connections from these EndpointIds (repeatable). Default: accept anyone who knows this hub's EndpointId. Also LINK_P2P_ALLOW.")),
+                        )
+                        .mut_arg(
+                            "to_addr",
+                            |a| helptext::set_help(a, &tr!("Direct address hint(s) for the hub (foreground spoke only) — see `connect --to-addr`.")),
+                        )
+                })
+                .mut_subcommand("down", |ss| {
+                    ss.disable_help_flag(true)
+                        .arg(help_arg())
+                        .about(tr!("Stop the background TUN daemon."))
+                        .long_about(helptext::hard_wrap_help(&tr!(
+                            "Ask the local TUN daemon to shut down and wait until it is gone. Safe to call when nothing is running (exit 0). Use `--system` for the supervisor-managed daemon."
+                        )))
+                        .mut_arg(
+                            "system",
+                            |a| helptext::set_help(a, &tr!("Target the system-service daemon (fixed runtime paths).")),
+                        )
+                })
+                .mut_subcommand("status", |ss| {
+                    ss.disable_help_flag(true)
+                        .arg(help_arg())
+                        .about(tr!("Show TUN daemon status (role, VIP, path, uptime)."))
+                        .mut_arg(
+                            "format",
+                            |a| helptext::set_help(a, &tr!("Output format: text (default) or json (for jq).")),
+                        )
+                        .mut_arg(
+                            "system",
+                            |a| helptext::set_help(a, &tr!("Query the system-service daemon (fixed runtime paths).")),
+                        )
+                })
+                .mut_subcommand("peers", |ss| {
+                    ss.disable_help_flag(true)
+                        .arg(help_arg())
+                        .about(tr!("List mesh peers known to the local TUN daemon."))
+                        .mut_arg(
+                            "format",
+                            |a| helptext::set_help(a, &tr!("Output format: text (default) or json (for jq).")),
+                        )
+                        .mut_arg(
+                            "system",
+                            |a| helptext::set_help(a, &tr!("Query the system-service daemon (fixed runtime paths).")),
+                        )
+                })
                 .mut_subcommand("serve", |ss| {
                     ss.disable_help_flag(true)
                         .arg(help_arg())
-                        .about(tr!("Hub: roster + fallback forward for the virtual IP mesh."))
+                        .about(tr!("Hub: roster + fallback forward for the virtual IP mesh (foreground)."))
                         .long_about(helptext::hard_wrap_help(&tr!(
-                            "Hub: accept many concurrent peers, broadcast the VIP↔EndpointId roster, bridge this machine to each at the IP layer, and forward traffic when spokes have no direct path. Prints this node's virtual IP and EndpointId."
+                            "Hub: accept many concurrent peers, broadcast the VIP↔EndpointId roster, bridge this machine to each at the IP layer, and forward traffic when spokes have no direct path. Prints this node's virtual IP and EndpointId. Equivalent to `tun up --foreground --role hub`."
                         )))
                         .mut_arg(
                             "tun_ip",
@@ -696,9 +858,9 @@ fn localized_command() -> clap::Command {
                 .mut_subcommand("connect", |ss| {
                     ss.disable_help_flag(true)
                         .arg(help_arg())
-                        .about(tr!("Dial a hub, join the mesh, and try direct peer links."))
+                        .about(tr!("Dial a hub, join the mesh, and try direct peer links (foreground)."))
                         .long_about(helptext::hard_wrap_help(&tr!(
-                            "Dial a `tun serve` hub, install 172.24.0.0/16 on the TUN, receive the mesh roster, and attempt direct links to other spokes (packets prefer direct; otherwise via hub)."
+                            "Dial a `tun serve` hub, install 172.24.0.0/16 on the TUN, receive the mesh roster, and attempt direct links to other spokes (packets prefer direct; otherwise via hub). Equivalent to `tun up --foreground --role spoke --to <hub>`."
                         )))
                         .mut_arg(
                             "to",
@@ -720,6 +882,44 @@ fn localized_command() -> clap::Command {
                             "allow",
                             |a| helptext::set_help(a, &tr!("Only accept inbound direct mesh links from these EndpointIds (repeatable); also gates outbound peer dials. Hub dial is always attempted. Also LINK_P2P_ALLOW.")),
                         )
+                })
+                .mut_subcommand("service", |ss| {
+                    ss.disable_help_flag(true)
+                        .arg(help_arg())
+                        .about(tr!(
+                            "Install or remove a TUN system service (Linux systemd; macOS LaunchDaemon)."
+                        ))
+                        .long_about(helptext::hard_wrap_help(&tr!(
+                            "Manage a platform service for `tun up --foreground --system`. Requires root. Refuses to install if this binary is under a user-writable path. Identity defaults to /etc/link-p2p/identity.key (copied from the sudo caller's config when missing). macOS runs as root LaunchDaemon; Linux uses a dedicated service user with CAP_NET_ADMIN."
+                        )))
+                        .mut_subcommand("install", |sss| {
+                            sss.disable_help_flag(true)
+                                .arg(help_arg())
+                                .about(tr!("Install the TUN system service and start it."))
+                                .mut_arg(
+                                    "role",
+                                    |a| helptext::set_help(a, &tr!("`hub` or `spoke`. Default: spoke if `--to` is set, otherwise hub.")),
+                                )
+                                .mut_arg(
+                                    "to",
+                                    |a| helptext::set_help(a, &peer_to_help()),
+                                )
+                                .mut_arg(
+                                    "identity",
+                                    |a| helptext::set_help(a, &tr!("Service identity key path (default /etc/link-p2p/identity.key).")),
+                                )
+                                .mut_arg(
+                                    "user",
+                                    |a| helptext::set_help(a, &tr!(
+                                        "Linux systemd only: Unix user the service runs as (default link-p2p). Ignored on macOS (root LaunchDaemon)."
+                                    )),
+                                )
+                        })
+                        .mut_subcommand("uninstall", |sss| {
+                            sss.disable_help_flag(true)
+                                .arg(help_arg())
+                                .about(tr!("Disable and remove the TUN system service."))
+                        })
                 })
         })
         .mut_subcommand("ping", |s| {
@@ -884,6 +1084,21 @@ async fn main() {
 }
 
 async fn real_main(color_mode: ColorMode) -> Result<()> {
+    // Detached TUN daemon worker (spawned by tun_daemon::spawn_skeleton).
+    // Not a user-facing subcommand — gated on env, ahead of clap.
+    if tun_daemon::is_worker_process() {
+        return tun_daemon::run_worker().await;
+    }
+    // Integration-test drivers (see tests/tun_daemon_spawn.rs). Not public CLI.
+    if std::env::var_os("LINK_P2P_TUN_TEST_SPAWN").is_some() {
+        let role = std::env::var("LINK_P2P_TUN_ROLE").unwrap_or_else(|_| "hub".into());
+        tun_daemon::spawn_skeleton(&role).await?;
+        return Ok(());
+    }
+    if std::env::var_os("LINK_P2P_TUN_TEST_DOWN").is_some() {
+        return tun_daemon::request_shutdown().await;
+    }
+
     let matches = localized_command()
         .color(color_mode.to_clap())
         .get_matches();
@@ -1007,6 +1222,17 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
     }
 
     let styler = style::apply_color_mode(color_mode);
+
+    // Service install/uninstall must not run global identity load first — the
+    // install subcommand defaults `--identity` to /etc/link-p2p/identity.key,
+    // which would hit Permission denied (rc=1) before require_root() (rc=2).
+    if let Command::Tun {
+        command: TunCommand::Service { command },
+    } = cli.command
+    {
+        return run_tun_service_command(command, &styler);
+    }
+
     // Load ~/.config/link-p2p/config.toml defaults (CLI still wins / appends).
     let user_cfg = config::load_or_default(&config::config_path());
     cli.relay = config::merge_relay_urls(&cli.relay, &user_cfg);
@@ -1027,6 +1253,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
         info!("{}", tr!("using a passphrase-protected identity key file"));
     }
     // --ephemeral: an in-memory identity, nothing touches the filesystem.
+    let identity_from_cli = cli.identity.is_some();
     let secret_key = if cli.ephemeral {
         ui.line(styler.warn(&tr!(
             "ephemeral identity: this EndpointId will not persist across restarts"
@@ -1149,12 +1376,153 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
         }
         Command::Tun { command } => {
             // TUN hub accepts many peers; --max-conns only applies to stream serve.
-            if cli.max_conns != 1024 {
+            let warn_max_conns = matches!(
+                &command,
+                TunCommand::Serve { .. }
+                    | TunCommand::Connect { .. }
+                    | TunCommand::Up { .. }
+            );
+            if warn_max_conns && cli.max_conns != 1024 {
                 ui.line(styler.warn(&tr!(
                     "note: --max-conns is not used by TUN mode (hub accepts peers until stopped)"
                 )));
             }
             match command {
+                TunCommand::Up {
+                    role,
+                    to,
+                    foreground,
+                    system,
+                    tun_ip,
+                    mtu,
+                    allow,
+                    to_addr,
+                } => {
+                    tun::validate_mtu(mtu)?;
+                    let runtime = tun_ctl::RuntimeMode::from_system_flag(system);
+                    let role = tun_daemon::resolve_up_role(role.as_deref(), to.as_deref())?;
+                    let allow = parse_tun_allow(allow)?;
+                    if system && !foreground {
+                        return Err(exit::coded(
+                            exit::USAGE,
+                            anyhow::anyhow!(tr!(
+                                "`tun up --system` requires `--foreground` (supervisor-managed services must not self-daemonize)"
+                            )),
+                        ));
+                    }
+                    if system && !cli.ephemeral && !identity_from_cli {
+                        ui.line(styler.warn(&tr!(
+                            "system mode: pin identity with --identity (e.g. /etc/link-p2p/identity.key); the service account config dir may otherwise get a new key"
+                        )));
+                    }
+                    if foreground {
+                        if system {
+                            let spoke_to = if role == "spoke" {
+                                Some(resolve_peer_to(to, false)?.to_string())
+                            } else {
+                                None
+                            };
+                            tun_daemon::run_supervised_foreground(
+                                tun_daemon::SupervisedUpOpts {
+                                    role,
+                                    to: spoke_to,
+                                    tun_ip,
+                                    mtu,
+                                    allow,
+                                    to_addr,
+                                    secret_key,
+                                    relays: cli.relay.clone(),
+                                    relay_only: cli.relay_only,
+                                    no_n0_relays: cli.no_n0_relays,
+                                    keepalive: Duration::from_secs(cli.keepalive),
+                                    idle_timeout: Duration::from_secs(cli.idle_timeout),
+                                    tune,
+                                },
+                                ui,
+                                styler,
+                            )
+                            .await
+                        } else {
+                            match role.as_str() {
+                                "hub" => {
+                                    tun::run_tun_serve(
+                                        secret_key,
+                                        tun_ip,
+                                        mtu,
+                                        &cli.relay,
+                                        cli.relay_only,
+                                        cli.no_n0_relays,
+                                        Duration::from_secs(cli.keepalive),
+                                        Duration::from_secs(cli.idle_timeout),
+                                        tune,
+                                        allow,
+                                        ui,
+                                        styler,
+                                        None,
+                                    )
+                                    .await
+                                }
+                                "spoke" => {
+                                    let to = resolve_peer_to(to, false)?;
+                                    tun::run_tun_connect(
+                                        secret_key,
+                                        &to,
+                                        tun_ip,
+                                        mtu,
+                                        &cli.relay,
+                                        cli.relay_only,
+                                        cli.no_n0_relays,
+                                        to_addr,
+                                        Duration::from_secs(cli.keepalive),
+                                        Duration::from_secs(cli.idle_timeout),
+                                        tune,
+                                        allow,
+                                        ui,
+                                        styler,
+                                        None,
+                                    )
+                                    .await
+                                }
+                                _ => unreachable!("resolve_up_role only returns hub|spoke"),
+                            }
+                        }
+                    } else {
+                        let allow_str: Vec<String> = allow
+                            .as_ref()
+                            .map(|s| s.iter().map(|id| id.to_string()).collect())
+                            .unwrap_or_default();
+                        tun_daemon::cmd_up_background(
+                            runtime,
+                            &role,
+                            to.as_deref(),
+                            mtu,
+                            tun_ip,
+                            &allow_str,
+                            &styler,
+                        )
+                        .await
+                    }
+                }
+                TunCommand::Down { system } => {
+                    tun_daemon::cmd_down(tun_ctl::RuntimeMode::from_system_flag(system), &styler)
+                        .await
+                }
+                TunCommand::Status { format, system } => {
+                    let fmt = match format {
+                        OutputFormat::Text => tun_daemon::CliFormat::Text,
+                        OutputFormat::Json => tun_daemon::CliFormat::Json,
+                    };
+                    tun_daemon::cmd_status(tun_ctl::RuntimeMode::from_system_flag(system), fmt)
+                        .await
+                }
+                TunCommand::Peers { format, system } => {
+                    let fmt = match format {
+                        OutputFormat::Text => tun_daemon::CliFormat::Text,
+                        OutputFormat::Json => tun_daemon::CliFormat::Json,
+                    };
+                    tun_daemon::cmd_peers(tun_ctl::RuntimeMode::from_system_flag(system), fmt)
+                        .await
+                }
                 TunCommand::Serve {
                     tun_ip,
                     mtu,
@@ -1175,6 +1543,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                         allow,
                         ui,
                         styler,
+                        None,
                     )
                     .await
                 }
@@ -1203,8 +1572,12 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                         allow,
                         ui,
                         styler,
+                        None,
                     )
                     .await
+                }
+                TunCommand::Service { .. } => {
+                    unreachable!("tun service handled before identity load")
                 }
             }
         }
@@ -1462,11 +1835,51 @@ fn parse_tun_allow(cli: Vec<String>) -> Result<Option<HashSet<EndpointId>>> {
     Ok(Some(set))
 }
 
+/// `tun service install/uninstall` — no global identity load (service identity
+/// lives under `/etc/link-p2p/`, not the caller's config dir).
+fn run_tun_service_command(command: TunServiceCommand, styler: &Styler) -> Result<()> {
+    match command {
+        TunServiceCommand::Install {
+            role,
+            to,
+            identity,
+            user,
+        } => {
+            let role = tun_daemon::resolve_up_role(role.as_deref(), to.as_deref())?;
+            let spoke_to = if role == "spoke" {
+                Some(resolve_peer_to(to, false)?.to_string())
+            } else {
+                None
+            };
+            let identity_fallback = if identity.is_file() {
+                None
+            } else {
+                tun_service::sudo_caller_identity_path().or_else(|| {
+                    resolve_identity_path(None)
+                        .ok()
+                        .filter(|p| p.is_file())
+                })
+            };
+            tun_service::cmd_install(
+                tun_service::InstallOpts {
+                    role,
+                    to: spoke_to,
+                    identity,
+                    service_user: user,
+                    identity_fallback,
+                },
+                styler,
+            )
+        }
+        TunServiceCommand::Uninstall => tun_service::cmd_uninstall(styler),
+    }
+}
+
 /// Resolve the identity file path: an explicit `--identity` wins; otherwise
 /// the XDG config location. A legacy `./identity.key` in the working
 /// directory (pre-XDG versions kept it there) is migrated to the XDG
 /// location once, so existing EndpointIds stay stable across the move.
-fn resolve_identity_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
+pub(crate) fn resolve_identity_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return Ok(path);
     }
@@ -1694,7 +2107,7 @@ fn secret_key_from_hex(hex: &str, path: &Path) -> Result<SecretKey> {
 /// Storage format: 64 hex chars (32-byte ed25519 seed). iroh 1.0
 /// SecretKey does not implement Display, so we hex-encode `to_bytes()`
 /// ourselves instead of relying on the old Display-based round-trip.
-fn load_or_create_secret_key(path: &Path, passphrase: Option<&str>) -> Result<SecretKey> {
+pub(crate) fn load_or_create_secret_key(path: &Path, passphrase: Option<&str>) -> Result<SecretKey> {
     if let Ok(data) = std::fs::read(path) {
         let result = if is_encrypted_key(&data) {
             // Passphrase-encrypted file: the passphrase is mandatory.

@@ -1063,3 +1063,328 @@ msgstr "writing contacts {0}"
 
 msgid "your short code: {0}"
 msgstr "your short code: {0}"
+
+msgid "unexpected control response (wanted Ok/Err, got {0})"
+msgstr "予期しない制御応答（Ok/Err のはずが {0}）"
+
+msgid "control body too large"
+msgstr "制御メッセージ本文が大きすぎます"
+
+msgid "control body exceeds max ({0} bytes)"
+msgstr "制御メッセージ本文が上限を超えています（{0} バイト）"
+
+msgid "encode control request"
+msgstr "制御リクエストのエンコード"
+
+msgid "encode control response"
+msgstr "制御レスポンスのエンコード"
+
+msgid "bad control magic (expected LPC1)"
+msgstr "制御マジックが不正です（LPC1 である必要あり）"
+
+msgid "TUN daemon protocol is newer (v{0}) than this CLI (v{1}); upgrade link-p2p"
+msgstr "TUN デーモンのプロトコル（v{0}）がこの CLI（v{1}）より新しいです。link-p2p をアップグレードしてください"
+
+msgid "TUN daemon protocol is older (v{0}) than this CLI (v{1}); restart the daemon or downgrade the CLI"
+msgstr "TUN デーモンのプロトコル（v{0}）がこの CLI（v{1}）より古いです。デーモンを再起動するか CLI をダウングレードしてください"
+
+msgid "control frame truncated"
+msgstr "制御フレームが途中で切れています"
+
+msgid "decode control request"
+msgstr "制御リクエストのデコード"
+
+msgid "decode control response"
+msgstr "制御レスポンスのデコード"
+
+msgid "read control header"
+msgstr "制御ヘッダの読み取り"
+
+msgid "read control body"
+msgstr "制御本文の読み取り"
+
+msgid "TUN daemon is not running (try: link-p2p tun up)"
+msgstr "TUN デーモンが動作していません（試す: link-p2p tun up）"
+
+
+msgid "invalid pid in tun.pid"
+msgstr "tun.pid の pid が無効です"
+
+msgid "invalid started_unix_ms in tun.pid"
+msgstr "tun.pid の started_unix_ms が無効です"
+
+msgid "tun.pid missing pid="
+msgstr "tun.pid に pid= がありません"
+
+msgid "tun.pid missing session="
+msgstr "tun.pid に session= がありません"
+
+msgid "tun.pid missing started_unix_ms="
+msgstr "tun.pid に started_unix_ms= がありません"
+
+msgid "reading pid file {0}"
+msgstr "pid ファイル {0} の読み取り"
+
+msgid "writing pid file {0}"
+msgstr "pid ファイル {0} の書き込み"
+
+msgid "TUN control socket connect timed out"
+msgstr "TUN 制御ソケットへの接続がタイムアウトしました"
+
+msgid "TUN control Status timed out"
+msgstr "TUN 制御 Status がタイムアウトしました"
+
+msgid "unexpected Status response from TUN daemon: {0}"
+msgstr "TUN デーモンから予期しない Status: {0}"
+
+msgid "binding TUN control socket {0}"
+msgstr "TUN 制御ソケット {0} のバインド"
+
+msgid "TUN daemon Shutdown timed out"
+msgstr "TUN デーモン Shutdown がタイムアウトしました"
+
+msgid "unexpected Shutdown response: {0}"
+msgstr "予期しない Shutdown 応答: {0}"
+
+msgid "TUN daemon control socket is Unix-only in this build"
+msgstr "このビルドでは TUN デーモン制御ソケットは Unix のみです"
+
+msgid "creating config dir {0}"
+msgstr "設定ディレクトリ {0} の作成"
+
+msgid "opening TUN lock {0}"
+msgstr "TUN ロック {0} を開く"
+
+msgid "locking TUN lock {0}"
+msgstr "TUN ロック {0} の取得"
+
+msgid "TUN daemon lock is held (another tun up is running or the daemon is up); try tun status / tun down"
+msgstr "TUN デーモンロックが保持されています（別の tun up 実行中かデーモン稼働中）。tun status / tun down を試してください"
+
+msgid "TUN daemon spawn is Unix-only in this build"
+msgstr "このビルドでは TUN デーモン起動は Unix のみです"
+
+msgid "TUN daemon is already running (try: link-p2p tun status)"
+msgstr "TUN デーモンは既に動作中です（試す: link-p2p tun status）"
+
+msgid "binding TUN ready listener"
+msgstr "TUN レディリスナのバインド"
+
+msgid "ready listener local_addr"
+msgstr "レディリスナ local_addr"
+
+msgid "opening TUN log {0}"
+msgstr "TUN ログ {0} を開く"
+
+msgid "resolving current executable"
+msgstr "現在の実行ファイルの解決"
+
+msgid "cloning TUN log handle"
+msgstr "TUN ログハンドルの複製"
+
+msgid "spawning TUN daemon worker"
+msgstr "TUN デーモンワーカーの起動"
+
+msgid "TUN daemon did not signal ready within {0}s; check {1}"
+msgstr "TUN デーモンが {0}s 以内に ready を返しませんでした。{1} を確認してください"
+
+msgid "reading TUN daemon ready signal"
+msgstr "TUN デーモン ready 信号の読み取り"
+
+msgid "TUN daemon failed to start: {0}"
+msgstr "TUN デーモンの起動に失敗: {0}"
+
+msgid "TUN daemon ready signal malformed: {0}"
+msgstr "TUN デーモン ready 信号の形式が不正: {0}"
+
+msgid "TUN daemon reported ready but control socket is not answering; check tun.log"
+msgstr "TUN デーモンは ready と報告しましたが制御ソケットが応答しません。tun.log を確認してください"
+
+msgid "TUN daemon Status response missing"
+msgstr "TUN デーモン Status 応答がありません"
+
+msgid "TUN daemon session mismatch after ready"
+msgstr "ready 後に TUN デーモン session が一致しません"
+
+msgid "TUN daemon Shutdown timed out; forced cleanup"
+msgstr "TUN デーモン Shutdown がタイムアウト; 強制クリーンアップしました"
+
+msgid "bad TUN ready address {0}"
+msgstr "不正な TUN ready アドレス {0}"
+
+msgid "connect to ready listener timed out"
+msgstr "ready リスナへの接続がタイムアウトしました"
+
+msgid "connect to ready listener"
+msgstr "ready リスナへ接続"
+
+msgid "setsid for TUN daemon"
+msgstr "TUN デーモンの setsid"
+
+msgid "TUN daemon worker is Unix-only in this build"
+msgstr "このビルドでは TUN デーモンワーカーは Unix のみです"
+
+msgid "sending TUN ready OK"
+msgstr "TUN ready OK の送信"
+
+
+msgid "bad LINK_P2P_ALLOW id {0}"
+msgstr "不正な LINK_P2P_ALLOW id {0}"
+
+msgid "spoke daemon requires LINK_P2P_TUN_TO (hub EndpointId)"
+msgstr "spoke デーモンには LINK_P2P_TUN_TO（hub EndpointId）が必要です"
+
+msgid "TUN daemon Shutdown requested"
+msgstr "TUN デーモン Shutdown が要求されました"
+
+msgid "TUN data plane dropped ready signal"
+msgstr "TUN データプレーンが ready 信号をドロップしました"
+
+msgid "TUN data plane task join"
+msgstr "TUN データプレーンタスクの待機"
+
+msgid "unknown TUN daemon role {0}"
+msgstr "未知の TUN デーモンロール {0}"
+
+msgid "this command must be run as root (try: sudo link-p2p tun service …)"
+msgstr "このコマンドは root で実行してください（例: sudo link-p2p tun service …）"
+
+msgid "tun service install is not supported on this platform yet (Windows SCM coming later)"
+msgstr "このプラットフォームでは tun service install は未対応です（Windows SCM は今後）"
+
+msgid "installed and started {0} (control: link-p2p tun status --system)"
+msgstr "{0} をインストールして起動しました（制御: link-p2p tun status --system）"
+
+msgid "identity: {0} (EndpointId is stable across service restarts)"
+msgstr "identity: {0}（サービス再起動後も EndpointId は不変）"
+
+msgid "logs: {0}/tun.log (configure newsyslog; see docs/subsystems/tun.md)"
+msgstr "ログ: {0}/tun.log（newsyslog を設定；docs/subsystems/tun.md 参照）"
+
+msgid "removed {0} (identity under /etc/link-p2p was kept)"
+msgstr "{0} を削除しました（/etc/link-p2p の identity は保持）"
+
+msgid "TUN system daemon is not running (try: link-p2p tun status --system, or check the service manager)"
+msgstr "TUN システムデーモンは稼働していません（link-p2p tun status --system、またはサービスマネージャを確認）"
+
+msgid "`tun up --system` requires `--foreground` (supervisor-managed services must not self-daemonize)"
+msgstr "`tun up --system` には `--foreground` が必要です（スーパーバイザ管理サービスは自己 daemon 化不可）"
+
+msgid "system mode: pin identity with --identity (e.g. /etc/link-p2p/identity.key); the service account config dir may otherwise get a new key"
+msgstr "system モード: --identity で identity を固定してください（例: /etc/link-p2p/identity.key）。未指定時はサービスアカウントの設定ディレクトリに新しい鍵が作られる可能性があります"
+
+msgid "Use system-service paths (e.g. `/run/link-p2p/tun.sock`). Requires `--foreground`; pin identity with `--identity`."
+msgstr "システムサービス用パスを使用（例: `/run/link-p2p/tun.sock`）。`--foreground` 必須。`--identity` で identity を固定。"
+
+msgid "invalid executable path for systemd unit"
+msgstr "systemd unit の実行ファイルパスが無効です"
+
+msgid "invalid identity path for systemd unit"
+msgstr "systemd unit の identity パスが無効です"
+
+msgid "invalid --to value for systemd unit"
+msgstr "systemd unit の --to 値が無効です"
+
+msgid "invalid executable path for LaunchDaemon plist"
+msgstr "LaunchDaemon plist の実行ファイルパスが無効です"
+
+msgid "invalid identity path for LaunchDaemon plist"
+msgstr "LaunchDaemon plist の identity パスが無効です"
+
+msgid "invalid --to value for LaunchDaemon plist"
+msgstr "LaunchDaemon plist の --to 値が無効です"
+
+msgid "refusing service install: binary is under a Cargo target/ directory (install a release build to /usr/local/bin or similar first)"
+msgstr "サービスインストールを拒否: バイナリが Cargo target/ 配下です（先に /usr/local/bin 等へ release ビルドをインストールしてください）"
+
+msgid "refusing service install: binary is under /tmp (install to a system path first)"
+msgstr "サービスインストールを拒否: バイナリが /tmp 配下です（先にシステムパスへインストールしてください）"
+
+msgid "refusing service install: binary is under /home (install to /usr/local/bin or /usr/bin first)"
+msgstr "サービスインストールを拒否: バイナリが /home 配下です（先に /usr/local/bin または /usr/bin へインストールしてください）"
+
+msgid "refusing service install: binary is under /Users (install to /usr/local/bin first)"
+msgstr "サービスインストールを拒否: バイナリが /Users 配下です（先に /usr/local/bin へインストールしてください）"
+
+msgid "refusing service install: binary is under your home directory (install to a system path first)"
+msgstr "サービスインストールを拒否: バイナリがホームディレクトリ配下です（先にシステムパスへインストールしてください）"
+
+msgid "binary path has no parent directory"
+msgstr "バイナリパスに親ディレクトリがありません"
+
+msgid "refusing service install: directory {0} is group/world-writable (any local user could replace the binary the service runs as root/CAP_NET_ADMIN)"
+msgstr "サービスインストールを拒否: ディレクトリ {0} が group/world 書き込み可能です（ローカルユーザーが root/CAP_NET_ADMIN で動くバイナリを差し替えられる可能性があります）"
+
+msgid "identity key not found at {0}; create it or re-run install after copying your key (e.g. from ~/.config/link-p2p/identity.key)"
+msgstr "{0} に identity 鍵がありません。作成するか鍵をコピーしてから再インストールしてください（例: ~/.config/link-p2p/identity.key から）"
+
+msgid "looking up service user"
+msgstr "サービスユーザーを検索中"
+
+msgid "system user {0} not found"
+msgstr "システムユーザー {0} が見つかりません"
+
+msgid "creating system user {0}"
+msgstr "システムユーザー {0} を作成中"
+
+msgid "writing systemd unit {0}"
+msgstr "systemd unit {0} を書き込み中"
+
+msgid "writing LaunchDaemon {0}"
+msgstr "LaunchDaemon {0} を書き込み中"
+
+msgid "removing systemd unit {0}"
+msgstr "systemd unit {0} を削除中"
+
+msgid "removing LaunchDaemon {0}"
+msgstr "LaunchDaemon {0} を削除中"
+
+msgid "resolving binary path {0}"
+msgstr "バイナリパス {0} を解決中"
+
+msgid "stat binary directory {0}"
+msgstr "バイナリディレクトリ {0} を stat 中"
+
+msgid "creating {0}"
+msgstr "{0} を作成中"
+
+msgid "copying identity {0} -> {1}"
+msgstr "identity {0} -> {1} をコピー中"
+
+msgid "stat identity {0}"
+msgstr "identity {0} を stat 中"
+
+msgid "identity path is not a file: {0}"
+msgstr "identity パスがファイルではありません: {0}"
+
+msgid "chmod identity {0}"
+msgstr "identity {0} の chmod 中"
+
+msgid "chown identity {0}"
+msgstr "identity {0} の chown 中"
+
+msgid "{0} failed (exit {1}): {2}{3}"
+msgstr "{0} が失敗しました（終了 {1}）: {2}{3}"
+
+msgid "Install or remove a TUN system service (Linux systemd; macOS LaunchDaemon)."
+msgstr "TUN システムサービスのインストール/削除（Linux systemd; macOS LaunchDaemon）。"
+
+msgid ""
+"Manage a platform service for `tun up --foreground --system`. Requires root. Refuses to install if this binary is under a user-writable path. Identity defaults to /etc/link-p2p/identity.key (copied from the sudo caller's config when missing). macOS runs as root LaunchDaemon; Linux uses a dedicated service user with CAP_NET_ADMIN."
+msgstr ""
+"`tun up --foreground --system` 用のプラットフォームサービスを管理。root 必須。ユーザー書き込み可能なパスのバイナリは拒否。identity 既定は /etc/link-p2p/identity.key（不足時は sudo 呼び出し元の設定からコピー）。macOS は root LaunchDaemon、Linux は CAP_NET_ADMIN 付き専用ユーザー。"
+
+msgid "Install the TUN system service and start it."
+msgstr "TUN システムサービスをインストールして起動。"
+
+msgid "Service identity key path (default /etc/link-p2p/identity.key)."
+msgstr "サービス identity 鍵パス（既定 /etc/link-p2p/identity.key）。"
+
+msgid ""
+"Linux systemd only: Unix user the service runs as (default link-p2p). Ignored on macOS (root LaunchDaemon)."
+msgstr ""
+"Linux systemd のみ: サービス実行 Unix ユーザー（既定 link-p2p）。macOS では無視（root LaunchDaemon）。"
+
+msgid "Disable and remove the TUN system service."
+msgstr "TUN システムサービスを無効化して削除。"
+

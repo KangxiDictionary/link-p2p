@@ -16,6 +16,7 @@ below are largely **measure and integrate**, not greenfield protocol design.
 | Stream mode: TCP-over-QUIC (`serve --forward` / `connect --listen`); ALPN `link-p2p/tcp-forward/1` + `LPF1` hello | done |
 | SOCKS5 proxy (`serve --proxy` / `connect --socks5-listen`) | done |
 | TUN: hub VIP mesh (`link-p2p/tun/2`, spoke direct + hub fallback; `--allow`); Linux/macOS/Windows | done (macOS/Windows best-effort) |
+| TUN daemon (`tun up/down/status/peers`) | **done** (ad-hoc Unix; `--system` paths Step 0) |
 | Persistent identity, self-hosted relay, multi-relay failover, `--relay-only` | done |
 | `call` + contacts / short codes, `config.toml` | done |
 | i18n, shell completions, benchmark/test scripts | done |
@@ -113,16 +114,54 @@ coordination server without changing enforcement code.
 
 | area | current | needed |
 |---|---|---|
+| TUN daemon control plane | foreground `tun serve` / `tun connect` only | `tun up/down/status/peers` — see below |
 | TUN macOS / Windows | backends shipped, best-effort | real-hardware CI, polish |
 | Mobile | none | Android/iOS VPN APIs |
-| GUI / TUI | CLI only | status dashboard / tray |
+| GUI / TUI | CLI only | status dashboard / tray (same control socket) |
 | MagicDNS | manual VIPs | local DNS → VIP |
 | Mesh-native relay | hub TUN forward only | opt-in peer relay |
 | Packages | GitHub releases | distros, auto-update |
 
+### TUN daemon (TUN-only; stream/call/SOCKS5 unchanged)
+
+**Why:** roster + TUN + privilege are long-lived mesh state, not a one-shot
+session. Keep `tun serve` / `tun connect` as foreground debug; new commands talk
+to a local daemon.
+
+**Design SSOT:** [subsystems/tun.md](subsystems/tun.md) (Daemon control plane).
+
+**Checklist:**
+
+| # | Task | Notes |
+|---|---|---|
+| 1 | `src/tun_ctl.rs` — `LPC1` + version + length-prefixed JSON | **done** |
+| 2 | Paths + flock + timed socket probe + session in pid file | **done** (`tun_daemon`) |
+| 3 | Daemon spawn + TCP ready signal + skeleton worker | **done** (no TUN yet; multi-process tests) |
+| 4 | Wire real TUN + roster into worker | **done** (`TunHooks` + live worker; skeleton tests stay unprivileged; live test `#[ignore]`) |
+| 5 | CLI: `tun up/down/status/peers` + i18n help | **done** (`--foreground` aliases serve/connect; JSON status/peers; Windows background gated) |
+| 6 | `tun down` wait-for-exit + kill fallback | **done** (soft warn on teardown timeout; `request_shutdown` keeps kill fallback for tests) |
+| 7 | Document foreground ≡ `tun up --foreground` | **done** (help + platforms + tun.md) |
+
+Do **not** daemonize the whole CLI. GUI/tray later attaches to the same socket.
+
+### TUN system service (Layer 4 — in progress)
+
+Ad-hoc `tun up` and supervisor-managed services use **different control paths**.
+Mode is selected only via `--system` (CLI flag, not env).
+
+| # | Task | Notes |
+|---|---|---|
+| 0 | `RuntimeMode` + path SSOT + `--system` CLI | **done** (pure path tests; system skips pid/log; session in Status) |
+| 1 | Linux `tun service install/uninstall` | **done** (`link-p2p-tun.service`, binary path gate, identity bootstrap) |
+| 2 | macOS LaunchDaemon + log rotation docs | **implemented** (plist + newsyslog note; `launchctl` path not verified on real macOS) |
+| 3 | Windows SCM + named pipe ACL | **designed** (LocalSystem, SDDL above, `--windows-service` SCM path, ProgramData identity; see `tun.md`) |
+
+Service `ExecStart` must use `tun up --foreground --role … --system --identity …`
+— never background fork. Binary must live in an admin-only path (install-time check).
+
 ---
 
-## Layer 4: Edge-case hardening
+## Layer 5: Edge-case hardening
 
 | area | current | needed |
 |---|---|---|

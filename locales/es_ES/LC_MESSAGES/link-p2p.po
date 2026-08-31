@@ -1067,3 +1067,328 @@ msgstr "writing contacts {0}"
 
 msgid "your short code: {0}"
 msgstr "your short code: {0}"
+
+msgid "unexpected control response (wanted Ok/Err, got {0})"
+msgstr "respuesta de control inesperada (se esperaba Ok/Err, se obtuvo {0})"
+
+msgid "control body too large"
+msgstr "cuerpo de control demasiado grande"
+
+msgid "control body exceeds max ({0} bytes)"
+msgstr "el cuerpo de control supera el máximo ({0} bytes)"
+
+msgid "encode control request"
+msgstr "codificar solicitud de control"
+
+msgid "encode control response"
+msgstr "codificar respuesta de control"
+
+msgid "bad control magic (expected LPC1)"
+msgstr "magic de control incorrecto (se esperaba LPC1)"
+
+msgid "TUN daemon protocol is newer (v{0}) than this CLI (v{1}); upgrade link-p2p"
+msgstr "el protocolo del daemon TUN es más nuevo (v{0}) que este CLI (v{1}); actualice link-p2p"
+
+msgid "TUN daemon protocol is older (v{0}) than this CLI (v{1}); restart the daemon or downgrade the CLI"
+msgstr "el protocolo del daemon TUN es más antiguo (v{0}) que este CLI (v{1}); reinicie el daemon o baje de versión el CLI"
+
+msgid "control frame truncated"
+msgstr "trama de control truncada"
+
+msgid "decode control request"
+msgstr "decodificar solicitud de control"
+
+msgid "decode control response"
+msgstr "decodificar respuesta de control"
+
+msgid "read control header"
+msgstr "leer cabecera de control"
+
+msgid "read control body"
+msgstr "leer cuerpo de control"
+
+msgid "TUN daemon is not running (try: link-p2p tun up)"
+msgstr "el daemon TUN no está en ejecución (pruebe: link-p2p tun up)"
+
+
+msgid "invalid pid in tun.pid"
+msgstr "pid inválido en tun.pid"
+
+msgid "invalid started_unix_ms in tun.pid"
+msgstr "started_unix_ms inválido en tun.pid"
+
+msgid "tun.pid missing pid="
+msgstr "tun.pid sin pid="
+
+msgid "tun.pid missing session="
+msgstr "tun.pid sin session="
+
+msgid "tun.pid missing started_unix_ms="
+msgstr "tun.pid sin started_unix_ms="
+
+msgid "reading pid file {0}"
+msgstr "leyendo archivo pid {0}"
+
+msgid "writing pid file {0}"
+msgstr "escribiendo archivo pid {0}"
+
+msgid "TUN control socket connect timed out"
+msgstr "agotó el tiempo de conexión al socket de control TUN"
+
+msgid "TUN control Status timed out"
+msgstr "agotó el tiempo de Status de control TUN"
+
+msgid "unexpected Status response from TUN daemon: {0}"
+msgstr "respuesta Status inesperada del daemon TUN: {0}"
+
+msgid "binding TUN control socket {0}"
+msgstr "enlazando socket de control TUN {0}"
+
+msgid "TUN daemon Shutdown timed out"
+msgstr "agotó el tiempo de Shutdown del daemon TUN"
+
+msgid "unexpected Shutdown response: {0}"
+msgstr "respuesta Shutdown inesperada: {0}"
+
+msgid "TUN daemon control socket is Unix-only in this build"
+msgstr "el socket de control del daemon TUN es solo Unix en esta compilación"
+
+msgid "creating config dir {0}"
+msgstr "creando directorio de configuración {0}"
+
+msgid "opening TUN lock {0}"
+msgstr "abriendo bloqueo TUN {0}"
+
+msgid "locking TUN lock {0}"
+msgstr "adquiriendo bloqueo TUN {0}"
+
+msgid "TUN daemon lock is held (another tun up is running or the daemon is up); try tun status / tun down"
+msgstr "el bloqueo del daemon TUN está retenido (otro tun up en curso o el daemon activo); pruebe tun status / tun down"
+
+msgid "TUN daemon spawn is Unix-only in this build"
+msgstr "el arranque del daemon TUN es solo Unix en esta compilación"
+
+msgid "TUN daemon is already running (try: link-p2p tun status)"
+msgstr "el daemon TUN ya está en ejecución (pruebe: link-p2p tun status)"
+
+msgid "binding TUN ready listener"
+msgstr "enlazando el escuchador ready de TUN"
+
+msgid "ready listener local_addr"
+msgstr "local_addr del escuchador ready"
+
+msgid "opening TUN log {0}"
+msgstr "abriendo el registro TUN {0}"
+
+msgid "resolving current executable"
+msgstr "resolviendo el ejecutable actual"
+
+msgid "cloning TUN log handle"
+msgstr "clonando el manejador del registro TUN"
+
+msgid "spawning TUN daemon worker"
+msgstr "iniciando el worker del daemon TUN"
+
+msgid "TUN daemon did not signal ready within {0}s; check {1}"
+msgstr "el daemon TUN no señaló ready en {0}s; revise {1}"
+
+msgid "reading TUN daemon ready signal"
+msgstr "leyendo la señal ready del daemon TUN"
+
+msgid "TUN daemon failed to start: {0}"
+msgstr "el daemon TUN no pudo iniciarse: {0}"
+
+msgid "TUN daemon ready signal malformed: {0}"
+msgstr "señal ready del daemon TUN malformada: {0}"
+
+msgid "TUN daemon reported ready but control socket is not answering; check tun.log"
+msgstr "el daemon TUN reportó ready pero el socket de control no responde; revise tun.log"
+
+msgid "TUN daemon Status response missing"
+msgstr "falta la respuesta Status del daemon TUN"
+
+msgid "TUN daemon session mismatch after ready"
+msgstr "session del daemon TUN no coincide tras ready"
+
+msgid "TUN daemon Shutdown timed out; forced cleanup"
+msgstr "Shutdown del daemon TUN agotó el tiempo; limpieza forzada"
+
+msgid "bad TUN ready address {0}"
+msgstr "dirección ready TUN inválida {0}"
+
+msgid "connect to ready listener timed out"
+msgstr "agotó el tiempo al conectar al escuchador ready"
+
+msgid "connect to ready listener"
+msgstr "conectar al escuchador ready"
+
+msgid "setsid for TUN daemon"
+msgstr "setsid del daemon TUN"
+
+msgid "TUN daemon worker is Unix-only in this build"
+msgstr "el worker del daemon TUN es solo Unix en esta compilación"
+
+msgid "sending TUN ready OK"
+msgstr "enviando TUN ready OK"
+
+
+msgid "bad LINK_P2P_ALLOW id {0}"
+msgstr "id LINK_P2P_ALLOW inválido {0}"
+
+msgid "spoke daemon requires LINK_P2P_TUN_TO (hub EndpointId)"
+msgstr "el daemon spoke requiere LINK_P2P_TUN_TO (EndpointId del hub)"
+
+msgid "TUN daemon Shutdown requested"
+msgstr "Shutdown del daemon TUN solicitado"
+
+msgid "TUN data plane dropped ready signal"
+msgstr "el plano de datos TUN descartó la señal ready"
+
+msgid "TUN data plane task join"
+msgstr "espera de la tarea del plano de datos TUN"
+
+msgid "unknown TUN daemon role {0}"
+msgstr "rol de daemon TUN desconocido {0}"
+
+msgid "this command must be run as root (try: sudo link-p2p tun service …)"
+msgstr "este comando debe ejecutarse como root (prueba: sudo link-p2p tun service …)"
+
+msgid "tun service install is not supported on this platform yet (Windows SCM coming later)"
+msgstr "tun service install aún no está soportado en esta plataforma (Windows SCM más adelante)"
+
+msgid "installed and started {0} (control: link-p2p tun status --system)"
+msgstr "instalado e iniciado {0} (control: link-p2p tun status --system)"
+
+msgid "identity: {0} (EndpointId is stable across service restarts)"
+msgstr "identity: {0} (EndpointId estable entre reinicios del servicio)"
+
+msgid "logs: {0}/tun.log (configure newsyslog; see docs/subsystems/tun.md)"
+msgstr "logs: {0}/tun.log (configura newsyslog; ver docs/subsystems/tun.md)"
+
+msgid "removed {0} (identity under /etc/link-p2p was kept)"
+msgstr "eliminado {0} (se conservó identity en /etc/link-p2p)"
+
+msgid "TUN system daemon is not running (try: link-p2p tun status --system, or check the service manager)"
+msgstr "el daemon TUN del sistema no está en ejecución (prueba: link-p2p tun status --system, o revisa el gestor de servicios)"
+
+msgid "`tun up --system` requires `--foreground` (supervisor-managed services must not self-daemonize)"
+msgstr "`tun up --system` requiere `--foreground` (servicios gestionados por el supervisor no deben auto-daemonizarse)"
+
+msgid "system mode: pin identity with --identity (e.g. /etc/link-p2p/identity.key); the service account config dir may otherwise get a new key"
+msgstr "modo system: fija identity con --identity (p. ej. /etc/link-p2p/identity.key); si no, el directorio de config de la cuenta de servicio puede generar una clave nueva"
+
+msgid "Use system-service paths (e.g. `/run/link-p2p/tun.sock`). Requires `--foreground`; pin identity with `--identity`."
+msgstr "Usa rutas de servicio del sistema (p. ej. `/run/link-p2p/tun.sock`). Requiere `--foreground`; fija identity con `--identity`."
+
+msgid "invalid executable path for systemd unit"
+msgstr "ruta del ejecutable inválida para la unidad systemd"
+
+msgid "invalid identity path for systemd unit"
+msgstr "ruta de identity inválida para la unidad systemd"
+
+msgid "invalid --to value for systemd unit"
+msgstr "valor --to inválido para la unidad systemd"
+
+msgid "invalid executable path for LaunchDaemon plist"
+msgstr "ruta del ejecutable inválida para el plist LaunchDaemon"
+
+msgid "invalid identity path for LaunchDaemon plist"
+msgstr "ruta de identity inválida para el plist LaunchDaemon"
+
+msgid "invalid --to value for LaunchDaemon plist"
+msgstr "valor --to inválido para el plist LaunchDaemon"
+
+msgid "refusing service install: binary is under a Cargo target/ directory (install a release build to /usr/local/bin or similar first)"
+msgstr "rechazando instalación del servicio: el binario está bajo Cargo target/ (instala antes un build release en /usr/local/bin o similar)"
+
+msgid "refusing service install: binary is under /tmp (install to a system path first)"
+msgstr "rechazando instalación del servicio: el binario está bajo /tmp (instala primero en una ruta del sistema)"
+
+msgid "refusing service install: binary is under /home (install to /usr/local/bin or /usr/bin first)"
+msgstr "rechazando instalación del servicio: el binario está bajo /home (instala primero en /usr/local/bin o /usr/bin)"
+
+msgid "refusing service install: binary is under /Users (install to /usr/local/bin first)"
+msgstr "rechazando instalación del servicio: el binario está bajo /Users (instala primero en /usr/local/bin)"
+
+msgid "refusing service install: binary is under your home directory (install to a system path first)"
+msgstr "rechazando instalación del servicio: el binario está bajo tu directorio home (instala primero en una ruta del sistema)"
+
+msgid "binary path has no parent directory"
+msgstr "la ruta del binario no tiene directorio padre"
+
+msgid "refusing service install: directory {0} is group/world-writable (any local user could replace the binary the service runs as root/CAP_NET_ADMIN)"
+msgstr "rechazando instalación del servicio: el directorio {0} es escribible por grupo/otros (un usuario local podría reemplazar el binario que el servicio ejecuta como root/CAP_NET_ADMIN)"
+
+msgid "identity key not found at {0}; create it or re-run install after copying your key (e.g. from ~/.config/link-p2p/identity.key)"
+msgstr "no se encontró la clave identity en {0}; créala o vuelve a instalar tras copiar tu clave (p. ej. desde ~/.config/link-p2p/identity.key)"
+
+msgid "looking up service user"
+msgstr "buscando usuario del servicio"
+
+msgid "system user {0} not found"
+msgstr "usuario del sistema {0} no encontrado"
+
+msgid "creating system user {0}"
+msgstr "creando usuario del sistema {0}"
+
+msgid "writing systemd unit {0}"
+msgstr "escribiendo unidad systemd {0}"
+
+msgid "writing LaunchDaemon {0}"
+msgstr "escribiendo LaunchDaemon {0}"
+
+msgid "removing systemd unit {0}"
+msgstr "eliminando unidad systemd {0}"
+
+msgid "removing LaunchDaemon {0}"
+msgstr "eliminando LaunchDaemon {0}"
+
+msgid "resolving binary path {0}"
+msgstr "resolviendo ruta del binario {0}"
+
+msgid "stat binary directory {0}"
+msgstr "stat del directorio del binario {0}"
+
+msgid "creating {0}"
+msgstr "creando {0}"
+
+msgid "copying identity {0} -> {1}"
+msgstr "copiando identity {0} -> {1}"
+
+msgid "stat identity {0}"
+msgstr "stat de identity {0}"
+
+msgid "identity path is not a file: {0}"
+msgstr "la ruta identity no es un archivo: {0}"
+
+msgid "chmod identity {0}"
+msgstr "chmod de identity {0}"
+
+msgid "chown identity {0}"
+msgstr "chown de identity {0}"
+
+msgid "{0} failed (exit {1}): {2}{3}"
+msgstr "{0} falló (salida {1}): {2}{3}"
+
+msgid "Install or remove a TUN system service (Linux systemd; macOS LaunchDaemon)."
+msgstr "Instalar o eliminar un servicio TUN del sistema (Linux systemd; macOS LaunchDaemon)."
+
+msgid ""
+"Manage a platform service for `tun up --foreground --system`. Requires root. Refuses to install if this binary is under a user-writable path. Identity defaults to /etc/link-p2p/identity.key (copied from the sudo caller's config when missing). macOS runs as root LaunchDaemon; Linux uses a dedicated service user with CAP_NET_ADMIN."
+msgstr ""
+"Gestiona un servicio de plataforma para `tun up --foreground --system`. Requiere root. Rechaza instalar si el binario está en una ruta escribible por usuarios. Identity por defecto /etc/link-p2p/identity.key (copiada del config del llamador sudo si falta). macOS como LaunchDaemon root; Linux con usuario dedicado y CAP_NET_ADMIN."
+
+msgid "Install the TUN system service and start it."
+msgstr "Instalar el servicio TUN del sistema e iniciarlo."
+
+msgid "Service identity key path (default /etc/link-p2p/identity.key)."
+msgstr "Ruta de la clave identity del servicio (predeterminado /etc/link-p2p/identity.key)."
+
+msgid ""
+"Linux systemd only: Unix user the service runs as (default link-p2p). Ignored on macOS (root LaunchDaemon)."
+msgstr ""
+"Solo Linux systemd: usuario Unix del servicio (predeterminado link-p2p). Ignorado en macOS (LaunchDaemon root)."
+
+msgid "Disable and remove the TUN system service."
+msgstr "Desactivar y eliminar el servicio TUN del sistema."
+

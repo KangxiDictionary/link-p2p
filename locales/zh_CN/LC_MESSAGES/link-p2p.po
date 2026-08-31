@@ -1078,3 +1078,328 @@ msgstr "writing contacts {0}"
 
 msgid "your short code: {0}"
 msgstr "你的短码：{0}"
+
+msgid "unexpected control response (wanted Ok/Err, got {0})"
+msgstr "意外的控制面响应（期望 Ok/Err，得到 {0}）"
+
+msgid "control body too large"
+msgstr "控制面消息体过大"
+
+msgid "control body exceeds max ({0} bytes)"
+msgstr "控制面消息体超过上限（{0} 字节）"
+
+msgid "encode control request"
+msgstr "编码控制请求"
+
+msgid "encode control response"
+msgstr "编码控制响应"
+
+msgid "bad control magic (expected LPC1)"
+msgstr "控制面 magic 错误（应为 LPC1）"
+
+msgid "TUN daemon protocol is newer (v{0}) than this CLI (v{1}); upgrade link-p2p"
+msgstr "TUN daemon 协议更新（v{0}）于本 CLI（v{1}）；请升级 link-p2p"
+
+msgid "TUN daemon protocol is older (v{0}) than this CLI (v{1}); restart the daemon or downgrade the CLI"
+msgstr "TUN daemon 协议更旧（v{0}）于本 CLI（v{1}）；请重启 daemon 或降级 CLI"
+
+msgid "control frame truncated"
+msgstr "控制帧被截断"
+
+msgid "decode control request"
+msgstr "解码控制请求"
+
+msgid "decode control response"
+msgstr "解码控制响应"
+
+msgid "read control header"
+msgstr "读取控制头"
+
+msgid "read control body"
+msgstr "读取控制体"
+
+msgid "TUN daemon is not running (try: link-p2p tun up)"
+msgstr "TUN daemon 未运行（尝试：link-p2p tun up）"
+
+
+msgid "invalid pid in tun.pid"
+msgstr "tun.pid 中的 pid 无效"
+
+msgid "invalid started_unix_ms in tun.pid"
+msgstr "tun.pid 中的 started_unix_ms 无效"
+
+msgid "tun.pid missing pid="
+msgstr "tun.pid 缺少 pid="
+
+msgid "tun.pid missing session="
+msgstr "tun.pid 缺少 session="
+
+msgid "tun.pid missing started_unix_ms="
+msgstr "tun.pid 缺少 started_unix_ms="
+
+msgid "reading pid file {0}"
+msgstr "读取 pid 文件 {0}"
+
+msgid "writing pid file {0}"
+msgstr "写入 pid 文件 {0}"
+
+msgid "TUN control socket connect timed out"
+msgstr "连接 TUN 控制 socket 超时"
+
+msgid "TUN control Status timed out"
+msgstr "TUN 控制 Status 超时"
+
+msgid "unexpected Status response from TUN daemon: {0}"
+msgstr "TUN daemon 返回了意外的 Status：{0}"
+
+msgid "binding TUN control socket {0}"
+msgstr "绑定 TUN 控制 socket {0}"
+
+msgid "TUN daemon Shutdown timed out"
+msgstr "TUN daemon Shutdown 超时"
+
+msgid "unexpected Shutdown response: {0}"
+msgstr "意外的 Shutdown 响应：{0}"
+
+msgid "TUN daemon control socket is Unix-only in this build"
+msgstr "此构建中 TUN daemon 控制 socket 仅支持 Unix"
+
+msgid "creating config dir {0}"
+msgstr "创建配置目录 {0}"
+
+msgid "opening TUN lock {0}"
+msgstr "打开 TUN 锁 {0}"
+
+msgid "locking TUN lock {0}"
+msgstr "获取 TUN 锁 {0}"
+
+msgid "TUN daemon lock is held (another tun up is running or the daemon is up); try tun status / tun down"
+msgstr "TUN daemon 锁被占用（另一次 tun up 正在进行或 daemon 已在运行）；请试 tun status / tun down"
+
+msgid "TUN daemon spawn is Unix-only in this build"
+msgstr "此构建中 TUN daemon 拉起仅支持 Unix"
+
+msgid "TUN daemon is already running (try: link-p2p tun status)"
+msgstr "TUN daemon 已在运行（尝试：link-p2p tun status）"
+
+msgid "binding TUN ready listener"
+msgstr "绑定 TUN 就绪监听"
+
+msgid "ready listener local_addr"
+msgstr "就绪监听 local_addr"
+
+msgid "opening TUN log {0}"
+msgstr "打开 TUN 日志 {0}"
+
+msgid "resolving current executable"
+msgstr "解析当前可执行文件"
+
+msgid "cloning TUN log handle"
+msgstr "克隆 TUN 日志句柄"
+
+msgid "spawning TUN daemon worker"
+msgstr "拉起 TUN daemon 工作进程"
+
+msgid "TUN daemon did not signal ready within {0}s; check {1}"
+msgstr "TUN daemon 未在 {0}s 内发出就绪信号；请查看 {1}"
+
+msgid "reading TUN daemon ready signal"
+msgstr "读取 TUN daemon 就绪信号"
+
+msgid "TUN daemon failed to start: {0}"
+msgstr "TUN daemon 启动失败：{0}"
+
+msgid "TUN daemon ready signal malformed: {0}"
+msgstr "TUN daemon 就绪信号格式错误：{0}"
+
+msgid "TUN daemon reported ready but control socket is not answering; check tun.log"
+msgstr "TUN daemon 已报告就绪但控制 socket 无应答；请查看 tun.log"
+
+msgid "TUN daemon Status response missing"
+msgstr "缺少 TUN daemon Status 响应"
+
+msgid "TUN daemon session mismatch after ready"
+msgstr "就绪后 TUN daemon session 不匹配"
+
+msgid "TUN daemon Shutdown timed out; forced cleanup"
+msgstr "TUN daemon Shutdown 超时；已强制清理"
+
+msgid "bad TUN ready address {0}"
+msgstr "无效的 TUN 就绪地址 {0}"
+
+msgid "connect to ready listener timed out"
+msgstr "连接就绪监听超时"
+
+msgid "connect to ready listener"
+msgstr "连接就绪监听"
+
+msgid "setsid for TUN daemon"
+msgstr "TUN daemon setsid"
+
+msgid "TUN daemon worker is Unix-only in this build"
+msgstr "此构建中 TUN daemon worker 仅支持 Unix"
+
+msgid "sending TUN ready OK"
+msgstr "发送 TUN 就绪 OK"
+
+
+msgid "bad LINK_P2P_ALLOW id {0}"
+msgstr "无效的 LINK_P2P_ALLOW id {0}"
+
+msgid "spoke daemon requires LINK_P2P_TUN_TO (hub EndpointId)"
+msgstr "spoke daemon 需要 LINK_P2P_TUN_TO（hub EndpointId）"
+
+msgid "TUN daemon Shutdown requested"
+msgstr "已请求 TUN daemon Shutdown"
+
+msgid "TUN data plane dropped ready signal"
+msgstr "TUN 数据面丢弃了就绪信号"
+
+msgid "TUN data plane task join"
+msgstr "等待 TUN 数据面任务"
+
+msgid "unknown TUN daemon role {0}"
+msgstr "未知 TUN daemon 角色 {0}"
+
+msgid "this command must be run as root (try: sudo link-p2p tun service …)"
+msgstr "此命令须以 root 运行（可试：sudo link-p2p tun service …）"
+
+msgid "tun service install is not supported on this platform yet (Windows SCM coming later)"
+msgstr "此平台尚不支持 tun service install（Windows SCM 后续提供）"
+
+msgid "installed and started {0} (control: link-p2p tun status --system)"
+msgstr "已安装并启动 {0}（控制：link-p2p tun status --system）"
+
+msgid "identity: {0} (EndpointId is stable across service restarts)"
+msgstr "身份密钥：{0}（EndpointId 在服务重启间保持稳定）"
+
+msgid "logs: {0}/tun.log (configure newsyslog; see docs/subsystems/tun.md)"
+msgstr "日志：{0}/tun.log（请配置 newsyslog；见 docs/subsystems/tun.md）"
+
+msgid "removed {0} (identity under /etc/link-p2p was kept)"
+msgstr "已移除 {0}（/etc/link-p2p 下的 identity 已保留）"
+
+msgid "TUN system daemon is not running (try: link-p2p tun status --system, or check the service manager)"
+msgstr "TUN 系统 daemon 未运行（可试：link-p2p tun status --system，或检查服务管理器）"
+
+msgid "`tun up --system` requires `--foreground` (supervisor-managed services must not self-daemonize)"
+msgstr "`tun up --system` 须配合 `--foreground`（受管服务不得自行 daemonize）"
+
+msgid "system mode: pin identity with --identity (e.g. /etc/link-p2p/identity.key); the service account config dir may otherwise get a new key"
+msgstr "system 模式：请用 --identity 固定身份（如 /etc/link-p2p/identity.key）；否则服务账户配置目录可能生成新密钥"
+
+msgid "Use system-service paths (e.g. `/run/link-p2p/tun.sock`). Requires `--foreground`; pin identity with `--identity`."
+msgstr "使用系统服务路径（如 `/run/link-p2p/tun.sock`）。须配合 `--foreground`；用 `--identity` 固定身份。"
+
+msgid "invalid executable path for systemd unit"
+msgstr "systemd unit 的可执行路径无效"
+
+msgid "invalid identity path for systemd unit"
+msgstr "systemd unit 的身份路径无效"
+
+msgid "invalid --to value for systemd unit"
+msgstr "systemd unit 的 --to 值无效"
+
+msgid "invalid executable path for LaunchDaemon plist"
+msgstr "LaunchDaemon plist 的可执行路径无效"
+
+msgid "invalid identity path for LaunchDaemon plist"
+msgstr "LaunchDaemon plist 的身份路径无效"
+
+msgid "invalid --to value for LaunchDaemon plist"
+msgstr "LaunchDaemon plist 的 --to 值无效"
+
+msgid "refusing service install: binary is under a Cargo target/ directory (install a release build to /usr/local/bin or similar first)"
+msgstr "拒绝服务安装：二进制位于 Cargo target/ 目录下（请先安装 release 构建到 /usr/local/bin 等系统路径）"
+
+msgid "refusing service install: binary is under /tmp (install to a system path first)"
+msgstr "拒绝服务安装：二进制位于 /tmp 下（请先安装到系统路径）"
+
+msgid "refusing service install: binary is under /home (install to /usr/local/bin or /usr/bin first)"
+msgstr "拒绝服务安装：二进制位于 /home 下（请先安装到 /usr/local/bin 或 /usr/bin）"
+
+msgid "refusing service install: binary is under /Users (install to /usr/local/bin first)"
+msgstr "拒绝服务安装：二进制位于 /Users 下（请先安装到 /usr/local/bin）"
+
+msgid "refusing service install: binary is under your home directory (install to a system path first)"
+msgstr "拒绝服务安装：二进制位于你的主目录下（请先安装到系统路径）"
+
+msgid "binary path has no parent directory"
+msgstr "二进制路径没有父目录"
+
+msgid "refusing service install: directory {0} is group/world-writable (any local user could replace the binary the service runs as root/CAP_NET_ADMIN)"
+msgstr "拒绝服务安装：目录 {0} 对组/其他用户可写（本地用户可能替换以 root/CAP_NET_ADMIN 运行的服务二进制）"
+
+msgid "identity key not found at {0}; create it or re-run install after copying your key (e.g. from ~/.config/link-p2p/identity.key)"
+msgstr "在 {0} 未找到身份密钥；请创建或复制密钥后重试安装（如从 ~/.config/link-p2p/identity.key）"
+
+msgid "looking up service user"
+msgstr "查找服务用户"
+
+msgid "system user {0} not found"
+msgstr "未找到系统用户 {0}"
+
+msgid "creating system user {0}"
+msgstr "创建系统用户 {0}"
+
+msgid "writing systemd unit {0}"
+msgstr "写入 systemd unit {0}"
+
+msgid "writing LaunchDaemon {0}"
+msgstr "写入 LaunchDaemon {0}"
+
+msgid "removing systemd unit {0}"
+msgstr "移除 systemd unit {0}"
+
+msgid "removing LaunchDaemon {0}"
+msgstr "移除 LaunchDaemon {0}"
+
+msgid "resolving binary path {0}"
+msgstr "解析二进制路径 {0}"
+
+msgid "stat binary directory {0}"
+msgstr "stat 二进制目录 {0}"
+
+msgid "creating {0}"
+msgstr "创建 {0}"
+
+msgid "copying identity {0} -> {1}"
+msgstr "复制身份密钥 {0} -> {1}"
+
+msgid "stat identity {0}"
+msgstr "stat 身份密钥 {0}"
+
+msgid "identity path is not a file: {0}"
+msgstr "身份路径不是文件：{0}"
+
+msgid "chmod identity {0}"
+msgstr "chmod 身份密钥 {0}"
+
+msgid "chown identity {0}"
+msgstr "chown 身份密钥 {0}"
+
+msgid "{0} failed (exit {1}): {2}{3}"
+msgstr "{0} 失败（退出码 {1}）：{2}{3}"
+
+msgid "Install or remove a TUN system service (Linux systemd; macOS LaunchDaemon)."
+msgstr "安装或移除 TUN 系统服务（Linux systemd；macOS LaunchDaemon）。"
+
+msgid ""
+"Manage a platform service for `tun up --foreground --system`. Requires root. Refuses to install if this binary is under a user-writable path. Identity defaults to /etc/link-p2p/identity.key (copied from the sudo caller's config when missing). macOS runs as root LaunchDaemon; Linux uses a dedicated service user with CAP_NET_ADMIN."
+msgstr ""
+"为 `tun up --foreground --system` 管理平台服务。须 root。若二进制位于用户可写路径则拒绝安装。身份默认 /etc/link-p2p/identity.key（缺失时从 sudo 调用者配置复制）。macOS 以 root LaunchDaemon 运行；Linux 使用带 CAP_NET_ADMIN 的专用服务用户。"
+
+msgid "Install the TUN system service and start it."
+msgstr "安装 TUN 系统服务并启动。"
+
+msgid "Service identity key path (default /etc/link-p2p/identity.key)."
+msgstr "服务身份密钥路径（默认 /etc/link-p2p/identity.key）。"
+
+msgid ""
+"Linux systemd only: Unix user the service runs as (default link-p2p). Ignored on macOS (root LaunchDaemon)."
+msgstr ""
+"仅 Linux systemd：服务运行的 Unix 用户（默认 link-p2p）。macOS 忽略（root LaunchDaemon）。"
+
+msgid "Disable and remove the TUN system service."
+msgstr "禁用并移除 TUN 系统服务。"
+
