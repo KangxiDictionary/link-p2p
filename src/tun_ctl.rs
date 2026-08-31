@@ -170,6 +170,11 @@ pub const CTL_MAX_BODY: u32 = 1024 * 1024;
 /// How long a liveness `connect` may block before we treat the socket as dead.
 pub const PROBE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// Server-side bound for reading/writing one control frame. IPC over a local
+/// socket completes in microseconds normally; this only fires on stuck or
+/// abusive peers so one connection can never stall the control loop.
+pub const CTL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// How long the parent waits for the child's ready line after spawn.
 pub const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
@@ -556,6 +561,13 @@ mod tests {
 
     #[test]
     fn version_mismatch_newer_daemon() {
+        // Pin the process catalog to English while the message is baked and
+        // asserted; the zh_CN help test can otherwise race us and make the
+        // tr_fmt! output Chinese (the marker assertions below stay
+        // locale-independent regardless).
+        let _lang = crate::i18n::ENV_LOCK.lock().unwrap();
+        crate::i18n::reset_catalog();
+        crate::i18n::init();
         let body = serde_json::to_vec(&CtlRequest::Status).unwrap();
         let frame = encode_frame(CTL_VERSION + 1, &body).unwrap();
         let err = decode_request_frame(&frame).unwrap_err();
@@ -572,6 +584,11 @@ mod tests {
 
     #[test]
     fn version_mismatch_older_daemon() {
+        // Pin English while the message is baked/asserted (see the newer
+        // variant above).
+        let _lang = crate::i18n::ENV_LOCK.lock().unwrap();
+        crate::i18n::reset_catalog();
+        crate::i18n::init();
         // Encode with a fake lower version in the header.
         let body = serde_json::to_vec(&CtlRequest::Status).unwrap();
         let mut frame = encode_frame(CTL_VERSION, &body).unwrap();

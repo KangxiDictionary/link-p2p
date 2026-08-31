@@ -55,9 +55,11 @@ toml = "0.8"
 # Exclusive lock for TUN daemon lifetime (cross-platform).
 fslock = "0.2"
 
-# Unix: setsid in the TUN daemon worker (detach from controlling terminal).
+# Unix: setsid in the TUN daemon worker (detach from controlling terminal);
+# safe umask around control-socket bind (never born with broad perms).
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", default-features = false, features = ["process", "signal", "user", "fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 
 [[bin]]
 name = "link-p2p"

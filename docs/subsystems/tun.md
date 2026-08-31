@@ -223,15 +223,30 @@ D:(A;;GRGW;;;BU)(A;;GA;;;SY)(A;;GA;;;BA)
 - `(A;;GA;;;SY)` / `(A;;GA;;;BA)` — SYSTEM and Administrators: full control.
 - Do **not** add `(A;;GA;;;WD)`.
 
-`Shutdown` is **not** blocked by DACL alone. On `Shutdown`, the daemon uses
-`GetNamedPipeClientProcessId`, opens the client token, and rejects non-admin
-callers with `CtlResponse::Err` and a dedicated permission exit code (not
-`DAEMON_NOT_RUNNING`).
+`Shutdown` is **not** blocked by DACL alone. On `Shutdown`, the daemon
+**impersonates the named-pipe client** (`ImpersonateNamedPipeClient`), checks
+Administrators / LocalSystem membership on that token, then `RevertToSelf`.
+Do **not** use `GetNamedPipeClientProcessId` + later `OpenProcess` (PID reuse
+race). Reject with `CtlResponse::Err` and a dedicated permission exit code
+(not `DAEMON_NOT_RUNNING`).
+
+**Control plane (cross-platform, before widening socket/DACL access):**
+
+- Accept loop spawns a **per-connection task**; each `read_request` is wrapped
+  in a short read timeout (2–5s). A hung client must not block `Shutdown`.
+- Shared shutdown flag / `TunHooks` cancel; stop accepting after Shutdown.
+- `peer_is_privileged(&stream) -> bool`: Unix `peer_cred()` (`uid == 0 || uid == euid`);
+  Windows impersonation as above. `Status`/`Peers` open to any connector;
+  `Shutdown` requires privileged. Ad-hoc 0600 sockets may skip the check.
+- Ready handshake (`127.0.0.1:0`): require a nonce (reuse `ENV_SESSION` or
+  dedicated) so a local third party cannot inject `OK` / `ERROR`.
 
 Tokio's safe `ServerOptions` cannot set custom `SECURITY_ATTRIBUTES`; use
 `windows-sys` `CreateNamedPipeW` with the SDDL above, then
 `NamedPipeServer::from_raw_handle` (unsafe) to hand off to tokio — the only
-raw FFI surface for pipe creation.
+raw FFI surface for pipe creation. Use `PIPE_UNLIMITED_INSTANCES` (or a pool)
+so accepting one client immediately arms the next instance — same head-of-line
+pattern as the Unix accept loop.
 
 **Separate SCM entry path (not `--foreground` reuse):**
 

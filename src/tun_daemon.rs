@@ -12,7 +12,6 @@ use std::fs::{self, OpenOptions};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,6 +20,8 @@ use fslock::LockFile;
 use iroh::EndpointId;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
+use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 use crate::contacts;
@@ -29,7 +30,7 @@ use crate::i18n::{tr, tr_fmt};
 use crate::style::Styler;
 use crate::tun_ctl::{
     self, write_request, write_response, CtlPeer, CtlRequest, CtlResponse,
-    RuntimeMode, PROBE_CONNECT_TIMEOUT, READY_TIMEOUT,
+    RuntimeMode, CTL_READ_TIMEOUT, PROBE_CONNECT_TIMEOUT, READY_TIMEOUT,
 };
 
 const ENV_WORKER: &str = "LINK_P2P_TUN_WORKER";
@@ -42,6 +43,34 @@ const ENV_SKELETON: &str = "LINK_P2P_TUN_SKELETON";
 const ENV_STUCK_READY: &str = "LINK_P2P_TUN_TEST_STUCK_READY";
 /// Test-only: override ready wait (milliseconds).
 const ENV_READY_TIMEOUT_MS: &str = "LINK_P2P_TUN_READY_TIMEOUT_MS";
+/// Test-only: pin the parent's ready listener to this address so a test can
+/// race a fake connection against the real worker's ready handshake.
+const ENV_TEST_READY_ADDR: &str = "LINK_P2P_TUN_TEST_READY_ADDR";
+/// Nonce passed to the worker so the parent can tell its child's ready line
+/// from any stray connection to the ephemeral ready port.
+const ENV_READY_NONCE: &str = "LINK_P2P_TUN_READY_NONCE";
+
+/// Bounded window for in-flight control requests after `Shutdown` is raised.
+const CTL_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Socket mode for the control socket: ad-hoc is owner-only; system mode is
+/// world-connectable (the daemon itself authorizes `Shutdown` via peer creds).
+fn socket_mode(mode: RuntimeMode) -> u32 {
+    if mode == RuntimeMode::System {
+        0o666
+    } else {
+        0o600
+    }
+}
+
+/// Format a ready line as the worker sends it: `{nonce} {suffix}` when the
+/// parent handed us a nonce, plain `suffix` otherwise (in-process tests).
+fn ready_line(suffix: &str) -> String {
+    match std::env::var(ENV_READY_NONCE) {
+        Ok(n) if !n.is_empty() => format!("{n} {suffix}"),
+        _ => suffix.to_string(),
+    }
+}
 
 /// Output format for `tun status` / `tun peers`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,14 +330,20 @@ mod ctl_sock {
         }
     }
 
-    pub fn bind_listener(path: &Path) -> Result<UnixListener> {
+    pub fn bind_listener(path: &Path, mode: u32) -> Result<UnixListener> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).ok();
         }
-        let listener = UnixListener::bind(path).with_context(|| {
+        // Tighten the process umask while binding so the socket file is never
+        // born with broader permissions than intended (no bind→chmod window
+        // where a local peer could sneak in before the chmod lands).
+        let old = rustix::process::umask(rustix::fs::Mode::from_bits(0o177).unwrap());
+        let bound = UnixListener::bind(path);
+        rustix::process::umask(old);
+        let listener = bound.with_context(|| {
             tr_fmt!("binding TUN control socket {0}", path.display().to_string())
         })?;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
         Ok(listener)
     }
 
@@ -424,6 +459,13 @@ fn ensure_runtime_dir(mode: RuntimeMode) -> Result<PathBuf> {
         RuntimeMode::AdHoc => {
             fs::create_dir_all(&dir)
                 .with_context(|| tr_fmt!("creating config dir {0}", dir.display().to_string()))?;
+            // The ad-hoc dir holds the private key + control socket; make it
+            // owner-only so nothing in it is ever world-readable.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+            }
         }
         RuntimeMode::System => {
             if tun_ctl::uses_unix_socket(mode) {
@@ -525,9 +567,11 @@ async fn spawn_daemon_unix(opts: &SpawnOpts, skeleton: bool) -> Result<PidRecord
     }
 
     let session = random_session();
-    let ready = TcpListener::bind("127.0.0.1:0")
-        .await
-        .context(tr!("binding TUN ready listener"))?;
+    let ready = match std::env::var(ENV_TEST_READY_ADDR) {
+        Ok(addr) => TcpListener::bind(&addr).await,
+        Err(_) => TcpListener::bind("127.0.0.1:0").await,
+    }
+    .context(tr!("binding TUN ready listener"))?;
     let ready_addr = ready.local_addr().context(tr!("ready listener local_addr"))?;
 
     ensure_runtime_dir(mode)?;
@@ -543,11 +587,15 @@ async fn spawn_daemon_unix(opts: &SpawnOpts, skeleton: bool) -> Result<PidRecord
     }
 
     let exe = std::env::current_exe().context(tr!("resolving current executable"))?;
+    // Ready nonce: only the child knows it, so a stray connection to the
+    // ephemeral ready port can never impersonate the worker's handshake.
+    let nonce = random_session();
     let mut cmd = Command::new(&exe);
     cmd.env(ENV_WORKER, "1")
         .env(ENV_READY, ready_addr.to_string())
         .env(ENV_ROLE, &opts.role)
         .env(ENV_SESSION, &session)
+        .env(ENV_READY_NONCE, &nonce)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone().context(tr!("cloning TUN log handle"))?))
         .stderr(Stdio::from(log));
@@ -570,12 +618,24 @@ async fn spawn_daemon_unix(opts: &SpawnOpts, skeleton: bool) -> Result<PidRecord
     let mut child = cmd.spawn().context(tr!("spawning TUN daemon worker"))?;
 
     let wait = ready_timeout();
+    let nonce_prefix = format!("{nonce} ");
     let ready_result = timeout(wait, async {
-        let (mut stream, _) = ready.accept().await?;
-        let mut reader = AsyncBufReader::new(&mut stream);
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
-        Ok::<_, anyhow::Error>(line)
+        // Keep accepting until a line carrying our nonce arrives (or timeout).
+        // A missing/wrong nonce means the connection is not our worker —
+        // ignore it and keep waiting rather than treating it as ready.
+        loop {
+            let Ok((mut stream, _)) = ready.accept().await else {
+                continue;
+            };
+            let mut reader = AsyncBufReader::new(&mut stream);
+            let mut line = String::new();
+            if reader.read_line(&mut line).await.is_err() {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix(&nonce_prefix) {
+                return Ok::<_, anyhow::Error>(rest.to_string());
+            }
+        }
     })
     .await;
 
@@ -949,7 +1009,7 @@ pub async fn run_worker() -> Result<()> {
     .await;
     if let (Err(e), Some(addr)) = (&result, ready_addr.as_ref()) {
         if let Ok(mut stream) = connect_ready(addr).await {
-            let msg = format!("ERROR: {e:#}\n");
+            let msg = format!("{}\n", ready_line(&format!("ERROR: {e:#}")));
             let _ = stream.write_all(msg.as_bytes()).await;
         }
     }
@@ -987,7 +1047,7 @@ async fn run_worker_inner(
                 anyhow::anyhow!(tr!("TUN daemon is already running (try: link-p2p tun status)")),
             ));
         }
-        match ctl_sock::bind_listener(&sock) {
+        match ctl_sock::bind_listener(&sock, socket_mode(mode)) {
             Ok(l) => l,
             Err(e) => {
                 drop_lock(&mut lock);
@@ -1040,7 +1100,7 @@ async fn run_skeleton_control(
     if let Ok(addr) = std::env::var(ENV_READY) {
         let mut stream = connect_ready(&addr).await?;
         stream
-            .write_all(b"OK\n")
+            .write_all(format!("{}\n", ready_line("OK")).as_bytes())
             .await
             .context(tr!("sending TUN ready OK"))?;
     }
@@ -1051,7 +1111,7 @@ async fn run_skeleton_control(
 
     let (hooks, _ready_rx) = crate::tun::TunHooks::new(Arc::clone(&state));
     let hooks = Arc::new(hooks);
-    serve_ctl_until_shutdown(listener, hooks).await
+    serve_ctl_until_shutdown(listener, hooks, /*require_privilege_for_shutdown=*/ false).await
 }
 
 /// Real TUN + roster under the same lock/socket/ready contract as the skeleton.
@@ -1068,7 +1128,10 @@ async fn run_live_control_and_data(
     let hooks = Arc::new(hooks);
 
     let ctl_hooks = Arc::clone(&hooks);
-    let ctl = tokio::spawn(async move { serve_ctl_until_shutdown(listener, ctl_hooks).await });
+    let require_privilege = mode == RuntimeMode::System;
+    let ctl = tokio::spawn(async move {
+        serve_ctl_until_shutdown(listener, ctl_hooks, require_privilege).await
+    });
 
     let data_hooks = Arc::clone(&hooks);
     let role_owned = role.to_string();
@@ -1090,7 +1153,7 @@ async fn run_live_control_and_data(
             if let Some(addr) = &ready_addr {
                 let mut stream = connect_ready(addr).await?;
                 stream
-                    .write_all(b"OK\n")
+                    .write_all(format!("{}\n", ready_line("OK")).as_bytes())
                     .await
                     .context(tr!("sending TUN ready OK"))?;
             }
@@ -1098,7 +1161,7 @@ async fn run_live_control_and_data(
         Ok(Ok(Err(e))) => {
             if let Some(addr) = &ready_addr {
                 if let Ok(mut stream) = connect_ready(addr).await {
-                    let msg = format!("ERROR: {e:#}\n");
+                    let msg = format!("{}\n", ready_line(&format!("ERROR: {e:#}")));
                     let _ = stream.write_all(msg.as_bytes()).await;
                 }
             }
@@ -1111,7 +1174,7 @@ async fn run_live_control_and_data(
             let err = anyhow::anyhow!(tr!("TUN data plane dropped ready signal"));
             if let Some(addr) = &ready_addr {
                 if let Ok(mut stream) = connect_ready(addr).await {
-                    let msg = format!("ERROR: {err:#}\n");
+                    let msg = format!("{}\n", ready_line(&format!("ERROR: {err:#}")));
                     let _ = stream.write_all(msg.as_bytes()).await;
                 }
             }
@@ -1131,7 +1194,7 @@ async fn run_live_control_and_data(
             );
             if let Some(addr) = &ready_addr {
                 if let Ok(mut stream) = connect_ready(addr).await {
-                    let msg = format!("ERROR: {err:#}\n");
+                    let msg = format!("{}\n", ready_line(&format!("ERROR: {err:#}")));
                     let _ = stream.write_all(msg.as_bytes()).await;
                 }
             }
@@ -1154,37 +1217,98 @@ async fn run_live_control_and_data(
 async fn serve_ctl_until_shutdown(
     listener: tokio::net::UnixListener,
     hooks: Arc<crate::tun::TunHooks>,
+    require_privilege_for_shutdown: bool,
 ) -> Result<()> {
-    let shutting_down = Arc::new(AtomicBool::new(false));
+    // Each accepted connection runs in its own task, so one client that
+    // stalls mid-request can never block Status/Peers/Shutdown for everyone
+    // else. Shutdown is a watch signal; the accept loop stops taking new
+    // connections, then drains in-flight tasks within a bounded window.
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let mut tasks = JoinSet::new();
+
     loop {
-        if shutting_down.load(Ordering::SeqCst) {
-            break;
-        }
-        let accept = timeout(Duration::from_millis(200), listener.accept()).await;
-        let Ok(Ok((mut stream, _))) = accept else {
-            continue;
-        };
-        let req = match tun_ctl::read_request(&mut stream).await {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let resp = match req {
-            CtlRequest::Status => hooks.state.status_response().await,
-            CtlRequest::Peers => hooks.state.peers_response().await,
-            CtlRequest::Shutdown => {
-                // Trigger data-plane teardown first; Ok is sent after cancel is
-                // raised so the CLI can wait for the socket to go away.
-                shutting_down.store(true, Ordering::SeqCst);
-                hooks.request_shutdown();
-                CtlResponse::Ok
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => break,
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else { continue };
+                let hooks = Arc::clone(&hooks);
+                let shutdown_tx = shutdown_tx.clone();
+                tasks.spawn(handle_one_connection(
+                    stream,
+                    hooks,
+                    shutdown_tx,
+                    require_privilege_for_shutdown,
+                ));
             }
-        };
-        let _ = write_response(&mut stream, &resp).await;
-        if matches!(req, CtlRequest::Shutdown) {
-            break;
+        }
+    }
+
+    // Drain: give in-flight requests a bounded window to finish their
+    // response, then stop regardless.
+    let drain = tokio::time::sleep(CTL_DRAIN_TIMEOUT);
+    tokio::pin!(drain);
+    loop {
+        tokio::select! {
+            _ = &mut drain => break,
+            res = tasks.join_next() => {
+                if res.is_none() {
+                    break;
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// Serve one control request. Timeout-bound both directions: a client that
+/// never sends a frame, or never reads our response, dies on its own without
+/// affecting any other connection.
+#[cfg(unix)]
+async fn handle_one_connection(
+    mut stream: tokio::net::UnixStream,
+    hooks: Arc<crate::tun::TunHooks>,
+    shutdown_tx: watch::Sender<bool>,
+    require_privilege: bool,
+) {
+    let req = match timeout(CTL_READ_TIMEOUT, tun_ctl::read_request(&mut stream)).await {
+        Ok(Ok(r)) => r,
+        _ => return, // read timeout or bad frame: drop this connection only
+    };
+
+    let resp = match req {
+        CtlRequest::Status => hooks.state.status_response().await,
+        CtlRequest::Peers => hooks.state.peers_response().await,
+        CtlRequest::Shutdown => {
+            if require_privilege && !peer_is_privileged(&stream) {
+                CtlResponse::Err {
+                    code: exit::DENIED,
+                    message: tr!(
+                        "permission denied: only root or the service account may stop the TUN daemon"
+                    ),
+                }
+            } else {
+                // Signal the accept loop to stop taking new connections; the
+                // data-plane teardown happens in the drain/join phase. The
+                // client still gets its Ok immediately.
+                let _ = shutdown_tx.send(true);
+                hooks.request_shutdown();
+                CtlResponse::Ok
+            }
+        }
+    };
+    let _ = timeout(CTL_READ_TIMEOUT, write_response(&mut stream, &resp)).await;
+}
+
+/// Whether the peer behind `stream` may stop the daemon. Only consulted in
+/// system mode (socket is world-connectable there); fails closed — an error
+/// reading peer credentials is treated as unprivileged.
+#[cfg(unix)]
+fn peer_is_privileged(stream: &tokio::net::UnixStream) -> bool {
+    match stream.peer_cred() {
+        Ok(cred) => cred.uid() == 0 || cred.uid() == nix::unistd::geteuid().as_raw(),
+        Err(_) => false,
+    }
 }
 
 #[cfg(unix)]
@@ -1388,6 +1512,23 @@ mod tests {
 
     /// Serialize tests that touch process-global `config_dir` / env.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Pin the process catalog to the English fallback so message-text
+    /// assertions are deterministic even if the zh_CN help test runs
+    /// concurrently (it would otherwise make `tr!` return Chinese while the
+    /// message is baked). Must be taken **before** the call that bakes the
+    /// message and held until the assertion — the returned ENV_LOCK guard
+    /// serializes against the zh test. `current_thread` runtime is required
+    /// for tokio tests so the guard can be held across awaits.
+    fn pin_english_catalog() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::i18n::ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LANGUAGE");
+        std::env::set_var("LANG", "C");
+        std::env::set_var("LC_ALL", "C");
+        crate::i18n::reset_catalog();
+        crate::i18n::init();
+        guard
+    }
 
     struct TempConfig {
         _dir: tempfile_dir::TempDir,
@@ -1609,9 +1750,10 @@ mod tests {
         assert_eq!(format_uptime(3661), "1h1m1s");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn status_when_not_running_is_daemon_not_running() {
         let _g = TEST_LOCK.lock().unwrap();
+        let _lang = pin_english_catalog();
         let _t = TempConfig::install();
         let err = cmd_status(MODE, CliFormat::Text).await.unwrap_err();
         assert_eq!(exit::code_from(&err), exit::DAEMON_NOT_RUNNING);
@@ -1633,9 +1775,10 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn up_fails_when_already_running_without_side_effects() {
         let _g = TEST_LOCK.lock().unwrap();
+        let _lang = pin_english_catalog();
         let _t = TempConfig::install();
         let styler = crate::style::apply_color_mode(crate::style::ColorMode::Never);
         let session = random_session();
@@ -1677,6 +1820,121 @@ mod tests {
         assert!(matches!(probe(MODE).await.unwrap(), Liveness::NotRunning));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stuck_client_does_not_block_status() {
+        let _g = TEST_LOCK.lock().unwrap();
+        let _t = TempConfig::install();
+        let session = random_session();
+        let session2 = session.clone();
+        let handle = tokio::spawn(async move {
+            run_skeleton_in_process("hub", &session2).await.unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !matches!(probe(MODE).await.unwrap(), Liveness::Running { .. }) {
+            assert!(Instant::now() <= deadline, "daemon not up");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // A client that connects and then never writes a request must not
+        // stall the control loop for everyone else.
+        let sock = tun_ctl::socket_path(MODE);
+        let stuck = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        std::mem::forget(stuck); // keep the fd open, never send anything
+
+        let status = tokio::time::timeout(Duration::from_secs(2), ctl_sock::handshake_status(&sock))
+            .await;
+        assert!(
+            matches!(status, Ok(Ok(_))),
+            "a stuck client must not block Status: {status:?}"
+        );
+        let peers = tokio::time::timeout(Duration::from_secs(2), ctl_sock::handshake_peers(&sock))
+            .await;
+        assert!(
+            matches!(peers, Ok(Ok(_))),
+            "a stuck client must not block Peers: {peers:?}"
+        );
+
+        request_shutdown().await.unwrap();
+        handle.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_status_requests_all_succeed() {
+        let _g = TEST_LOCK.lock().unwrap();
+        let _t = TempConfig::install();
+        let session = random_session();
+        let session2 = session.clone();
+        let handle = tokio::spawn(async move {
+            run_skeleton_in_process("hub", &session2).await.unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !matches!(probe(MODE).await.unwrap(), Liveness::Running { .. }) {
+            assert!(Instant::now() <= deadline, "daemon not up");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Lock in that the control loop serves connections concurrently:
+        // every request must complete within a bounded deadline even with
+        // many in flight (a serialized loop would still pass today, but a
+        // future regression back to per-connection blocking must not).
+        let sock = tun_ctl::socket_path(MODE);
+        let mut pending = Vec::new();
+        for _ in 0..16 {
+            pending.push(tokio::time::timeout(
+                Duration::from_secs(5),
+                ctl_sock::handshake_status(&sock),
+            ));
+        }
+        for fut in pending {
+            assert!(fut.await.unwrap().is_ok(), "concurrent Status must succeed");
+        }
+
+        request_shutdown().await.unwrap();
+        handle.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ready_handshake_rejects_wrong_nonce() {
+        let _g = TEST_LOCK.lock().unwrap();
+        let _t = TempConfig::install();
+        // The real worker never sends ready (stuck hook); only a fake
+        // nonce-less "OK" reaches the ready port. The parent must keep
+        // waiting → TIMEOUT — never treat the fake line as success.
+        std::env::set_var(ENV_STUCK_READY, "1");
+        std::env::set_var(ENV_READY_TIMEOUT_MS, "1500");
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        std::env::set_var(ENV_TEST_READY_ADDR, addr.to_string());
+
+        let fake = tokio::spawn(async move {
+            for _ in 0..200 {
+                if let Ok(mut s) = tokio::net::TcpStream::connect(addr).await {
+                    let _ = s.write_all(b"OK\n").await;
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let result = spawn_skeleton("hub").await;
+        // Clean up env before any assert so a red run cannot poison later
+        // tests (STUCK_READY would hang any subsequent in-process worker).
+        std::env::remove_var(ENV_TEST_READY_ADDR);
+        std::env::remove_var(ENV_STUCK_READY);
+        std::env::remove_var(ENV_READY_TIMEOUT_MS);
+        let _ = tokio::time::timeout(Duration::from_secs(3), fake).await;
+
+        let err = match result {
+            Ok(rec) => panic!("spawn succeeded when it must time out: {rec:?}"),
+            Err(e) => e,
+        };
+        assert_eq!(exit::code_from(&err), exit::TIMEOUT, "{err:#}");
+    }
+
     #[test]
     fn protocol_mismatch_detection_is_locale_independent() {
         // Message deliberately non-English (what the CLI sees under zh_CN):
@@ -1692,12 +1950,13 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn probe_surfaces_version_mismatch() {
         use tokio::io::AsyncWriteExt;
         use tokio::net::UnixListener;
 
         let _g = TEST_LOCK.lock().unwrap();
+        let _lang = pin_english_catalog();
         let _t = TempConfig::install();
         ensure_runtime_dir(MODE).unwrap();
         let sock = tun_ctl::socket_path(MODE);

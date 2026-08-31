@@ -1929,20 +1929,25 @@ fn default_identity_path() -> PathBuf {
     PathBuf::from("identity.key")
 }
 
-/// Copy the legacy identity file to the XDG location (directory created as
+/// Move the legacy identity file to the XDG location (directory created as
 /// needed), keeping the key material and thus the EndpointId intact.
+///
+/// Written through [`open_key_file_for_write`] (mode 0600 at creation), never
+/// `fs::copy`: a copy would inherit umask-derived permissions and be
+/// world-readable until the chmod below lands. The key material must not
+/// briefly exist with broad perms on disk.
 fn migrate_identity(from: &Path, to: &Path) -> Result<()> {
-    if let Some(parent) = to.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| tr_fmt!("creating identity directory {0}", parent.display()))?;
-    }
-    std::fs::copy(from, to).with_context(|| {
+    let ctx = || {
         tr_fmt!(
             "migrating legacy identity from {0} to {1}",
             from.display(),
             to.display()
         )
-    })?;
+    };
+    let bytes = std::fs::read(from).with_context(ctx)?;
+    let mut file = open_key_file_for_write(to)?;
+    file.write_all(&bytes).with_context(ctx)?;
+    drop(file);
     harden_key_permissions(to)?;
     // The key material is now safely at its XDG home; drop the legacy copy
     // so the private key doesn't linger in the working directory.
@@ -3525,6 +3530,31 @@ mod tests {
         let _ = std::fs::remove_dir(&dir);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn migrate_identity_writes_0600_and_removes_legacy() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("link-p2p-migrate-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let legacy = dir.join("identity.key");
+        let target = dir.join("nested").join("identity.key");
+        let key = "0123456789abcdef".repeat(4); // 64 hex chars
+        // Legacy file deliberately broad (0644): the migrated copy must never
+        // inherit that — it goes through open_key_file_for_write (0600 at
+        // creation), not fs::copy.
+        std::fs::write(&legacy, &key).unwrap();
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        migrate_identity(&legacy, &target).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), key.as_bytes());
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "migrated identity must be owner-only, got {mode:o}");
+        assert!(!legacy.exists(), "legacy identity should be removed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn cli_help_is_fully_localized() {
         // The localized builder resolves translations via the loaded catalog,
@@ -3543,6 +3573,9 @@ mod tests {
         std::env::remove_var("LANGUAGE");
         std::env::set_var("LANG", "C");
         std::env::set_var("LC_ALL", "C");
+        // Restore the English fallback for the rest of the test process —
+        // the catalog OnceLock would otherwise keep zh_CN forever.
+        crate::i18n::reset_catalog();
         crate::i18n::init();
     }
 

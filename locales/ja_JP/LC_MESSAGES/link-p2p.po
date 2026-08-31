@@ -1456,3 +1456,6 @@ msgstr "hub にダイヤルしメッシュに参加、ピア直結を試行（�
 msgid "Dial a `tun serve` hub, install 172.24.0.0/16 on the TUN, receive the mesh roster, and attempt direct links to other spokes (packets prefer direct; otherwise via hub). Equivalent to `tun up --foreground --role spoke --to <hub>`."
 msgstr "`tun serve` hub にダイヤルし、TUN に 172.24.0.0/16 を入れ、メッシュ roster を受け取り、他 spoke への直接リンクを試行（パケットは直接優先、なければ hub）。`tun up --foreground --role spoke --to <hub>` と同義。"
 
+
+msgid "permission denied: only root or the service account may stop the TUN daemon"
+msgstr "権限がありません：TUN daemon を停止できるのは root またはサービスアカウントのみです"

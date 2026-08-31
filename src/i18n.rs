@@ -35,9 +35,10 @@
 //!   quantity-based message ever appears, the extension points are `parse_mo`
 //!   (msgid_plural entries) and `lookup` (plural-rule selection).
 //! - **Runtime language switching**: the catalog is fixed at startup
-//!   (OnceLock). A CLI run speaks one language; nothing needs to change it
-//!   mid-process. Adding a `--lang` flag later is a change before `init()`, not
-//!   a reason to make the catalog mutable.
+//!   (`init()` writes it once). A CLI run speaks one language; nothing needs
+//!   to change it mid-process. Adding a `--lang` flag later is a change before
+//!   `init()`, not a reason to make the catalog hot-swappable. (Test builds
+//!   may `reset_catalog()` to re-resolve the language.)
 //! - **Zero-copy catalog**: strings are loaded into an owned HashMap once at
 //!   startup. At ~150 entries this is microseconds and tens of KB — keeping
 //!   the .mo files loadable from disk (LINK_P2P_LOCALEDIR) beats baking them
@@ -45,7 +46,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
 /// Domain name used in textdomain/bindtextdomain. Must match the .mo file
 /// names (`link-p2p.mo`).
@@ -63,13 +63,25 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Loaded catalog (msgid -> msgstr) for the resolved language, or `None`
 /// when no catalog applies (English fallback).
-static CATALOG: OnceLock<Option<HashMap<String, String>>> = OnceLock::new();
+///
+/// A `Mutex` (not `OnceLock`) so tests can reset the language; production
+/// only writes once from [`init`], so reads stay uncontended.
+static CATALOG: std::sync::Mutex<Option<HashMap<String, String>>> = std::sync::Mutex::new(None);
 
 /// Initialize i18n: resolve the language from the environment and load its
 /// catalog. Called once from `main` before anything is printed. Never fails —
 /// a missing catalog is the English fallback.
 pub fn init() {
-    let _ = CATALOG.set(resolve_lang().and_then(load_catalog));
+    *CATALOG.lock().unwrap() = resolve_lang().and_then(load_catalog);
+}
+
+/// Test-only: forget the loaded catalog so [`init`] can resolve a new
+/// language. Without this, the zh_CN help check would permanently switch
+/// `tr!` lookups to translated strings, breaking message-text assertions in
+/// other tests running in the same process.
+#[cfg(test)]
+pub fn reset_catalog() {
+    *CATALOG.lock().unwrap() = None;
 }
 
 /// Translate `msgid` and return an owned `String`.
@@ -99,8 +111,9 @@ pub(crate) use tr_fmt;
 /// (English) when there is no catalog or no entry.
 pub fn lookup(msgid: &str) -> String {
     CATALOG
-        .get()
-        .and_then(|c| c.as_ref())
+        .lock()
+        .unwrap()
+        .as_ref()
         .and_then(|m| m.get(msgid))
         .cloned()
         .unwrap_or_else(|| msgid.to_string())

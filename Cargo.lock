@@ -1863,6 +1863,7 @@ dependencies = [
  "iroh",
  "nix",
  "noq-proto",
+ "rustix",
  "serde",
  "serde_json",
  "socket2",

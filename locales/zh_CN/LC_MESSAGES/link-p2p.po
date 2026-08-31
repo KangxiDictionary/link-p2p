@@ -1471,3 +1471,6 @@ msgstr "拨号到 hub、加入 mesh，并尝试直连对等节点（前台）。
 msgid "Dial a `tun serve` hub, install 172.24.0.0/16 on the TUN, receive the mesh roster, and attempt direct links to other spokes (packets prefer direct; otherwise via hub). Equivalent to `tun up --foreground --role spoke --to <hub>`."
 msgstr "拨号到 `tun serve` hub，在 TUN 上安装 172.24.0.0/16，接收 mesh roster，并尝试与其他 spoke 直连（包优先直连，否则经 hub）。等同 `tun up --foreground --role spoke --to <hub>`。"
 
+
+msgid "permission denied: only root or the service account may stop the TUN daemon"
+msgstr "权限不足：只有 root 或服务账号才能停止 TUN daemon"
