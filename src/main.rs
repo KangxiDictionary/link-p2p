@@ -3528,77 +3528,72 @@ mod tests {
     #[test]
     fn cli_help_is_fully_localized() {
         // The localized builder resolves translations via the loaded catalog,
-        // so pin the language and init it before comparing the trees. The
-        // shared lock keeps the env mutation race-free with the i18n tests.
+        // so pin the language and init it before walking the tree. The shared
+        // lock keeps the env mutation race-free with the i18n tests.
+        //
+        // Catalog is a OnceLock, so we cannot rebuild an English tree in the
+        // same process. Instead require every user-facing string under zh_CN
+        // to contain CJK — that catches missing .po entries even when
+        // `helptext::set_help` shortens an untranslated msgid (brief ≠ full
+        // English doc would otherwise make a naive assert_ne pass).
         let _guard = crate::i18n::ENV_LOCK.lock().unwrap();
         std::env::set_var("LANGUAGE", "zh_CN");
         crate::i18n::init();
-        check_cmd(&Cli::command(), &localized_command(), "<root>");
+        check_cmd(&localized_command(), "<root>");
         std::env::remove_var("LANGUAGE");
         std::env::set_var("LANG", "C");
         std::env::set_var("LC_ALL", "C");
         crate::i18n::init();
     }
 
-    fn check_cmd(raw: &clap::Command, loc: &clap::Command, path: &str) {
-        // Command-level texts. Only texts present in the raw tree are checked
-        // (localized must not drop or fail to translate them).
-        for (tag, r, l) in [
-            ("about", raw.get_about(), loc.get_about()),
-            ("long_about", raw.get_long_about(), loc.get_long_about()),
-            ("after_help", raw.get_after_help(), loc.get_after_help()),
+    fn has_cjk(s: &str) -> bool {
+        s.chars().any(|c| {
+            matches!(
+                c,
+                '\u{4E00}'..='\u{9FFF}' // CJK Unified Ideographs
+                | '\u{3400}'..='\u{4DBF}' // Extension A
+                | '\u{F900}'..='\u{FAFF}' // Compatibility Ideographs
+            )
+        })
+    }
+
+    fn check_cmd(loc: &clap::Command, path: &str) {
+        for (tag, text) in [
+            ("about", loc.get_about()),
+            ("long_about", loc.get_long_about()),
+            // after_help is the platform quick-start block (command examples stay
+            // English by design); skip CJK check for it.
         ] {
-            if let Some(r) = r {
-                let l = l.unwrap_or_else(|| panic!("{path}: {tag} missing in localized tree"));
-                assert_ne!(
-                    r.to_string(),
-                    l.to_string(),
-                    "{path}: {tag} was not localized"
+            if let Some(t) = text {
+                let s = t.to_string();
+                assert!(
+                    has_cjk(&s),
+                    "{path}: {tag} is not localized under zh_CN:\n{s}"
                 );
             }
         }
 
-        // Per-argument help, matched by arg id. A pair that can't be matched
-        // (e.g. the built-in help subcommand's "subcommand" arg vs our
-        // derived "sub") is skipped — the check that matters is: same id in
-        // both trees => help must have been translated.
-        for arg in raw.get_arguments() {
-            let Some(rh) = arg.get_help() else { continue };
-            let Some(l) = loc.get_arguments().find(|a| a.get_id() == arg.get_id()) else {
-                continue;
-            };
-            let lh = l.get_help().unwrap_or_else(|| {
-                panic!(
-                    "{path}: arg {} lost its help in the localized tree",
-                    arg.get_id()
-                )
-            });
-            assert_ne!(
-                rh.to_string(),
-                lh.to_string(),
-                "{path}: arg --{} help was not localized",
-                arg.get_id()
+        for arg in loc.get_arguments() {
+            // Built-in / structural args with no help text are skipped.
+            let Some(h) = arg.get_help() else { continue };
+            let id = arg.get_id();
+            let hs = h.to_string();
+            assert!(
+                has_cjk(&hs),
+                "{path}: arg --{id} short help is not localized under zh_CN:\n{hs}"
             );
-            // `--help` uses long_help when present; it must also be translated.
-            if let Some(llh) = l.get_long_help() {
-                assert_ne!(
-                    rh.to_string(),
-                    llh.to_string(),
-                    "{path}: arg --{} long_help was not localized",
-                    arg.get_id()
+            // `set_help` always attaches long_help; bare `.help()` (e.g. -V) may not.
+            if let Some(lh) = arg.get_long_help() {
+                let ls = lh.to_string();
+                assert!(
+                    has_cjk(&ls),
+                    "{path}: arg --{id} long_help is not localized under zh_CN:\n{ls}"
                 );
             }
         }
 
-        // Recurse into subcommands, matched by name.
-        for sub in raw.get_subcommands() {
-            let Some(l) = loc
-                .get_subcommands()
-                .find(|s| s.get_name() == sub.get_name())
-            else {
-                continue;
-            };
-            check_cmd(sub, l, &format!("{path} {}", sub.get_name()));
+        for sub in loc.get_subcommands() {
+            check_cmd(sub, &format!("{path} {}", sub.get_name()));
         }
     }
 }

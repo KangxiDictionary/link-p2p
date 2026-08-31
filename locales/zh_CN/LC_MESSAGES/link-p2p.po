@@ -744,7 +744,7 @@ msgstr "拨号连接 `tun serve` 枢纽，在 IP 层加入虚拟组网。"
 # --- TUN mesh v2 (roster + direct) ---
 
 msgid "Make machines reachable at the IP layer over QUIC datagrams (mesh with hub coordination)."
-msgstr "通过 QUIC datagram 在 IP 层组网（枢纽协调 + 可选直连）。"
+msgstr "通过 QUIC datagram 在 IP 层打通整机互通（hub 协调的 mesh）。"
 
 msgid "Hub: roster + fallback forward for the virtual IP mesh."
 msgstr "枢纽：成员表 + 兜底转发（虚拟 IP 组网）。"
@@ -909,10 +909,10 @@ msgid "Contact name, EndpointId, or short code from `contact code`."
 msgstr "联系人名字、EndpointId，或 `contact code` 给出的短码。"
 
 msgid "Custom relay URL(s), repeatable. Merged with n0 by default (keeps discovery); use --no-n0-relays to replace. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY (comma-separated) and config.toml."
-msgstr "Custom relay URL(s), repeatable. Merged with n0 by default (keeps discovery); use --no-n0-relays to replace. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY (comma-separated) and config.toml."
+msgstr "自定义 relay URL（可重复）。默认与 n0 合并（保留发现）；用 --no-n0-relays 可完全替换。不会禁用打洞——纯 relay 基线请用 --relay-only。也可用 LINK_P2P_RELAY（逗号分隔）和 config.toml。"
 
 msgid "Direct address hint(s) for the peer (repeatable)."
-msgstr "Direct address hint(s) for the peer (repeatable)."
+msgstr "对端的直连地址提示（可重复）。"
 
 msgid "EndpointId hex or short code."
 msgstr "EndpointId 十六进制或短码。"
@@ -921,10 +921,10 @@ msgid "List contacts."
 msgstr "列出联系人。"
 
 msgid "Local TCP address to listen on; connections are forwarded to the peer."
-msgstr "Local TCP address to listen on; connections are forwarded to the peer."
+msgstr "本地 TCP 监听地址；连接会转发到对端。"
 
 msgid "Local TCP target for streams the peer opens to us (optional)."
-msgstr "Local TCP target for streams the peer opens to us (optional)."
+msgstr "对端向我们打开的流所转发的本地 TCP 目标（可选）。"
 
 msgid "Local nickname."
 msgstr "本地昵称。"
@@ -933,10 +933,10 @@ msgid "Manage the local contacts book (names → EndpointId)."
 msgstr "管理本地联系人簿（名字 → EndpointId）。"
 
 msgid "Phone-like session: both sides run `call` with the same peer token (contact name, EndpointId, or short code). The peer with the smaller EndpointId dials; the other waits. Use --listen and/or --forward on both ends. Relays from config.toml merge with n0 unless --no-n0-relays."
-msgstr "Phone-like session: both sides run `call` with the same peer token (contact name, EndpointId, or short code). The peer with the smaller EndpointId dials; the other waits. Use --listen and/or --forward on both ends. Relays from config.toml merge with n0 unless --no-n0-relays."
+msgstr "类电话会话：两端用同一 peer token（联系人名、EndpointId 或短码）运行 `call`。EndpointId 较小的一侧拨号，另一侧等待。两端可用 --listen 和/或 --forward。config.toml 中的 relay 默认与 n0 合并，除非 --no-n0-relays。"
 
 msgid "Pipe stdin/stdout to one stream (Unix). Conflicts with --listen."
-msgstr "Pipe stdin/stdout to one stream (Unix). Conflicts with --listen."
+msgstr "将 stdin/stdout 接到一条流（Unix）。与 --listen 冲突。"
 
 msgid "Print this node's short code (and EndpointId)."
 msgstr "打印本节点短码（以及 EndpointId）。"
@@ -948,7 +948,7 @@ msgid "Symmetric call: both peers publish and dial (tie-break by EndpointId)."
 msgstr "对称呼叫：双方同时发布并拨号（按 EndpointId 决胜）。"
 
 msgid "With --relay, use only the listed relays (no n0 public relays / discovery). Default merges custom relays into n0. Also LINK_P2P_NO_N0_RELAYS and config.toml relays.no_n0."
-msgstr "With --relay, use only the listed relays (no n0 public relays / discovery). Default merges custom relays into n0. Also LINK_P2P_NO_N0_RELAYS and config.toml relays.no_n0."
+msgstr "与 --relay 联用时仅使用列出的 relay（不含 n0 公共 relay / 发现）。默认是把自定义 relay 合并进 n0。也可用 LINK_P2P_NO_N0_RELAYS 与 config.toml 的 relays.no_n0。"
 
 msgid "call aborted before peer connected"
 msgstr "对端连接前呼叫已中止"
@@ -1402,4 +1402,72 @@ msgstr ""
 
 msgid "Disable and remove the TUN system service."
 msgstr "禁用并移除 TUN 系统服务。"
+
+msgid "`hub` or `spoke`. Default: spoke if `--to` is set, otherwise hub."
+msgstr "`hub` 或 `spoke`。默认：若设置了 `--to` 则为 spoke，否则为 hub。"
+
+msgid ""
+"Make machines reachable at the IP layer over QUIC datagrams.\n"
+"\n"
+"Creates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). Preferred day-to-day commands: `tun up` / `tun down` / `tun status` / `tun peers`. Foreground debug aliases remain: `tun serve` (hub) and `tun connect` (spoke) — same as `tun up --foreground --role hub|spoke`. Prefer `--cc bbr3` on lossy paths. Virtual IPs are IPv4 only — see docs/subsystems/tun.md."
+msgstr ""
+"通过 QUIC datagram 在 IP 层打通整机互通。\n"
+"\n"
+"创建 TUN 接口（Linux/macOS 需要 root / CAP_NET_ADMIN；Windows 需要管理员与二进制旁的 wintun.dll）。日常优先用 `tun up` / `tun down` / `tun status` / `tun peers`。前台调试别名仍可用：`tun serve`（hub）与 `tun connect`（spoke）——等同 `tun up --foreground --role hub|spoke`。丢包路径建议 `--cc bbr3`。虚拟 IP 仅 IPv4——见 docs/subsystems/tun.md。"
+
+msgid "Start the TUN mesh daemon (or run foreground with --foreground)."
+msgstr "启动 TUN mesh daemon（或用 --foreground 前台运行）。"
+
+msgid ""
+"Start the TUN mesh.\n"
+"\n"
+"Without `--foreground`, spawns a background daemon and returns after it is ready (Unix today; on Windows use `--foreground`). With `--foreground`, blocks like `tun serve` / `tun connect` (same code paths).\n"
+"\n"
+"Role defaults: if `--to` is set, role is `spoke`; otherwise `hub`. Do not pass `--role hub` together with `--to`. `--role spoke` requires `--to <hub EndpointId>`.\n"
+"\n"
+"Already-running daemon → usage error (exit 2). Ready timeout → exit 4 (check tun.log). Init failure reported by the child → exit 3."
+msgstr ""
+"启动 TUN mesh。\n"
+"\n"
+"不加 `--foreground` 时在后台拉起 daemon，就绪后返回（目前 Unix；Windows 请用 `--foreground`）。加 `--foreground` 时像 `tun serve` / `tun connect` 一样阻塞（同一代码路径）。\n"
+"\n"
+"角色默认：有 `--to` 则为 `spoke`，否则 `hub`。不要同时传 `--role hub` 与 `--to`。`--role spoke` 需要 `--to <hub EndpointId>`。\n"
+"\n"
+"已在运行 → 用法错误（退出码 2）。就绪超时 → 退出码 4（查看 tun.log）。子进程初始化失败 → 退出码 3。"
+
+msgid "Run in the foreground instead of daemonizing (alias of `tun serve` / `tun connect`)."
+msgstr "前台运行而不 daemonize（`tun serve` / `tun connect` 的别名）。"
+
+msgid "Direct address hint(s) for the hub (foreground spoke only) — see `connect --to-addr`."
+msgstr "hub 的直连地址提示（仅前台 spoke）——见 `connect --to-addr`。"
+
+msgid "Stop the background TUN daemon."
+msgstr "停止后台 TUN daemon。"
+
+msgid "Ask the local TUN daemon to shut down and wait until it is gone. Safe to call when nothing is running (exit 0). Use `--system` for the supervisor-managed daemon."
+msgstr "请求本地 TUN daemon 关闭并等待其退出。未运行时调用也安全（退出码 0）。受管服务请用 `--system`。"
+
+msgid "Target the system-service daemon (fixed runtime paths)."
+msgstr "针对系统服务 daemon（固定运行时路径）。"
+
+msgid "Show TUN daemon status (role, VIP, path, uptime)."
+msgstr "显示 TUN daemon 状态（角色、VIP、路径、uptime）。"
+
+msgid "Query the system-service daemon (fixed runtime paths)."
+msgstr "查询系统服务 daemon（固定运行时路径）。"
+
+msgid "List mesh peers known to the local TUN daemon."
+msgstr "列出本地 TUN daemon 已知的 mesh 对等节点。"
+
+msgid "Hub: roster + fallback forward for the virtual IP mesh (foreground)."
+msgstr "Hub：虚拟 IP mesh 的 roster + 回退转发（前台）。"
+
+msgid "Hub: accept many concurrent peers, broadcast the VIP↔EndpointId roster, bridge this machine to each at the IP layer, and forward traffic when spokes have no direct path. Prints this node's virtual IP and EndpointId. Equivalent to `tun up --foreground --role hub`."
+msgstr "Hub：接受多个并发对端，广播 VIP↔EndpointId roster，在 IP 层桥接本机与各对端，并在 spoke 无直连时转发。打印本节点虚拟 IP 与 EndpointId。等同 `tun up --foreground --role hub`。"
+
+msgid "Dial a hub, join the mesh, and try direct peer links (foreground)."
+msgstr "拨号到 hub、加入 mesh，并尝试直连对等节点（前台）。"
+
+msgid "Dial a `tun serve` hub, install 172.24.0.0/16 on the TUN, receive the mesh roster, and attempt direct links to other spokes (packets prefer direct; otherwise via hub). Equivalent to `tun up --foreground --role spoke --to <hub>`."
+msgstr "拨号到 `tun serve` hub，在 TUN 上安装 172.24.0.0/16，接收 mesh roster，并尝试与其他 spoke 直连（包优先直连，否则经 hub）。等同 `tun up --foreground --role spoke --to <hub>`。"
 

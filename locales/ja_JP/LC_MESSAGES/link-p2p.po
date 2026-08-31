@@ -717,7 +717,7 @@ msgstr "アイデンティティファイルが切り詰められています"
 # --- TUN mesh v2 (roster + direct) ---
 
 msgid "Make machines reachable at the IP layer over QUIC datagrams (mesh with hub coordination)."
-msgstr "QUIC datagram で IP 層メッシュ（ハブ協調 + 任意の直接接続）。"
+msgstr "QUIC データグラムで IP 層のマシン間到達性を提供（hub 協調メッシュ）。"
 
 msgid "Hub: roster + fallback forward for the virtual IP mesh."
 msgstr "ハブ：名簿 + フォールバック転送（仮想 IP メッシュ）。"
@@ -894,10 +894,10 @@ msgid "Contact name, EndpointId, or short code from `contact code`."
 msgstr "Contact name, EndpointId, or short code from `contact code`."
 
 msgid "Custom relay URL(s), repeatable. Merged with n0 by default (keeps discovery); use --no-n0-relays to replace. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY (comma-separated) and config.toml."
-msgstr "Custom relay URL(s), repeatable. Merged with n0 by default (keeps discovery); use --no-n0-relays to replace. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY (comma-separated) and config.toml."
+msgstr "カスタム relay URL（繰り返し可）。既定では n0 とマージ（ディスカバリ維持）；完全置換は --no-n0-relays。ホールパンチは無効化しない — 真の relay のみ基線は --relay-only。LINK_P2P_RELAY（カンマ区切り）と config.toml も可。"
 
 msgid "Direct address hint(s) for the peer (repeatable)."
-msgstr "Direct address hint(s) for the peer (repeatable)."
+msgstr "ピアへの直接アドレスヒント（繰り返し可）。"
 
 msgid "EndpointId hex or short code."
 msgstr "EndpointId hex or short code."
@@ -906,10 +906,10 @@ msgid "List contacts."
 msgstr "List contacts."
 
 msgid "Local TCP address to listen on; connections are forwarded to the peer."
-msgstr "Local TCP address to listen on; connections are forwarded to the peer."
+msgstr "ローカル TCP 待ち受けアドレス；接続はピアへ転送。"
 
 msgid "Local TCP target for streams the peer opens to us (optional)."
-msgstr "Local TCP target for streams the peer opens to us (optional)."
+msgstr "ピアがこちらへ開くストリームのローカル TCP 転送先（任意）。"
 
 msgid "Local nickname."
 msgstr "Local nickname."
@@ -918,10 +918,10 @@ msgid "Manage the local contacts book (names → EndpointId)."
 msgstr "Manage the local contacts book (names → EndpointId)."
 
 msgid "Phone-like session: both sides run `call` with the same peer token (contact name, EndpointId, or short code). The peer with the smaller EndpointId dials; the other waits. Use --listen and/or --forward on both ends. Relays from config.toml merge with n0 unless --no-n0-relays."
-msgstr "Phone-like session: both sides run `call` with the same peer token (contact name, EndpointId, or short code). The peer with the smaller EndpointId dials; the other waits. Use --listen and/or --forward on both ends. Relays from config.toml merge with n0 unless --no-n0-relays."
+msgstr "電話風セッション: 双方が同じピアトークン（連絡先名、EndpointId、またはショートコード）で `call`。EndpointId が小さい側がダイヤル、もう一方は待機。両端で --listen / --forward。config.toml の relay は --no-n0-relays が無い限り n0 とマージ。"
 
 msgid "Pipe stdin/stdout to one stream (Unix). Conflicts with --listen."
-msgstr "Pipe stdin/stdout to one stream (Unix). Conflicts with --listen."
+msgstr "stdin/stdout を 1 ストリームに接続（Unix）。--listen と競合。"
 
 msgid "Print this node's short code (and EndpointId)."
 msgstr "Print this node's short code (and EndpointId)."
@@ -933,7 +933,7 @@ msgid "Symmetric call: both peers publish and dial (tie-break by EndpointId)."
 msgstr "Symmetric call: both peers publish and dial (tie-break by EndpointId)."
 
 msgid "With --relay, use only the listed relays (no n0 public relays / discovery). Default merges custom relays into n0. Also LINK_P2P_NO_N0_RELAYS and config.toml relays.no_n0."
-msgstr "With --relay, use only the listed relays (no n0 public relays / discovery). Default merges custom relays into n0. Also LINK_P2P_NO_N0_RELAYS and config.toml relays.no_n0."
+msgstr "--relay 時、列挙した relay のみ使用（n0 公開 relay / ディスカバリなし）。既定はカスタムを n0 にマージ。LINK_P2P_NO_N0_RELAYS と config.toml の relays.no_n0 も可。"
 
 msgid "call aborted before peer connected"
 msgstr "call aborted before peer connected"
@@ -1387,4 +1387,72 @@ msgstr ""
 
 msgid "Disable and remove the TUN system service."
 msgstr "TUN システムサービスを無効化して削除。"
+
+msgid "`hub` or `spoke`. Default: spoke if `--to` is set, otherwise hub."
+msgstr "`hub` または `spoke`。既定: `--to` があれば spoke、なければ hub。"
+
+msgid ""
+"Make machines reachable at the IP layer over QUIC datagrams.\n"
+"\n"
+"Creates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). Preferred day-to-day commands: `tun up` / `tun down` / `tun status` / `tun peers`. Foreground debug aliases remain: `tun serve` (hub) and `tun connect` (spoke) — same as `tun up --foreground --role hub|spoke`. Prefer `--cc bbr3` on lossy paths. Virtual IPs are IPv4 only — see docs/subsystems/tun.md."
+msgstr ""
+"QUIC データグラムで IP 層のマシン間到達性を提供。\n"
+"\n"
+"TUN を作成（Linux/macOS は root / CAP_NET_ADMIN、Windows は管理者と wintun.dll）。日常は `tun up` / `tun down` / `tun status` / `tun peers`。前景デバッグ別名: `tun serve`（hub）と `tun connect`（spoke）— `tun up --foreground --role hub|spoke` と同義。損失の多い経路では `--cc bbr3`。VIP は IPv4 のみ — docs/subsystems/tun.md。"
+
+msgid "Start the TUN mesh daemon (or run foreground with --foreground)."
+msgstr "TUN メッシュデーモンを起動（または --foreground で前景実行）。"
+
+msgid ""
+"Start the TUN mesh.\n"
+"\n"
+"Without `--foreground`, spawns a background daemon and returns after it is ready (Unix today; on Windows use `--foreground`). With `--foreground`, blocks like `tun serve` / `tun connect` (same code paths).\n"
+"\n"
+"Role defaults: if `--to` is set, role is `spoke`; otherwise `hub`. Do not pass `--role hub` together with `--to`. `--role spoke` requires `--to <hub EndpointId>`.\n"
+"\n"
+"Already-running daemon → usage error (exit 2). Ready timeout → exit 4 (check tun.log). Init failure reported by the child → exit 3."
+msgstr ""
+"TUN メッシュを起動。\n"
+"\n"
+"`--foreground` なしではバックグラウンドデーモンを起動し ready 後に戻る（現状 Unix；Windows は `--foreground`）。`--foreground` ありは `tun serve` / `tun connect` と同様にブロック（同一経路）。\n"
+"\n"
+"ロール既定: `--to` があれば `spoke`、なければ `hub`。`--role hub` と `--to` の併用不可。`--role spoke` には `--to <hub EndpointId>` が必要。\n"
+"\n"
+"既に稼働 → 用法エラー（終了 2）。ready タイムアウト → 終了 4（tun.log を確認）。子の初期化失敗 → 終了 3。"
+
+msgid "Run in the foreground instead of daemonizing (alias of `tun serve` / `tun connect`)."
+msgstr "デーモン化せず前景で実行（`tun serve` / `tun connect` の別名）。"
+
+msgid "Direct address hint(s) for the hub (foreground spoke only) — see `connect --to-addr`."
+msgstr "hub への直接アドレスヒント（前景 spoke のみ）— `connect --to-addr` 参照。"
+
+msgid "Stop the background TUN daemon."
+msgstr "バックグラウンド TUN デーモンを停止。"
+
+msgid "Ask the local TUN daemon to shut down and wait until it is gone. Safe to call when nothing is running (exit 0). Use `--system` for the supervisor-managed daemon."
+msgstr "ローカル TUN デーモンに停止を依頼し、終了まで待つ。未稼働時も安全（終了 0）。スーパーバイザ管理デーモンには `--system`。"
+
+msgid "Target the system-service daemon (fixed runtime paths)."
+msgstr "システムサービスデーモンを対象（固定ランタイムパス）。"
+
+msgid "Show TUN daemon status (role, VIP, path, uptime)."
+msgstr "TUN デーモン状態を表示（ロール、VIP、パス、稼働時間）。"
+
+msgid "Query the system-service daemon (fixed runtime paths)."
+msgstr "システムサービスデーモンを照会（固定ランタイムパス）。"
+
+msgid "List mesh peers known to the local TUN daemon."
+msgstr "ローカル TUN デーモンが知るメッシュピアを一覧。"
+
+msgid "Hub: roster + fallback forward for the virtual IP mesh (foreground)."
+msgstr "Hub: 仮想 IP メッシュの roster + フォールバック転送（前景）。"
+
+msgid "Hub: accept many concurrent peers, broadcast the VIP↔EndpointId roster, bridge this machine to each at the IP layer, and forward traffic when spokes have no direct path. Prints this node's virtual IP and EndpointId. Equivalent to `tun up --foreground --role hub`."
+msgstr "Hub: 多数の同時ピアを受け入れ、VIP↔EndpointId roster を配信し、IP 層で本機を各ピアに橋渡し、spoke に直接経路がないとき転送。本ノードの VIP と EndpointId を表示。`tun up --foreground --role hub` と同義。"
+
+msgid "Dial a hub, join the mesh, and try direct peer links (foreground)."
+msgstr "hub にダイヤルしメッシュに参加、ピア直結を試行（前景）。"
+
+msgid "Dial a `tun serve` hub, install 172.24.0.0/16 on the TUN, receive the mesh roster, and attempt direct links to other spokes (packets prefer direct; otherwise via hub). Equivalent to `tun up --foreground --role spoke --to <hub>`."
+msgstr "`tun serve` hub にダイヤルし、TUN に 172.24.0.0/16 を入れ、メッシュ roster を受け取り、他 spoke への直接リンクを試行（パケットは直接優先、なければ hub）。`tun up --foreground --role spoke --to <hub>` と同義。"
 

@@ -721,7 +721,7 @@ msgstr "el archivo de identidad está truncado"
 # --- TUN mesh v2 (roster + direct) ---
 
 msgid "Make machines reachable at the IP layer over QUIC datagrams (mesh with hub coordination)."
-msgstr "Haz que las máquinas se alcancen en capa IP con datagramas QUIC (malla con hub)."
+msgstr "Hacer máquinas alcanzables en capa IP sobre datagramas QUIC (malla con hub)."
 
 msgid "Hub: roster + fallback forward for the virtual IP mesh."
 msgstr "Hub: roster + reenvío de respaldo para la malla de IP virtual."
@@ -898,10 +898,10 @@ msgid "Contact name, EndpointId, or short code from `contact code`."
 msgstr "Contact name, EndpointId, or short code from `contact code`."
 
 msgid "Custom relay URL(s), repeatable. Merged with n0 by default (keeps discovery); use --no-n0-relays to replace. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY (comma-separated) and config.toml."
-msgstr "Custom relay URL(s), repeatable. Merged with n0 by default (keeps discovery); use --no-n0-relays to replace. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY (comma-separated) and config.toml."
+msgstr "URL(s) de relay personalizadas, repetibles. Por defecto se fusionan con n0 (mantiene discovery); use --no-n0-relays para reemplazar. NO desactiva hole-punch — use --relay-only para baseline solo-relay. También LINK_P2P_RELAY (separadas por comas) y config.toml."
 
 msgid "Direct address hint(s) for the peer (repeatable)."
-msgstr "Direct address hint(s) for the peer (repeatable)."
+msgstr "Pista(s) de dirección directa al peer (repetible)."
 
 msgid "EndpointId hex or short code."
 msgstr "EndpointId hex or short code."
@@ -910,10 +910,10 @@ msgid "List contacts."
 msgstr "List contacts."
 
 msgid "Local TCP address to listen on; connections are forwarded to the peer."
-msgstr "Local TCP address to listen on; connections are forwarded to the peer."
+msgstr "Dirección TCP local donde escuchar; las conexiones se reenvían al peer."
 
 msgid "Local TCP target for streams the peer opens to us (optional)."
-msgstr "Local TCP target for streams the peer opens to us (optional)."
+msgstr "Destino TCP local para flujos que el peer abre hacia nosotros (opcional)."
 
 msgid "Local nickname."
 msgstr "Local nickname."
@@ -922,10 +922,10 @@ msgid "Manage the local contacts book (names → EndpointId)."
 msgstr "Manage the local contacts book (names → EndpointId)."
 
 msgid "Phone-like session: both sides run `call` with the same peer token (contact name, EndpointId, or short code). The peer with the smaller EndpointId dials; the other waits. Use --listen and/or --forward on both ends. Relays from config.toml merge with n0 unless --no-n0-relays."
-msgstr "Phone-like session: both sides run `call` with the same peer token (contact name, EndpointId, or short code). The peer with the smaller EndpointId dials; the other waits. Use --listen and/or --forward on both ends. Relays from config.toml merge with n0 unless --no-n0-relays."
+msgstr "Sesión tipo teléfono: ambos lados ejecutan `call` con el mismo token de peer (nombre de contacto, EndpointId o código corto). El de EndpointId menor marca; el otro espera. Use --listen y/o --forward en ambos. Los relays de config.toml se fusionan con n0 salvo --no-n0-relays."
 
 msgid "Pipe stdin/stdout to one stream (Unix). Conflicts with --listen."
-msgstr "Pipe stdin/stdout to one stream (Unix). Conflicts with --listen."
+msgstr "Conectar stdin/stdout a un stream (Unix). En conflicto con --listen."
 
 msgid "Print this node's short code (and EndpointId)."
 msgstr "Print this node's short code (and EndpointId)."
@@ -937,7 +937,7 @@ msgid "Symmetric call: both peers publish and dial (tie-break by EndpointId)."
 msgstr "Symmetric call: both peers publish and dial (tie-break by EndpointId)."
 
 msgid "With --relay, use only the listed relays (no n0 public relays / discovery). Default merges custom relays into n0. Also LINK_P2P_NO_N0_RELAYS and config.toml relays.no_n0."
-msgstr "With --relay, use only the listed relays (no n0 public relays / discovery). Default merges custom relays into n0. Also LINK_P2P_NO_N0_RELAYS and config.toml relays.no_n0."
+msgstr "Con --relay, usar solo los relays listados (sin relays/discovery públicos de n0). Por defecto fusiona custom en n0. También LINK_P2P_NO_N0_RELAYS y config.toml relays.no_n0."
 
 msgid "call aborted before peer connected"
 msgstr "call aborted before peer connected"
@@ -1391,4 +1391,72 @@ msgstr ""
 
 msgid "Disable and remove the TUN system service."
 msgstr "Desactivar y eliminar el servicio TUN del sistema."
+
+msgid "`hub` or `spoke`. Default: spoke if `--to` is set, otherwise hub."
+msgstr "`hub` o `spoke`. Predeterminado: spoke si hay `--to`; si no, hub."
+
+msgid ""
+"Make machines reachable at the IP layer over QUIC datagrams.\n"
+"\n"
+"Creates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). Preferred day-to-day commands: `tun up` / `tun down` / `tun status` / `tun peers`. Foreground debug aliases remain: `tun serve` (hub) and `tun connect` (spoke) — same as `tun up --foreground --role hub|spoke`. Prefer `--cc bbr3` on lossy paths. Virtual IPs are IPv4 only — see docs/subsystems/tun.md."
+msgstr ""
+"Hacer máquinas alcanzables en capa IP sobre datagramas QUIC.\n"
+"\n"
+"Crea una interfaz TUN (root / CAP_NET_ADMIN en Linux y macOS, o Administrador + wintun.dll en Windows). Comandos diarios: `tun up` / `tun down` / `tun status` / `tun peers`. Alias en primer plano: `tun serve` (hub) y `tun connect` (spoke) — igual que `tun up --foreground --role hub|spoke`. Prefiere `--cc bbr3` en rutas con pérdida. VIP solo IPv4 — ver docs/subsystems/tun.md."
+
+msgid "Start the TUN mesh daemon (or run foreground with --foreground)."
+msgstr "Iniciar el daemon de malla TUN (o primer plano con --foreground)."
+
+msgid ""
+"Start the TUN mesh.\n"
+"\n"
+"Without `--foreground`, spawns a background daemon and returns after it is ready (Unix today; on Windows use `--foreground`). With `--foreground`, blocks like `tun serve` / `tun connect` (same code paths).\n"
+"\n"
+"Role defaults: if `--to` is set, role is `spoke`; otherwise `hub`. Do not pass `--role hub` together with `--to`. `--role spoke` requires `--to <hub EndpointId>`.\n"
+"\n"
+"Already-running daemon → usage error (exit 2). Ready timeout → exit 4 (check tun.log). Init failure reported by the child → exit 3."
+msgstr ""
+"Iniciar la malla TUN.\n"
+"\n"
+"Sin `--foreground`, lanza un daemon en segundo plano y vuelve cuando está listo (Unix hoy; en Windows use `--foreground`). Con `--foreground`, bloquea como `tun serve` / `tun connect` (mismas rutas).\n"
+"\n"
+"Rol por defecto: `spoke` si hay `--to`; si no, `hub`. No combine `--role hub` con `--to`. `--role spoke` requiere `--to <hub EndpointId>`.\n"
+"\n"
+"Ya en ejecución → error de uso (salida 2). Timeout de ready → salida 4 (vea tun.log). Fallo de init del hijo → salida 3."
+
+msgid "Run in the foreground instead of daemonizing (alias of `tun serve` / `tun connect`)."
+msgstr "Ejecutar en primer plano sin daemonizar (alias de `tun serve` / `tun connect`)."
+
+msgid "Direct address hint(s) for the hub (foreground spoke only) — see `connect --to-addr`."
+msgstr "Pista(s) de dirección directa al hub (solo spoke en primer plano) — ver `connect --to-addr`."
+
+msgid "Stop the background TUN daemon."
+msgstr "Detener el daemon TUN en segundo plano."
+
+msgid "Ask the local TUN daemon to shut down and wait until it is gone. Safe to call when nothing is running (exit 0). Use `--system` for the supervisor-managed daemon."
+msgstr "Pedir al daemon TUN local que se apague y esperar a que desaparezca. Seguro si no hay nada en ejecución (salida 0). Use `--system` para el daemon gestionado."
+
+msgid "Target the system-service daemon (fixed runtime paths)."
+msgstr "Apuntar al daemon de servicio del sistema (rutas de runtime fijas)."
+
+msgid "Show TUN daemon status (role, VIP, path, uptime)."
+msgstr "Mostrar estado del daemon TUN (rol, VIP, ruta, uptime)."
+
+msgid "Query the system-service daemon (fixed runtime paths)."
+msgstr "Consultar el daemon de servicio del sistema (rutas de runtime fijas)."
+
+msgid "List mesh peers known to the local TUN daemon."
+msgstr "Listar peers de malla conocidos por el daemon TUN local."
+
+msgid "Hub: roster + fallback forward for the virtual IP mesh (foreground)."
+msgstr "Hub: roster + reenvío de respaldo para la malla VIP (primer plano)."
+
+msgid "Hub: accept many concurrent peers, broadcast the VIP↔EndpointId roster, bridge this machine to each at the IP layer, and forward traffic when spokes have no direct path. Prints this node's virtual IP and EndpointId. Equivalent to `tun up --foreground --role hub`."
+msgstr "Hub: acepta muchos peers concurrentes, difunde el roster VIP↔EndpointId, puentea esta máquina con cada uno en capa IP, y reenvía cuando los spokes no tienen ruta directa. Imprime VIP y EndpointId. Equivale a `tun up --foreground --role hub`."
+
+msgid "Dial a hub, join the mesh, and try direct peer links (foreground)."
+msgstr "Marcar un hub, unirse a la malla e intentar enlaces directos (primer plano)."
+
+msgid "Dial a `tun serve` hub, install 172.24.0.0/16 on the TUN, receive the mesh roster, and attempt direct links to other spokes (packets prefer direct; otherwise via hub). Equivalent to `tun up --foreground --role spoke --to <hub>`."
+msgstr "Marcar un hub `tun serve`, instalar 172.24.0.0/16 en el TUN, recibir el roster y intentar enlaces directos a otros spokes (preferir directo; si no, vía hub). Equivale a `tun up --foreground --role spoke --to <hub>`."
 
