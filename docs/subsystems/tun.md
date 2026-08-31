@@ -4,6 +4,7 @@ Whole-machine IP mesh: hub coordination, spoke↔spoke direct paths, and hub
 fallback forwarding over unreliable QUIC datagrams.
 
 Stream modes (`serve`/`connect`) and TUN mode **coexist**; neither replaces the other.
+Short recipes and install: [README](../../README.md) and [usage guide](../user-guide/usage.md).
 
 ---
 

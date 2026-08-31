@@ -1,7 +1,7 @@
 # Platform guide
 
-Platform-specific setup for running link-p2p. For install and quick start, see
-[README.md](../../README.md).
+Platform-specific setup for running link-p2p. Install and quick start:
+[README.md](../../README.md). Day-to-day recipes: [usage.md](usage.md).
 
 ---
 

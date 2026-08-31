@@ -2,22 +2,21 @@
 
 Single entry point for link-p2p docs. Each topic lives in **one** place (SSOT).
 
+Root [README.md](../README.md) is the product landing page (what / install /
+quick start). Everything else is here.
+
 ---
 
 ## User guide
 
-For operators and end users running link-p2p.
-
 | Document | Contents |
 |---|---|
-| [README.md](../README.md) | Install, quick start, CLI overview |
+| [user-guide/usage.md](user-guide/usage.md) | Stream, SOCKS5, identity, relays, ops flags, security, systemd, logging, i18n |
 | [user-guide/platforms.md](user-guide/platforms.md) | Linux / macOS / Windows differences, env vars, exit codes, Unix-only features |
 
 ---
 
-## Architecture
-
-For contributors and advanced users diagnosing behaviour.
+## Architecture & subsystems
 
 | Document | Contents |
 |---|---|
@@ -40,7 +39,8 @@ For contributors and advanced users diagnosing behaviour.
 
 | You are… | Start here |
 |---|---|
-| New user | README → platforms |
+| New user | README → usage |
+| Platform-specific setup | platforms |
 | Debugging slow tunnel | architecture/performance |
 | Shipping TUN changes | subsystems/tun (checklist) |
 | Cutting a release | CONTRIBUTING |
