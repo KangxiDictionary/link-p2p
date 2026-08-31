@@ -13,6 +13,7 @@ quick start). Everything else is here.
 |---|---|
 | [user-guide/usage.md](user-guide/usage.md) | Stream, SOCKS5, identity, relays, ops flags, security, systemd, logging, i18n |
 | [user-guide/platforms.md](user-guide/platforms.md) | Linux / macOS / Windows differences, env vars, exit codes, Unix-only features |
+| [user-guide/windows-service-setup.md](user-guide/windows-service-setup.md) | Windows SCM install, wintun.dll, Event Log troubleshooting |
 
 ---
 

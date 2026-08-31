@@ -27,8 +27,12 @@ Shared helpers live in `scripts/lib.sh` (`pass`/`fail`, `wait_endpoint_id`, loca
 
 ## Opt-in (not in `test.sh`)
 
-| Script | Purpose |
+| Script / test | Purpose |
 |---|---|
+| `cargo test -- --ignored` (bin) | Live TUN daemon status (needs `CAP_NET_ADMIN`) |
+| `cargo test --test e2e -- --ignored` | Stream forward round-trip + clean shutdown (release + relay) |
+| `cargo test --test integration_call -- --ignored` | `call` persistent-identity kill/restart reconnect |
+| `link-p2p tun selftest` | Relay TCP probe + loopback echo drain (no python/nc) |
 | `sudo ./scripts/tun-loopback-test.sh` | TUN startup / MTU / route cleanup (same-host; not the datagram path) |
 | `./scripts/long-stability-test.sh {serve\|client}` | Long-lived stream samples (HTTP + ping); set `PEER=` / `DURATION=` |
 | `./scripts/remote-cleanup-link-p2p.sh` | Kill leftover `link-p2p` tmux/binaries only (not Tailscale) |

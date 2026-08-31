@@ -142,6 +142,11 @@ where
     let mut client_to_remote = Box::pin(client_to_remote);
     let mut remote_to_client = Box::pin(remote_to_client);
     let (mut res_client, mut res_remote) = (None, None);
+    // Abort-on-error (not wait-for-both): once one direction fails, the peer
+    // is unlikely to drain the other half cleanly, and waiting can hang on a
+    // stuck `copy`. Dropping the unfinished future + STOP/RESET below is the
+    // intentional teardown; the match arms below always run that abort when
+    // only one side finished.
     while res_client.is_none() || res_remote.is_none() {
         tokio::select! {
             r = &mut client_to_remote, if res_client.is_none() => {
@@ -189,18 +194,20 @@ where
 }
 
 /// Wait up to [`DRAIN_TIMEOUT`] for spawned forwarder tasks to finish.
-pub(crate) async fn drain_tasks(mut tasks: Vec<JoinHandle<()>>) {
-    let deadline = time::sleep(DRAIN_TIMEOUT);
-    tokio::pin!(deadline);
-    while !tasks.is_empty() {
-        tokio::select! {
-            biased;
-            _ = &mut deadline => break,
-            _ = &mut tasks[0] => {
-                tasks.remove(0);
-            }
-        }
+///
+/// All handles are polled concurrently (via [`tokio::task::JoinSet`]); the
+/// wait is capped so Ctrl+C cannot hang forever on a stuck peer.
+pub(crate) async fn drain_tasks(tasks: Vec<JoinHandle<()>>) {
+    let mut set = tokio::task::JoinSet::new();
+    for handle in tasks {
+        set.spawn(async move {
+            let _ = handle.await;
+        });
     }
+    let _ = time::timeout(DRAIN_TIMEOUT, async {
+        while set.join_next().await.is_some() {}
+    })
+    .await;
 }
 
 #[cfg(test)]
@@ -217,25 +224,24 @@ mod tests {
 
     #[tokio::test]
     async fn stream_hello_rejects_garbage() {
+        let _lang = crate::i18n::pin_english_catalog();
         let junk: &[u8] = b"XXXX";
         let err = read_stream_hello(&mut &*junk).await.unwrap_err();
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("bad stream hello") || msg.contains("LPF1"),
+            msg.contains("bad stream hello"),
             "unexpected error: {msg}"
         );
     }
 
     #[tokio::test]
     async fn stream_hello_rejects_short_read() {
+        let _lang = crate::i18n::pin_english_catalog();
         let short: &[u8] = b"LP";
         let err = read_stream_hello(&mut &*short).await.unwrap_err();
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("reading stream hello")
-                || msg.contains("early eof")
-                || msg.contains("EOF")
-                || msg.contains("UnexpectedEof"),
+            msg.contains("reading stream hello"),
             "unexpected error: {msg}"
         );
     }

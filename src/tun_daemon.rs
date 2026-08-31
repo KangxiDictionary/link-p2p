@@ -7,6 +7,12 @@
 //! Liveness: **socket Status handshake is truth**; the pid file is a hint plus
 //! a session token against PID reuse. Mutual exclusion is `fslock` on
 //! `tun.lock`, held for the whole daemon lifetime.
+//!
+//! # Layout note
+//!
+//! Spawn / worker / ctl paths share this module today. Prefer extracting
+//! `tun_daemon/{spawn,worker,ctl}.rs` when touching spawn readiness again —
+//! not as a drive-by rename.
 
 use std::fs::{self};
 #[cfg(unix)]
@@ -805,6 +811,9 @@ async fn spawn_daemon_unix(opts: &SpawnOpts, skeleton: bool) -> Result<PidRecord
         ));
     }
 
+    // Authoritative readiness: control socket answers Status (not only the
+    // TCP ready line). Mitigates TOCTOU where a child could signal OK before
+    // bind, or a late pid write after a timed-out parent already cleaned up.
     let deadline = Instant::now() + Duration::from_secs(2);
     let status = loop {
         match probe(mode).await? {
@@ -1824,13 +1833,7 @@ mod tests {
     /// serializes against the zh test. `current_thread` runtime is required
     /// for tokio tests so the guard can be held across awaits.
     fn pin_english_catalog() -> std::sync::MutexGuard<'static, ()> {
-        let guard = crate::i18n::ENV_LOCK.lock().unwrap();
-        std::env::remove_var("LANGUAGE");
-        std::env::set_var("LANG", "C");
-        std::env::set_var("LC_ALL", "C");
-        crate::i18n::reset_catalog();
-        crate::i18n::init();
-        guard
+        crate::i18n::pin_english_catalog()
     }
 
     struct TempConfig {

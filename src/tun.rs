@@ -11,6 +11,13 @@
 //! Packets prefer a direct connection when present, otherwise go via the hub.
 //!
 //! Desktop backends: Linux / macOS / Windows. Privileged unlike stream modes.
+//!
+//! # Layout note
+//!
+//! This file is intentionally large (hub + spoke + Windows/Linux routing in one
+//! place). A future split into `tun/{hub,spoke,device,mtu}.rs` is welcome once
+//! the mesh protocol stabilizes — avoid drive-by moves that break review
+//! bisectability.
 
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -53,8 +60,8 @@ pub const TUN_ALPN: &[u8] = b"link-p2p/tun/2";
 /// dodges the conflicts we know about — the startup collision check
 /// (ensure_vip_free) stays as the universal fallback.
 const VIP_BASE: u32 = 0xAC18_0000; // 172.24.0.0
-/// Low 16 bits of the hash — one /16's worth of host bits.
-const VIP_HOST_BITS: u32 = 0x0000_FFFF;
+/// Low 16 bits kept from the EndpointId hash — host portion of the /16 mesh.
+const VIP_HOST_MASK: u32 = 0x0000_FFFF;
 /// Whole mesh prefix spokes install on the TUN (hub keeps per-peer /32s).
 const VIP_PREFIX: &str = "172.24.0.0/16";
 
@@ -146,7 +153,7 @@ impl TunHooks {
 }
 
 fn vip_in_mesh(ip: Ipv4Addr) -> bool {
-    u32::from(ip) & !VIP_HOST_BITS == VIP_BASE
+    u32::from(ip) & !VIP_HOST_MASK == VIP_BASE
 }
 
 /// IPv4 destination from a raw L3 packet (no Ethernet header on our TUN).
@@ -177,7 +184,7 @@ fn ipv4_src(pkt: &[u8]) -> Option<Ipv4Addr> {
 pub fn derive_vip(endpoint_id: EndpointId) -> Ipv4Addr {
     let hash = blake3::hash(endpoint_id.as_bytes());
     let raw = u32::from_be_bytes([0, 0, hash.as_bytes()[0], hash.as_bytes()[1]]);
-    Ipv4Addr::from(VIP_BASE | (raw & VIP_HOST_BITS))
+    Ipv4Addr::from(VIP_BASE | (raw & VIP_HOST_MASK))
 }
 
 /// `--mtu` is an upper bound, never a licence to raise the ceiling: anything
@@ -201,12 +208,11 @@ pub fn validate_mtu(mtu: u16) -> Result<()> {
 /// stream-based transport, which would reintroduce head-of-line blocking.
 ///
 /// NOTE: the first call happens right after the handshake, when the QUIC
-/// PMTUD probe is still at its RFC 9000 starting value (1200) — on a path
-/// that supports more, `max_datagram_size()` climbs to the real value a few
-/// ms later. A one-shot clamp at this point is therefore conservative
-/// (e.g. 1162 instead of the design's 1280). The datagram loop re-checks
-/// periodically and raises the TUN MTU once PMTUD has converged (see
-/// run_datagram_loop).
+/// PMTUD probe is still at its RFC 9000 starting value (1200). There is no
+/// extra "subtract N" fudge in this function — conservativeness comes from
+/// clamping to that early `max_datagram_size()` (e.g. 1162 instead of the
+/// design's 1280). The datagram loop re-checks periodically and raises the
+/// TUN MTU once PMTUD has converged (see run_datagram_loop).
 fn choose_mtu(user_mtu: u16, conn: &Connection) -> Result<u16> {
     let max_dgram = conn.max_datagram_size().context(tr!(
         "the peer or path does not support QUIC datagrams; TUN mode cannot work over this connection.\n\
@@ -485,12 +491,39 @@ fn create_tun_device(vip: Ipv4Addr, mtu: u16) -> Result<(tun2::AsyncDevice, Stri
 }
 
 /// Resolve `wintun.dll` beside `link-p2p.exe` (not via PATH).
+///
+/// Hardening: canonicalize the executable directory and refuse Temporary /
+/// Downloads-style locations where a planted DLL is a realistic attack. The
+/// intended install layout is `Program Files\link-p2p\link-p2p.exe` + sibling
+/// `wintun.dll` (service install already rejects user-writable binary paths).
+#[cfg(windows)]
+pub(crate) fn wintun_dll_selftest_path() -> Result<std::path::PathBuf> {
+    wintun_dll_beside_exe()
+}
+
+/// Resolve `wintun.dll` beside `link-p2p.exe` (not via PATH).
+///
+/// Hardening: canonicalize the executable directory and refuse Temporary /
+/// Downloads-style locations where a planted DLL is a realistic attack. The
+/// intended install layout is `Program Files\link-p2p\link-p2p.exe` + sibling
+/// `wintun.dll` (service install already rejects user-writable binary paths).
 #[cfg(windows)]
 fn wintun_dll_beside_exe() -> Result<std::path::PathBuf> {
     let exe = std::env::current_exe().context(tr!("resolving path to this executable"))?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
     let dir = exe
         .parent()
-        .context(tr!("resolving directory of this executable"))?;
+        .context(tr!("resolving directory of this executable"))?
+        .to_path_buf();
+
+    if is_untrusted_wintun_dir(&dir) {
+        bail!(tr_fmt!(
+            "refusing to load wintun.dll from a temporary or download directory ({0}); \
+             install link-p2p to a trusted path (e.g. Program Files) with the official signed DLL beside the executable",
+            dir.display().to_string()
+        ));
+    }
+
     let dll = dir.join("wintun.dll");
     if !dll.is_file() {
         bail!(tr_fmt!(
@@ -501,7 +534,62 @@ fn wintun_dll_beside_exe() -> Result<std::path::PathBuf> {
             dll.display()
         ));
     }
-    Ok(dll)
+    // Prefer the canonical path so LoadLibrary sees a resolved location.
+    Ok(std::fs::canonicalize(&dll).unwrap_or(dll))
+}
+
+/// Paths where a co-located DLL is untrusted (writable by the user who also
+/// runs elevated TUN). Program Files / Windows are *trusted* for our layout.
+#[cfg(windows)]
+fn is_untrusted_wintun_dir(dir: &std::path::Path) -> bool {
+    let lower = dir.to_string_lossy().to_ascii_lowercase();
+    let markers = [
+        "\\temp\\",
+        "\\tmp\\",
+        "\\downloads\\",
+        "/temp/",
+        "/tmp/",
+        "/downloads/",
+    ];
+    if markers.iter().any(|m| lower.contains(m)) {
+        return true;
+    }
+    for key in ["TEMP", "TMP"] {
+        if let Ok(t) = std::env::var(key) {
+            let t = std::path::PathBuf::from(t);
+            if let Ok(canon) = std::fs::canonicalize(&t) {
+                if dir.starts_with(&canon) {
+                    return true;
+                }
+            } else if dir.starts_with(&t) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(all(test, windows))]
+mod wintun_path_tests {
+    use super::is_untrusted_wintun_dir;
+    use std::path::Path;
+
+    #[test]
+    fn program_files_is_trusted() {
+        assert!(!is_untrusted_wintun_dir(Path::new(
+            r"C:\Program Files\link-p2p"
+        )));
+    }
+
+    #[test]
+    fn temp_is_untrusted() {
+        assert!(is_untrusted_wintun_dir(Path::new(
+            r"C:\Users\alice\AppData\Local\Temp\link-p2p"
+        )));
+        assert!(is_untrusted_wintun_dir(Path::new(
+            r"C:\Users\alice\Downloads\link-p2p"
+        )));
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
@@ -846,8 +934,11 @@ fn raise_after_now(gate: &MtuRaiseGate) -> Instant {
     gate.lock().map(|g| *g).unwrap_or_else(|_| Instant::now())
 }
 
-/// Internet checksum (RFC 1071) over `data`, with an odd trailing byte
-/// treated as a high-order octet paired with a zero low octet.
+/// Internet checksum (RFC 1071) over `data`.
+///
+/// Words are big-endian. An odd trailing byte is paired with a zero low
+/// octet (`[b, 0]`), i.e. treated as the high-order half of the last word —
+/// the standard "pad with zero" rule, not little-endian packing.
 fn inet_checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
     let (chunks, remainder) = data.as_chunks::<2>();
@@ -1325,12 +1416,7 @@ pub async fn run_tun_serve(
         endpoint.close().await;
         return Err(e);
     }
-    if let Err(e) = crate::wait_online(&endpoint).await {
-        signal_err(&e);
-        endpoint.close().await;
-        return Err(e);
-    }
-    if let Err(e) = crate::install_extra_relays(&endpoint, relay, no_n0_relays).await {
+    if let Err(e) = crate::bring_endpoint_online(&endpoint, relay, no_n0_relays).await {
         signal_err(&e);
         endpoint.close().await;
         return Err(e);
@@ -1957,12 +2043,7 @@ pub async fn run_tun_connect(
         endpoint.close().await;
         return Err(e);
     }
-    if let Err(e) = crate::wait_online(&endpoint).await {
-        signal_err(&e);
-        endpoint.close().await;
-        return Err(e);
-    }
-    if let Err(e) = crate::install_extra_relays(&endpoint, relay, no_n0_relays).await {
+    if let Err(e) = crate::bring_endpoint_online(&endpoint, relay, no_n0_relays).await {
         signal_err(&e);
         endpoint.close().await;
         return Err(e);
@@ -2361,6 +2442,11 @@ mod tests {
         assert_eq!(inet_checksum(&[]), 0xffff);
         // Two zero bytes → same.
         assert_eq!(inet_checksum(&[0, 0]), 0xffff);
+        // One / many all-ones words: one's-complement sum stays 0xffff → 0.
+        assert_eq!(inet_checksum(&[0xff, 0xff]), 0x0000);
+        assert_eq!(inet_checksum(&[0xff; 40]), 0x0000);
+        // Odd length: trailing 0xff → word 0xff00.
+        assert_eq!(inet_checksum(&[0xff]), !0xff00u16);
     }
 
     #[test]

@@ -77,6 +77,11 @@ Requirements:
 # Background `tun up` (no --foreground) is not yet supported on Windows.
 ```
 
+**System service (LocalSystem):** see
+[windows-service-setup.md](windows-service-setup.md)
+(`tun service install`, `%ProgramData%\link-p2p\identity.key`, Event Log
+source `link-p2p-tun`).
+
 **“The file is not signed”** — wrong or unsigned DLL, or an older DLL on `PATH`.
 Replace with official `amd64\wintun.dll`. Admin rights do not bypass Authenticode
 (signer must be **WireGuard LLC**).

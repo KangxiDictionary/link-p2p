@@ -1,18 +1,21 @@
-//! link-p2p: minimal TCP-over-QUIC port forwarder built on iroh 1.0.
+//! link-p2p: P2P TCP/UDP bridging on iroh (QUIC).
 //!
-//! Two modes:
-//!   `serve`   — expose a local TCP service (e.g. 127.0.0.1:8080) to the P2P network.
-//!   `connect` — dial a remote node by its EndpointId and expose it as a local TCP port.
+//! Primary commands:
+//! - **`serve` / `connect`** — stream mode: forward TCP (or SOCKS5 proxy) over
+//!   a QUIC session identified by EndpointId.
+//! - **`call`** — symmetric dial (EndpointId tie-break); optional local listen
+//!   and `--forward`.
+//! - **`tun`** — Layer-3 mesh (hub/spoke VIP routing) with optional system
+//!   service install (systemd / LaunchDaemon / Windows SCM).
+//! - **`ping` / `contact` / `config`** — diagnostics and local bookkeeping.
 //!
-//! This is deliberately minimal: no SOCKS5, no QoS policy file, no LD_PRELOAD hook.
-//! The point is to get one real, benchmarkable QUIC hop working end to end before
-//! adding any of that. See README.md for how to run and benchmark it.
+//! Identity keys live in [`identity`]; stream pipes in [`pipe`]; SOCKS5 in
+//! [`socks5`]. See README.md and `docs/` for ops and platform notes.
 //!
-//! NOTE ON API STABILITY: iroh 1.0 just shipped and the surface has moved a lot
-//! release to release (NodeId -> EndpointId, NodeAddr -> EndpointAddr, etc).
-//! The calls below match the documented 1.0 API as of this writing. If something
-//! doesn't compile, it's most likely a small signature drift — check
-//! `cargo doc -p iroh --open` rather than assuming the overall approach is wrong.
+//! NOTE ON API STABILITY: iroh's surface has moved a lot release to release
+//! (NodeId → EndpointId, …). Calls match the documented 1.x API; if something
+//! fails to compile, check `cargo doc -p iroh --open` before assuming the
+//! overall approach is wrong.
 
 mod call;
 mod config;
@@ -20,6 +23,7 @@ mod contacts;
 mod exit;
 mod helptext;
 mod i18n;
+mod identity;
 mod path_kind;
 mod pipe;
 mod relay_probe;
@@ -32,14 +36,26 @@ mod tun_daemon;
 mod tun_roster;
 mod tun_service;
 #[cfg(windows)]
+mod win_eventlog;
+#[cfg(windows)]
+mod win_firewall;
+#[cfg(windows)]
 mod win_pipe;
 #[cfg(windows)]
 mod win_service;
 
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+compile_error!(
+    "link-p2p supports Linux, macOS, and Windows only. \
+     Please open a GitHub issue if you need another platform."
+);
+
+pub(crate) use identity::{load_or_create_secret_key, resolve_identity_path, validate_passphrase};
+
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
@@ -56,7 +72,6 @@ use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
 use tracing::{info, warn};
-use zeroize::Zeroize;
 
 use crate::i18n::{tr, tr_fmt};
 use crate::ssrf::check_proxy_target;
@@ -494,6 +509,13 @@ enum TunCommand {
         #[arg(long)]
         system: bool,
     },
+    /// Local diagnostics that do not need python/nc: relay TCP probes, identity
+    /// path, Windows wintun.dll placement, and a loopback TCP echo drain.
+    Selftest {
+        /// Skip the loopback echo drain (relay/wintun checks only).
+        #[arg(long)]
+        no_echo: bool,
+    },
     /// Exposed side: coordination hub for a virtual IP mesh. Accepts many
     /// concurrent peers, broadcasts the VIP↔EndpointId roster, bridges this
     /// machine to each, and forwards when spokes have no direct path.
@@ -842,6 +864,18 @@ fn localized_command() -> clap::Command {
                             |a| helptext::set_help(a, &tr!("Query the system-service daemon (fixed runtime paths).")),
                         )
                 })
+                .mut_subcommand("selftest", |ss| {
+                    ss.disable_help_flag(true)
+                        .arg(help_arg())
+                        .about(tr!("Local diagnostics: relay TCP probe, wintun path, loopback echo drain."))
+                        .long_about(helptext::hard_wrap_help(&tr!(
+                            "Checks that do not need python or nc: TCP-probe each --relay URL, verify Windows wintun.dll beside the exe, and run a loopback TCP echo drain. Useful when validating a host before starting the mesh."
+                        )))
+                        .mut_arg(
+                            "no_echo",
+                            |a| helptext::set_help(a, &tr!("Skip the loopback TCP echo drain (relay/wintun checks only).")),
+                        )
+                })
                 .mut_subcommand("serve", |ss| {
                     ss.disable_help_flag(true)
                         .arg(help_arg())
@@ -1088,8 +1122,16 @@ fn main() {
     #[cfg(windows)]
     if std::env::args_os().any(|a| a == "--windows-service") {
         if let Err(e) = win_service::run_dispatcher() {
+            // SCM may have no console; also write Application Event Log.
+            let msg = format!("StartServiceCtrlDispatcher / service startup failed: {e:#}");
+            if let Err(log_err) = win_eventlog::error(&msg) {
+                eprintln!(
+                    "{}: failed to write event log: {log_err}",
+                    styler.warn("warning")
+                );
+            }
             eprintln!("{}: {e:#}", styler.err(&tr!("error")));
-            std::process::exit(1);
+            std::process::exit(exit::code_from(&e));
         }
         return;
     }
@@ -1106,6 +1148,10 @@ fn main() {
 }
 
 async fn real_main(color_mode: ColorMode) -> Result<()> {
+    // God-function by history: worker/service probes, clap, identity, then all
+    // subcommands. Prefer extracting `cli.rs` + `commands/{serve,connect,...}.rs`
+    // when the next large command lands — identity already lives in `identity.rs`.
+
     // Detached TUN daemon worker (spawned by tun_daemon::spawn_skeleton).
     // Not a user-facing subcommand — gated on env, ahead of clap.
     if tun_daemon::is_worker_process() {
@@ -1264,6 +1310,15 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
     if !cli.relay_only {
         cli.relay_only = user_cfg.relays.relay_only;
     }
+
+    // Selftest needs merged --relay but not an identity key file.
+    if let Command::Tun {
+        command: TunCommand::Selftest { no_echo },
+    } = cli.command
+    {
+        return run_tun_selftest(no_echo, &cli.relay, ui, &styler).await;
+    }
+
     // Passphrase for the identity file: --identity-passphrase wins over
     // LINK_P2P_PASSPHRASE (the env var avoids the passphrase showing up in
     // `ps`/shell history). Empty values are treated as unset.
@@ -1271,7 +1326,8 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
         .identity_passphrase
         .or_else(|| std::env::var("LINK_P2P_PASSPHRASE").ok())
         .filter(|p| !p.is_empty());
-    if passphrase.is_some() {
+    if let Some(p) = &passphrase {
+        validate_passphrase(p)?;
         info!("{}", tr!("using a passphrase-protected identity key file"));
     }
     // --ephemeral: an in-memory identity, nothing touches the filesystem.
@@ -1545,6 +1601,9 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                     };
                     tun_daemon::cmd_peers(tun_ctl::RuntimeMode::from_system_flag(system), fmt)
                         .await
+                }
+                TunCommand::Selftest { .. } => {
+                    unreachable!("tun selftest handled before identity load")
                 }
                 TunCommand::Serve {
                     tun_ip,
@@ -1898,390 +1957,91 @@ fn run_tun_service_command(command: TunServiceCommand, styler: &Styler) -> Resul
     }
 }
 
-/// Resolve the identity file path: an explicit `--identity` wins; otherwise
-/// the XDG config location. A legacy `./identity.key` in the working
-/// directory (pre-XDG versions kept it there) is migrated to the XDG
-/// location once, so existing EndpointIds stay stable across the move.
-pub(crate) fn resolve_identity_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(path) = explicit {
-        return Ok(path);
-    }
-    let xdg = default_identity_path();
-    if xdg.exists() {
-        return Ok(xdg);
-    }
-    let legacy = PathBuf::from("identity.key");
-    if !legacy.exists() {
-        return Ok(xdg);
-    }
-    match migrate_identity(&legacy, &xdg) {
-        Ok(()) => {
-            info!(
-                "{}",
-                tr_fmt!(
-                    "migrated legacy identity from {0} to {1}",
-                    legacy.display(),
-                    xdg.display()
-                )
-            );
-            Ok(xdg)
-        }
-        Err(e) => {
-            // Keep the EndpointId stable: fall back to the legacy file
-            // rather than silently generating a brand-new identity.
-            warn!(error = %e, "{}", tr!("identity migration failed; using the legacy file"));
-            Ok(legacy)
-        }
-    }
-}
+/// Documented bring-up order for a freshly bound endpoint. Kept as a constant
+/// so a unit test can pin the regression that broke custom relays behind n0
+/// (`wait_online` before `install_extra_relays`).
+pub(crate) const ENDPOINT_ONLINE_STEPS: &[&str] = &["install_extra_relays", "wait_online"];
 
-/// The XDG config location for the identity key:
-/// `$XDG_CONFIG_HOME/link-p2p/identity.key`, or `~/.config/link-p2p/...`
-/// when `XDG_CONFIG_HOME` is unset. Falls back to `./identity.key` if
-/// neither `XDG_CONFIG_HOME` nor `HOME` is set.
-fn default_identity_path() -> PathBuf {
-    if let Some(base) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        return PathBuf::from(base).join("link-p2p").join("identity.key");
-    }
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return PathBuf::from(home)
-            .join(".config")
-            .join("link-p2p")
-            .join("identity.key");
-    }
-    PathBuf::from("identity.key")
-}
-
-/// Move the legacy identity file to the XDG location (directory created as
-/// needed), keeping the key material and thus the EndpointId intact.
+/// Wait up to 30s for the endpoint to establish a network path.
 ///
-/// Written through [`open_key_file_for_write`] (mode 0600 at creation), never
-/// `fs::copy`: a copy would inherit umask-derived permissions and be
-/// world-readable until the chmod below lands. The key material must not
-/// briefly exist with broad perms on disk.
-fn migrate_identity(from: &Path, to: &Path) -> Result<()> {
-    let ctx = || {
-        tr_fmt!(
-            "migrating legacy identity from {0} to {1}",
-            from.display(),
-            to.display()
-        )
-    };
-    let bytes = std::fs::read(from).with_context(ctx)?;
-    let mut file = open_key_file_for_write(to)?;
-    file.write_all(&bytes).with_context(ctx)?;
-    drop(file);
-    harden_key_permissions(to)?;
-    // The key material is now safely at its XDG home; drop the legacy copy
-    // so the private key doesn't linger in the working directory.
-    if let Err(e) = std::fs::remove_file(from) {
-        warn!(error = %e, "{}", tr_fmt!(
-            "could not remove the legacy identity file {0} (you can delete it manually)",
-            from.display()
-        ));
-    }
-    Ok(())
-}
-
-/// Load a persisted SecretKey from `path`, or generate + save a new one.
-///
-/// Storage format: 64 hex chars (32-byte ed25519 seed). iroh 1.0
-/// SecretKey does not implement Display, so we hex-encode `to_bytes()`
-/// ourselves instead of relying on the old Display-based round-trip.
-///
-/// On Unix the key file is always tightened to mode 0600 (owner-only): it's
-/// a private key, and `std::fs::write` would otherwise create it with the
-/// default umask-derived permissions (usually 0644, world-readable).
-/// File magic + version for passphrase-encrypted identity keys.
-/// Layout: magic | salt(16) | nonce(24) | ciphertext(64 hex chars + 16 tag).
-/// The plaintext format is exactly 64 hex chars (0-9a-f) and `l` is not a hex
-/// digit, so a plaintext file can never collide with this prefix.
-const KEY_FILE_MAGIC: &[u8] = b"linkp2p-k1";
-const KEY_FILE_SALT_LEN: usize = 16;
-const KEY_FILE_NONCE_LEN: usize = 24;
-const KEY_FILE_TAG_LEN: usize = 16;
-const KEY_FILE_OVERHEAD: usize =
-    KEY_FILE_MAGIC.len() + KEY_FILE_SALT_LEN + KEY_FILE_NONCE_LEN + KEY_FILE_TAG_LEN;
-
-/// Whether `data` looks like a passphrase-encrypted key file (vs legacy
-/// plaintext hex).
-fn is_encrypted_key(data: &[u8]) -> bool {
-    data.starts_with(KEY_FILE_MAGIC)
-}
-
-/// Argon2id key derivation from the passphrase + per-file salt.
-/// OWASP-recommended interactive-login parameters (19 MiB, t=2, p=1); the
-/// salt is random per file, so the derived key is fresh on every write.
-///
-/// The KDF salt input is the PHC "B64" encoding of the on-disk salt bytes
-/// (same as argon2 0.5 `SaltString::encode_b64`), so existing encrypted
-/// identity files keep decrypting after the 0.6 upgrade.
-fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; 32]> {
-    use argon2::password_hash::phc::Salt;
-    use argon2::{Algorithm, Argon2, Params, Version};
-
-    let salt_b64 = Salt::new(salt)
-        .map_err(|_| anyhow::anyhow!(tr!("encoding the passphrase salt")))?
-        .to_salt_string();
-    let params = Params::new(19 * 1024, 2, 1, Some(32))
-        .map_err(|_| anyhow::anyhow!(tr!("invalid Argon2 parameters")))?;
-    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut dk = [0u8; 32];
-    argon2
-        .hash_password_into(passphrase.as_bytes(), salt_b64.as_bytes(), &mut dk)
-        .map_err(|_| anyhow::anyhow!(tr!("deriving key from passphrase")))?;
-    Ok(dk)
-}
-
-/// Encrypt a 64-char hex key into the on-disk format (magic + salt + nonce +
-/// ciphertext). XChaCha20-Poly1305 with the file magic as AAD, so a header
-/// can't be swapped between files. The derived key is zeroized on return.
-fn encrypt_key_hex(hex: &str, passphrase: &str) -> Result<Vec<u8>> {
-    use chacha20poly1305::aead::{Aead, Payload};
-    use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce};
-
-    let mut salt = [0u8; KEY_FILE_SALT_LEN];
-    getrandom::fill(&mut salt)
-        .map_err(|_| anyhow::anyhow!(tr!("gathering entropy for identity salt")))?;
-    let mut nonce_bytes = [0u8; KEY_FILE_NONCE_LEN];
-    getrandom::fill(&mut nonce_bytes)
-        .map_err(|_| anyhow::anyhow!(tr!("gathering entropy for identity nonce")))?;
-
-    let mut dk = derive_key(passphrase, &salt)?;
-    let cipher = XChaCha20Poly1305::new(&Key::from(dk));
-    let nonce = XNonce::from(nonce_bytes);
-    let ciphertext = cipher
-        .encrypt(
-            &nonce,
-            Payload {
-                msg: hex.as_bytes(),
-                aad: KEY_FILE_MAGIC,
-            },
-        )
-        .map_err(|_| anyhow::anyhow!(tr!("encrypting identity file failed")))?;
-    dk.zeroize();
-
-    let mut out = Vec::with_capacity(KEY_FILE_OVERHEAD + hex.len());
-    out.extend_from_slice(KEY_FILE_MAGIC);
-    out.extend_from_slice(&salt);
-    out.extend_from_slice(&nonce_bytes);
-    out.extend_from_slice(&ciphertext);
-    Ok(out)
-}
-
-/// Decrypt a key file written by [`encrypt_key_hex`], returning the 64-char
-/// hex. A wrong passphrase or any tampering fails the AEAD tag check and
-/// errors here.
-fn decrypt_key_hex(data: &[u8], passphrase: &str) -> Result<String> {
-    use chacha20poly1305::aead::{Aead, Payload};
-    use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce};
-
-    if !is_encrypted_key(data) {
-        bail!(tr!("identity file is not passphrase-encrypted"));
-    }
-    let salt = &data[KEY_FILE_MAGIC.len()..KEY_FILE_MAGIC.len() + KEY_FILE_SALT_LEN];
-    let nonce_off = KEY_FILE_MAGIC.len() + KEY_FILE_SALT_LEN;
-    let nonce_bytes: [u8; KEY_FILE_NONCE_LEN] = data[nonce_off..nonce_off + KEY_FILE_NONCE_LEN]
-        .try_into()
-        .map_err(|_| anyhow::anyhow!(tr!("identity file is truncated")))?;
-    let ciphertext = &data[nonce_off + KEY_FILE_NONCE_LEN..];
-
-    let mut dk = derive_key(passphrase, salt)?;
-    let cipher = XChaCha20Poly1305::new(&Key::from(dk));
-    let nonce = XNonce::from(nonce_bytes);
-    let plaintext = cipher
-        .decrypt(
-            &nonce,
-            Payload {
-                msg: ciphertext,
-                aad: KEY_FILE_MAGIC,
-            },
-        )
-        .map_err(|_| anyhow::anyhow!(tr!("incorrect passphrase or corrupted identity file")))?;
-    dk.zeroize();
-    // Plaintext is the 64-char hex; ownership moves out, caller zeroizes.
-    String::from_utf8(plaintext).context(tr!("decrypted identity file is not valid UTF-8"))
-}
-
-/// Parse a 64-char hex identity blob into a [`SecretKey`], hardening the
-/// file permissions along the way (covers pre-existing plaintext files).
-fn secret_key_from_hex(hex: &str, path: &Path) -> Result<SecretKey> {
-    let hex = hex.trim();
-    if hex.len() != 64 {
-        anyhow::bail!(tr_fmt!(
-            "identity file exists but has unexpected length {0} (expected 64 hex chars)",
-            hex.len()
-        ));
-    }
-    let mut bytes = [0u8; 32];
-    for i in 0..32 {
-        bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .context(tr!("identity file exists but contains non-hex characters"))?;
-    }
-    harden_key_permissions(path)?;
-    let key = SecretKey::from_bytes(&bytes);
-    bytes.zeroize();
-    Ok(key)
-}
-
-/// Load a persisted SecretKey from `path`, or generate + save a new one.
-///
-/// With a passphrase the file is stored encrypted (Argon2id + XChaCha20-
-/// Poly1305); without one, plaintext hex (legacy behaviour, 0600 on Unix).
-/// A legacy plaintext file loaded *with* a passphrase is transparently
-/// re-encrypted on disk (best-effort — if that write fails the key still
-/// loads, it just stays plaintext).
-///
-/// Storage format: 64 hex chars (32-byte ed25519 seed). iroh 1.0
-/// SecretKey does not implement Display, so we hex-encode `to_bytes()`
-/// ourselves instead of relying on the old Display-based round-trip.
-pub(crate) fn load_or_create_secret_key(path: &Path, passphrase: Option<&str>) -> Result<SecretKey> {
-    if let Ok(data) = std::fs::read(path) {
-        let result = if is_encrypted_key(&data) {
-            // Passphrase-encrypted file: the passphrase is mandatory.
-            let pass = passphrase.context(tr!(
-                "identity file is passphrase-encrypted but no passphrase was provided (use --identity-passphrase or LINK_P2P_PASSPHRASE)"
-            ))?;
-            let mut hex = decrypt_key_hex(&data, pass).context(tr!("decrypting identity file"))?;
-            let key = secret_key_from_hex(&hex, path);
-            hex.zeroize();
-            key
-        } else {
-            // Legacy plaintext hex (the only other format that exists).
-            let mut hex = String::from_utf8(data)
-                .context(tr!("identity file is neither plaintext hex nor encrypted"))?;
-            // A passphrase on a plaintext file means "encrypt it now": load
-            // the key, then rewrite the file encrypted (best-effort).
-            if let Some(pass) = passphrase {
-                match write_key_file_encrypted(path, hex.trim(), pass) {
-                    Ok(()) => info!(
-                        "{}",
-                        tr!("re-encrypting the legacy plaintext identity file with the provided passphrase")
-                    ),
-                    Err(e) => warn!(
-                        error = %e,
-                        "{}",
-                        tr!("could not encrypt the legacy identity file; it stays plaintext on disk")
-                    ),
-                }
-            }
-            let key = secret_key_from_hex(&hex, path);
-            hex.zeroize();
-            key
-        };
-        return result;
-    }
-    // No file yet: generate, then persist in the requested format.
-    let key = SecretKey::generate();
-    let mut hex: String = key.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
-    let written = match passphrase {
-        Some(pass) => write_key_file_encrypted(path, &hex, pass),
-        None => write_key_file(path, &hex),
-    };
-    hex.zeroize();
-    written?;
-    Ok(key)
-}
-
-/// Open (create/truncate) the identity file with owner-only permissions on
-/// Unix — no window where the key material is world-readable.
-fn open_key_file_for_write(path: &Path) -> Result<std::fs::File> {
-    // The XDG default lives under a per-app config dir that may not exist
-    // yet; create it so the very first run can persist the new key.
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)
-            .with_context(|| tr_fmt!("creating identity directory {0}", parent.display()))?;
-    }
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    opts.open(path)
-        .with_context(|| tr_fmt!("writing new identity to {0}", path.display()))
-}
-
-/// Write the key material to `path` as plaintext hex (legacy format). On
-/// Unix the file is created with mode 0600 directly, then hardened again
-/// to cover the case where the file already existed.
-fn write_key_file(path: &Path, hex: &str) -> Result<()> {
-    let mut file = open_key_file_for_write(path)?;
-    file.write_all(hex.as_bytes())
-        .with_context(|| tr_fmt!("writing new identity to {0}", path.display()))?;
-    harden_key_permissions(path)
-}
-
-/// Write the key material to `path` passphrase-encrypted. Same 0600
-/// discipline as [`write_key_file`]; the on-disk bytes are magic + salt +
-/// nonce + ciphertext, so a disk/backup leak without the passphrase yields
-/// nothing.
-fn write_key_file_encrypted(path: &Path, hex: &str, passphrase: &str) -> Result<()> {
-    let encrypted = encrypt_key_hex(hex, passphrase)?;
-    let mut file = open_key_file_for_write(path)?;
-    let written = file.write_all(&encrypted);
-    drop(file);
-    if let Err(e) = written {
-        return Err(e).with_context(|| {
-            tr_fmt!(
-                "writing passphrase-encrypted identity to {0}",
-                path.display()
-            )
-        });
-    }
-    harden_key_permissions(path)
-}
-
-/// Ensure the key file is owner-only (0600) on Unix. No-op elsewhere.
-#[cfg(unix)]
-fn harden_key_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| tr_fmt!("setting permissions on {0}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn harden_key_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-/// Wait up to `timeout` for the endpoint to establish a network path
-/// (relay and/or direct address discovery). If it times out, the most
-/// common cause is a firewall silently dropping outgoing UDP — QUIC needs
-/// UDP, and many container/CI/corporate network policies only allow TCP.
+/// Prefer [`bring_endpoint_online`] after `bind` so custom `--relay` URLs are
+/// installed first when the builder still uses the N0 preset. This standalone
+/// helper remains for callers that already installed relays (or use n0-only).
 ///
 /// Quick check: `nc -u -v -w3 8.8.8.8 53` should get a response. If it
 /// hangs or is refused, UDP outbound is blocked.
+#[allow(dead_code)]
 pub(crate) async fn wait_online(endpoint: &Endpoint) -> Result<()> {
+    wait_online_ctx(endpoint, &[], true).await
+}
+
+async fn wait_online_ctx(endpoint: &Endpoint, relay: &[String], no_n0_relays: bool) -> Result<()> {
     const ONLINE_TIMEOUT: Duration = Duration::from_secs(30);
     match time::timeout(ONLINE_TIMEOUT, endpoint.online()).await {
         Ok(()) => Ok(()),
-        Err(_elapsed) => Err(exit::coded(
-            exit::TIMEOUT,
-            anyhow::anyhow!(tr_fmt!(
-                "endpoint did not come online within {0}.\n\
-                 \n\
-                 The most likely cause: outgoing UDP is blocked by a firewall.\n\
-                 iroh/QUIC relies on UDP for both direct hole-punching and\n\
-                 relay connections. Try:\n\
-                   nc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\n\
-                   RUST_LOG=iroh=debug {1}     # see exactly where it's stuck",
-                format!("{ONLINE_TIMEOUT:?}"),
-                std::env::args().next().unwrap_or_else(|| "link-p2p".into())
-            )),
-        )),
+        Err(_elapsed) => {
+            let custom_hint = if !relay.is_empty() && !no_n0_relays {
+                tr!(
+                    "\n\
+                     You passed --relay without --no-n0-relays: the endpoint still\n\
+                     starts on n0's public relays. If n0 is blocked on this network,\n\
+                     either add --no-n0-relays (custom relay only) or ensure UDP to\n\
+                     n0 works. Custom URLs are installed before this wait; if you\n\
+                     still time out, probe your relay with `link-p2p tun selftest`."
+                )
+            } else if !relay.is_empty() && no_n0_relays {
+                tr!(
+                    "\n\
+                     --no-n0-relays is set: only your --relay URL(s) are used.\n\
+                     Check that the relay is reachable (TCP) and accepts QUIC/UDP.\n\
+                     Try: link-p2p tun selftest"
+                )
+            } else {
+                String::new()
+            };
+            Err(exit::coded(
+                exit::TIMEOUT,
+                anyhow::anyhow!(tr_fmt!(
+                    "endpoint did not come online within {0}.\n\
+                     \n\
+                     The most likely cause: outgoing UDP is blocked by a firewall.\n\
+                     iroh/QUIC relies on UDP for both direct hole-punching and\n\
+                     relay connections. Try:\n\
+                       nc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\n\
+                       RUST_LOG=iroh=debug {1}     # see exactly where it's stuck{2}",
+                    format!("{ONLINE_TIMEOUT:?}"),
+                    std::env::args().next().unwrap_or_else(|| "link-p2p".into()),
+                    custom_hint
+                )),
+            ))
+        }
     }
 }
 
-/// Build an endpoint with the given identity.
+/// Install any custom relays (N0-base builds), then wait until the endpoint is online.
 ///
+/// **Order is load-bearing.** With `--relay` and without `--no-n0-relays`, the
+/// builder keeps [`presets::N0`] and custom URLs are added only via
+/// [`install_extra_relays`]. Waiting for `online()` *before* that install left
+/// the endpoint racing solely against n0 — hanging when n0 is blocked even
+/// though a self-hosted relay would have worked.
+pub(crate) async fn bring_endpoint_online(
+    endpoint: &Endpoint,
+    relay: &[String],
+    no_n0_relays: bool,
+) -> Result<()> {
+    debug_assert_eq!(ENDPOINT_ONLINE_STEPS[0], "install_extra_relays");
+    debug_assert_eq!(ENDPOINT_ONLINE_STEPS[1], "wait_online");
+    install_extra_relays(endpoint, relay, no_n0_relays).await?;
+    wait_online_ctx(endpoint, relay, no_n0_relays).await
+}
+
 /// Build an endpoint.
 ///
 /// - `relay` empty → [`presets::N0`] (public relays + discovery).
 /// - `relay` non-empty and `no_n0_relays` → [`presets::Minimal`] + custom map only.
 /// - `relay` non-empty and not `no_n0_relays` → N0 base (keeps discovery); call
-///   [`install_extra_relays`] after `bind` to add the custom URLs.
+///   [`bring_endpoint_online`] after `bind` (installs custom URLs, then waits).
 ///
 /// `relay_only` clears IP transports (true relay-only baseline).
 pub(crate) fn build_endpoint(
@@ -2456,8 +2216,7 @@ async fn run_serve(
         .await
         .context(tr!("binding endpoint"))?;
 
-    wait_online(&endpoint).await?;
-    install_extra_relays(&endpoint, relay, no_n0_relays).await?;
+    bring_endpoint_online(&endpoint, relay, no_n0_relays).await?;
 
     ui.line(styler.banner("link-p2p serve"));
     match mode {
@@ -2961,6 +2720,12 @@ impl ConnSlot {
         self.0.subscribe()
     }
 
+    /// Snapshot of the current connection.
+    ///
+    /// The returned `Connection` may become stale immediately if a reconnect
+    /// watcher calls [`Self::replace`] with `None` or a new conn. Prefer
+    /// [`open_stream_wait`] for dialing streams across reconnect windows;
+    /// use this only for best-effort diagnostics (stats, close reason).
     pub(crate) fn borrow(&self) -> Option<Connection> {
         self.0.borrow().clone()
     }
@@ -3115,6 +2880,8 @@ pub(crate) fn spawn_reconnect_watcher(
                 }
                 Err(e) => {
                     let delay = backoff.next();
+                    // DBG-TEMP
+                    tracing::debug!(%peer, error = %e, "W1 connect failed");
                     warn!(%peer, error = %e, "{}", tr_fmt!(
                         "reconnect failed; retrying in {0}",
                         format!("{delay:?}")
@@ -3147,8 +2914,7 @@ async fn run_connect(
         .bind()
         .await
         .map_err(|e| exit::coded(exit::CONNECT, anyhow::Error::new(e).context(tr!("binding endpoint"))))?;
-    wait_online(&endpoint).await?;
-    install_extra_relays(&endpoint, relay, no_n0_relays).await?;
+    bring_endpoint_online(&endpoint, relay, no_n0_relays).await?;
 
     let remote_id: EndpointId = to.parse().map_err(|e| {
         exit::coded(
@@ -3281,6 +3047,132 @@ async fn run_connect(
 }
 
 // ---------------------------------------------------------------------------
+// tun selftest: host checks without python / nc
+// ---------------------------------------------------------------------------
+
+async fn run_tun_selftest(
+    no_echo: bool,
+    relays: &[String],
+    ui: Ui,
+    styler: &Styler,
+) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    let mut failed = 0u32;
+    ui.line(styler.banner("link-p2p tun selftest"));
+
+    ui.line(styler.dim(&tr!("bring-up order (custom relay before online wait):")));
+    ui.line(format!("  {}", ENDPOINT_ONLINE_STEPS.join(" → ")));
+
+    if relays.is_empty() {
+        ui.line(format!(
+            "  {}",
+            styler.warn(&tr!(
+                "no --relay URLs configured (will use n0 public relays only)"
+            ))
+        ));
+    } else {
+        ui.line(styler.dim(&tr!("probing --relay URL(s) over TCP (2s timeout):")));
+        for (url, rtt) in relay_probe::probe_report(relays).await {
+            match rtt {
+                Some(d) => ui.line(format!(
+                    "  {} {url}  ({d:?})",
+                    styler.ok("ok")
+                )),
+                None => {
+                    failed += 1;
+                    ui.line(format!(
+                        "  {} {url}",
+                        styler.err(&tr!("FAIL"))
+                    ));
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        match tun::wintun_dll_selftest_path() {
+            Ok(p) => ui.line(format!(
+                "  {} wintun.dll → {}",
+                styler.ok("ok"),
+                p.display()
+            )),
+            Err(e) => {
+                failed += 1;
+                ui.line(format!("  {}: {e:#}", styler.err(&tr!("FAIL"))));
+            }
+        }
+    }
+
+    if let Err(e) = tun_ctl::verify_identity_parent_writable(&tun_ctl::default_system_identity_path())
+    {
+        // Not fatal for ad-hoc users — warn only.
+        ui.line(format!(
+            "  {}: {e:#}",
+            styler.warn(&tr!(
+                "system identity directory not writable (ok for ad-hoc; needed for tun service install)"
+            ))
+        ));
+    } else {
+        ui.line(format!(
+            "  {} {}",
+            styler.ok("ok"),
+            tr!("system identity directory writable")
+        ));
+    }
+
+    if !no_echo {
+        ui.line(styler.dim(&tr!("loopback TCP echo drain:")));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .context(tr!("binding selftest echo listener"))?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await?;
+            let mut buf = [0u8; 64];
+            let n = sock.read(&mut buf).await?;
+            sock.write_all(&buf[..n]).await?;
+            sock.shutdown().await?;
+            Ok::<_, std::io::Error>(())
+        });
+        let payload = b"link-p2p-selftest";
+        let mut client = TcpStream::connect(addr)
+            .await
+            .context(tr!("connecting to selftest echo listener"))?;
+        client.write_all(payload).await?;
+        let mut got = vec![0u8; payload.len()];
+        client.read_exact(&mut got).await?;
+        server.await.context("selftest echo join")??;
+        if got.as_slice() == payload {
+            ui.line(format!(
+                "  {} {}",
+                styler.ok("ok"),
+                tr_fmt!("echo {0} bytes via {1}", payload.len(), addr)
+            ));
+        } else {
+            failed += 1;
+            ui.line(format!(
+                "  {}",
+                styler.err(&tr!("FAIL echo mismatch"))
+            ));
+        }
+    }
+
+    if failed > 0 {
+        bail!(exit::coded(
+            exit::CONNECT,
+            anyhow::anyhow!(tr_fmt!(
+                "selftest reported {0} failure(s)",
+                failed
+            )),
+        ));
+    }
+    ui.line(styler.ok(&tr!("selftest passed")));
+    Ok(())
+}
+
 // ping: measure RTT to a remote node and report the path (direct or relay).
 // ---------------------------------------------------------------------------
 
@@ -3345,8 +3237,7 @@ async fn run_ping(
         .bind()
         .await
         .map_err(|e| exit::coded(exit::CONNECT, anyhow::Error::new(e).context(tr!("binding endpoint"))))?;
-    wait_online(&endpoint).await?;
-    install_extra_relays(&endpoint, relay, no_n0_relays).await?;
+    bring_endpoint_online(&endpoint, relay, no_n0_relays).await?;
 
     let remote_id: EndpointId = to.parse().map_err(|e| {
         exit::coded(
@@ -3484,98 +3375,14 @@ mod tests {
         );
     }
 
-    /// Passphrase encryption: round-trip, wrong passphrase, tampering, and
-    /// non-confusability with plaintext hex.
     #[test]
-    fn key_encryption_round_trip() {
-        let hex = "abcdef0123456789".repeat(4); // 64 hex chars
-        let encrypted = encrypt_key_hex(&hex, "hunter2").unwrap();
-        assert!(is_encrypted_key(&encrypted));
-        assert_eq!(encrypted.len(), KEY_FILE_OVERHEAD + 64);
-        assert_eq!(decrypt_key_hex(&encrypted, "hunter2").unwrap(), hex);
-    }
-
-    #[test]
-    fn key_encryption_rejects_wrong_passphrase() {
-        let hex = "0123456789abcdef".repeat(4);
-        let encrypted = encrypt_key_hex(&hex, "right").unwrap();
-        assert!(decrypt_key_hex(&encrypted, "wrong").is_err());
-    }
-
-    #[test]
-    fn key_encryption_rejects_tampered_ciphertext() {
-        let hex = "0123456789abcdef".repeat(4);
-        let mut encrypted = encrypt_key_hex(&hex, "hunter2").unwrap();
-        let last = encrypted.len() - 1;
-        encrypted[last] ^= 0x01; // flip one ciphertext byte -> AEAD tag fails
-        assert!(decrypt_key_hex(&encrypted, "hunter2").is_err());
-        // Tampering with the header (salt/nonce) also fails, and swapping a
-        // header between files is blocked by the AAD (magic is the AAD).
-        encrypted[KEY_FILE_MAGIC.len()] ^= 0x01;
-        assert!(decrypt_key_hex(&encrypted, "hunter2").is_err());
-    }
-
-    #[test]
-    fn plaintext_hex_is_not_confusable_with_encrypted() {
-        // 'l' (magic's first byte) is not a hex digit, so a legacy 64-char
-        // plaintext file can never look encrypted.
-        let plain = "0123456789abcdef".repeat(4);
-        assert!(!is_encrypted_key(plain.as_bytes()));
-        assert!(!is_encrypted_key(b""));
-        assert!(!is_encrypted_key(b"linkp2p-k0")); // wrong version byte
-    }
-
-    #[test]
-    fn identity_file_passphrase_round_trip_on_disk() {
-        let dir = std::env::temp_dir().join(format!("link-p2p-keytest-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("identity.key");
-        let _ = std::fs::remove_file(&path);
-
-        // Create with a passphrase: file lands encrypted, key round-trips.
-        let key1 = load_or_create_secret_key(&path, Some("s3cret")).unwrap();
-        assert!(is_encrypted_key(&std::fs::read(&path).unwrap()));
-        let key2 = load_or_create_secret_key(&path, Some("s3cret")).unwrap();
-        assert_eq!(key1.to_bytes(), key2.to_bytes());
-        // Wrong passphrase and missing passphrase both fail loudly.
-        assert!(load_or_create_secret_key(&path, Some("nope")).is_err());
-        assert!(load_or_create_secret_key(&path, None).is_err());
-
-        // Legacy upgrade: overwrite with plaintext hex, load with a
-        // passphrase -> same key, file becomes encrypted.
-        let hex: String = key1.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
-        std::fs::write(&path, &hex).unwrap();
-        let key3 = load_or_create_secret_key(&path, Some("newpass")).unwrap();
-        assert_eq!(key1.to_bytes(), key3.to_bytes());
-        assert!(is_encrypted_key(&std::fs::read(&path).unwrap()));
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn migrate_identity_writes_0600_and_removes_legacy() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("link-p2p-migrate-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let legacy = dir.join("identity.key");
-        let target = dir.join("nested").join("identity.key");
-        let key = "0123456789abcdef".repeat(4); // 64 hex chars
-        // Legacy file deliberately broad (0644): the migrated copy must never
-        // inherit that — it goes through open_key_file_for_write (0600 at
-        // creation), not fs::copy.
-        std::fs::write(&legacy, &key).unwrap();
-        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o644)).unwrap();
-
-        migrate_identity(&legacy, &target).unwrap();
-
-        assert_eq!(std::fs::read(&target).unwrap(), key.as_bytes());
-        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "migrated identity must be owner-only, got {mode:o}");
-        assert!(!legacy.exists(), "legacy identity should be removed");
-
-        let _ = std::fs::remove_dir_all(&dir);
+    fn endpoint_online_steps_install_relays_before_wait() {
+        // Regression: wait_online-before-install_extra_relays made custom
+        // --relay useless whenever n0 was unreachable (Windows lab case).
+        assert_eq!(
+            ENDPOINT_ONLINE_STEPS,
+            &["install_extra_relays", "wait_online"]
+        );
     }
 
     #[test]

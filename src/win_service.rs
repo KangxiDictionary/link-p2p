@@ -26,11 +26,16 @@ use crate::style::{self, ColorMode};
 use crate::tun_ctl::{self, RuntimeMode};
 use crate::tun_daemon::{self, SupervisedUpOpts};
 use crate::tun_service::InstallOpts;
+use crate::win_eventlog;
 use crate::Ui;
 
 /// SCM service name (not the display name).
 pub const SERVICE_NAME: &str = "link-p2p-tun";
 pub const SERVICE_DISPLAY: &str = "link-p2p TUN mesh daemon";
+
+/// How often the service refreshes `SERVICE_RUNNING` so SCM does not treat a
+/// hung worker as "still fine forever" without a heartbeat.
+const STATUS_KEEPALIVE: Duration = Duration::from_secs(30);
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -42,8 +47,31 @@ pub fn run_dispatcher() -> Result<()> {
 
 fn service_main(_arguments: Vec<OsString>) {
     if let Err(e) = run_service_body() {
-        // No stderr under SCM — Event Log would be nicer later.
-        let _ = e;
+        let _ = win_eventlog::error(&format!("link-p2p-tun service failed: {e:#}"));
+    }
+}
+
+fn running_status() -> ServiceStatus {
+    ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::Running,
+        controls_accepted: ServiceControlAccept::STOP,
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::ZERO,
+        process_id: None,
+    }
+}
+
+fn stopped_status(win32_exit: u32) -> ServiceStatus {
+    ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::Stopped,
+        controls_accepted: ServiceControlAccept::empty(),
+        exit_code: ServiceExitCode::Win32(win32_exit),
+        checkpoint: 0,
+        wait_hint: Duration::ZERO,
+        process_id: None,
     }
 }
 
@@ -65,16 +93,14 @@ fn run_service_body() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("RegisterServiceCtrlHandler: {e}"))?;
 
     status_handle
-        .set_service_status(ServiceStatus {
-            service_type: ServiceType::OWN_PROCESS,
-            current_state: ServiceState::Running,
-            controls_accepted: ServiceControlAccept::STOP,
-            exit_code: ServiceExitCode::Win32(0),
-            checkpoint: 0,
-            wait_hint: Duration::ZERO,
-            process_id: None,
-        })
+        .set_service_status(running_status())
         .map_err(|e| anyhow::anyhow!("SetServiceStatus(Running): {e}"))?;
+
+    let _ = win_eventlog::info("link-p2p-tun service entered Running state");
+
+    // Fail fast on a bad SDDL constant before opening the control pipe.
+    crate::win_pipe::validate_system_pipe_sddl()
+        .context(tr!("validating system named-pipe SDDL"))?;
 
     let opts = parse_service_up_opts()?;
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -92,28 +118,61 @@ fn run_service_body() -> Result<()> {
         tun_daemon::run_supervised_foreground(opts, ui, styler).await
     });
 
-    let stop_reason = stop_rx.recv();
-    if stop_reason.is_ok() {
+    // Keep-alive: refresh SERVICE_RUNNING every STATUS_KEEPALIVE until stop
+    // or the worker finishes (crash / clean exit). Without this, SCM can sit
+    // on a dead process until its own wait hint expires.
+    let mut stop_requested = false;
+    loop {
+        match stop_rx.recv_timeout(STATUS_KEEPALIVE) {
+            Ok(()) => {
+                stop_requested = true;
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _ = status_handle.set_service_status(running_status());
+                if worker.is_finished() {
+                    let _ = win_eventlog::warn(
+                        "link-p2p-tun worker exited before Stop; reporting Stopped to SCM",
+                    );
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                stop_requested = true;
+                break;
+            }
+        }
+    }
+
+    if stop_requested {
+        let _ = win_eventlog::info("link-p2p-tun received Stop/Shutdown; draining control plane");
         rt.block_on(async {
             let _ = tun_daemon::send_ctl_shutdown(RuntimeMode::System).await;
         });
     }
 
     let worker_res = rt.block_on(async { worker.await });
-    let _ = status_handle.set_service_status(ServiceStatus {
-        service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Stopped,
-        controls_accepted: ServiceControlAccept::empty(),
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::ZERO,
-        process_id: None,
-    });
+    let exit_win32 = match &worker_res {
+        Ok(Ok(())) => 0u32,
+        Ok(Err(e)) => exit::code_from(e) as u32,
+        Err(_) => exit::OTHER as u32,
+    };
+    let _ = status_handle.set_service_status(stopped_status(exit_win32));
 
     match worker_res {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(e) => Err(anyhow::anyhow!("service worker join: {e}")),
+        Ok(Ok(())) => {
+            let _ = win_eventlog::info("link-p2p-tun service stopped cleanly");
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            let _ = win_eventlog::error(&format!("link-p2p-tun worker error: {e:#}"));
+            Err(e)
+        }
+        Err(e) => {
+            let err = anyhow::anyhow!("service worker join: {e}");
+            let _ = win_eventlog::error(&format!("{err:#}"));
+            Err(err)
+        }
     }
 }
 
@@ -144,10 +203,15 @@ fn parse_service_up_opts() -> Result<SupervisedUpOpts> {
             _ => {}
         }
     }
+    tun_ctl::verify_identity_parent_writable(&identity)
+        .context(tr!("verifying system identity directory is writable"))?;
     role = tun_daemon::resolve_up_role(Some(&role), to.as_deref())?;
     let passphrase = std::env::var("LINK_P2P_PASSPHRASE")
         .ok()
         .filter(|p| !p.is_empty());
+    if let Some(p) = &passphrase {
+        crate::validate_passphrase(p)?;
+    }
     let secret_key = crate::load_or_create_secret_key(&identity, passphrase.as_deref())
         .context(tr!("loading/creating persistent identity"))?;
 
@@ -170,6 +234,11 @@ fn parse_service_up_opts() -> Result<SupervisedUpOpts> {
 
 /// Register and start the LocalSystem service.
 pub fn install_scm(exe: &std::path::Path, opts: &InstallOpts) -> Result<()> {
+    crate::win_pipe::validate_system_pipe_sddl()
+        .context(tr!("validating system named-pipe SDDL"))?;
+    tun_ctl::verify_identity_parent_writable(&opts.identity)
+        .context(tr!("verifying system identity directory is writable"))?;
+
     let manager = ServiceManager::local_computer(
         None::<&str>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
@@ -359,5 +428,15 @@ mod tests {
         assert!(args.iter().any(|a| a == "--windows-service"));
         assert!(args.iter().any(|a| a == "--system"));
         assert!(args.iter().any(|a| a == "--foreground"));
+    }
+
+    /// Manual / CI-on-Windows: needs Administrator + `wintun.dll` beside the
+    /// test binary. Run with `cargo test -p link-p2p -- --ignored`.
+    #[test]
+    #[ignore = "needs Administrator + wintun.dll beside the executable"]
+    fn ignored_system_pipe_sddl_and_identity_preflight() {
+        crate::win_pipe::validate_system_pipe_sddl().expect("SDDL");
+        // Writable only when elevated under ProgramData; soft-fail on CI.
+        let _ = tun_ctl::verify_identity_parent_writable(&tun_ctl::default_system_identity_path());
     }
 }

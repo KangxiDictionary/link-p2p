@@ -26,17 +26,37 @@ impl Target {
     /// `serve` side (not by the SOCKS5 client) — this is what makes the
     /// proxy usable for hosts the connecting machine can't resolve itself
     /// (e.g. a remote-network-only DNS name), same as a real VPN.
+    ///
+    /// Uses the first address `lookup_host` returns (no multi-A retry). DNS
+    /// is capped at [`DNS_RESOLVE_TIMEOUT`] so a hung resolver cannot stall
+    /// the whole proxy accept loop.
     pub async fn resolve(&self) -> Result<SocketAddr> {
         match self {
             Target::Addr(a) => Ok(*a),
-            Target::Domain(host, port) => tokio::net::lookup_host((host.as_str(), *port))
-                .await
-                .with_context(|| tr_fmt!("resolving {0}", host))?
-                .next()
-                .with_context(|| tr_fmt!("no addresses for {0}", host)),
+            Target::Domain(host, port) => {
+                let host = host.clone();
+                let port = *port;
+                let lookup = tokio::net::lookup_host((host.as_str(), port));
+                let mut addrs = tokio::time::timeout(DNS_RESOLVE_TIMEOUT, lookup)
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!(tr_fmt!(
+                            "timed out resolving {0} after {1} seconds",
+                            host,
+                            DNS_RESOLVE_TIMEOUT.as_secs()
+                        ))
+                    })?
+                    .with_context(|| tr_fmt!("resolving {0}", host))?;
+                addrs
+                    .next()
+                    .with_context(|| tr_fmt!("no addresses for {0}", host))
+            }
         }
     }
 }
+
+/// Cap for SOCKS5 domain → address resolution (see [`Target::resolve`]).
+const DNS_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 // --- wire header on the QUIC stream --------------------------------------
 
@@ -136,12 +156,16 @@ pub async fn accept_handshake(tcp: &mut TcpStream) -> Result<Target> {
             hdr[0]
         ));
     }
+    // NMETHODS is a single u8 — allocation is bounded to ≤255 bytes. Do not
+    // copy this pattern for length fields from larger integer types without a cap.
+    // NMETHODS=0 → empty `methods` → no-auth not offered → 0xFF + bail (correct).
     let mut methods = vec![0u8; hdr[1] as usize];
     tcp.read_exact(&mut methods).await?;
     // RFC 1928 §3: the server must pick a method from the client's offered
     // list. We only speak no-auth (0x00); if the client didn't offer it,
     // reply 0xFF ("no acceptable method") and close instead of proceeding
-    // with a method the client never agreed to.
+    // with a method the client never agreed to. The bail after the reply is
+    // for our caller (log / drop the TCP), not an extra wire message.
     if !methods.contains(&0x00) {
         tcp.write_all(&[0x05, 0xFF])
             .await
@@ -223,7 +247,7 @@ mod tests {
 
     /// Pin English catalogs so assertions on error text stay stable under zh_CN.
     fn english_catalog() -> std::sync::MutexGuard<'static, ()> {
-        crate::i18n::ENV_LOCK.lock().unwrap()
+        crate::i18n::pin_english_catalog()
     }
 
     // --- wire header round-trips (no network) -----------------------------

@@ -1480,3 +1480,185 @@ msgstr "`tun up --foreground --system` 用のプラットフォームサービ�
 
 msgid "tun service install is not supported on this platform yet"
 msgstr "このプラットフォームでは tun service install は未対応です"
+
+
+
+msgid "refusing to load wintun.dll from a temporary or download directory ({0}); install link-p2p to a trusted path (e.g. Program Files) with the official signed DLL beside the executable"
+msgstr "一時またはダウンロードディレクトリから wintun.dll を読み込みません（{0}）。link-p2p を信頼できるパス（例: Program Files）にインストールし、公式署名済み DLL を実行ファイルと同じ場所に置いてください"
+
+msgid "system identity path has no parent"
+msgstr "システム ID パスに親ディレクトリがありません"
+
+msgid "creating system identity directory {0}"
+msgstr "システム ID ディレクトリ {0} を作成しています"
+
+msgid "system identity directory is not writable: {0}"
+msgstr "システム ID ディレクトリに書き込めません: {0}"
+
+msgid "control body exceeds max ({0} bytes); this may indicate malformed serialization or a DoS attempt"
+msgstr "制御プレーンの本文が上限（{0} バイト）を超えています。不正なシリアライズまたは DoS の可能性があります"
+
+msgid "TUN daemon protocol version {0} is no longer supported (minimum v{1}); upgrade the daemon"
+msgstr "TUN デーモンのプロトコル版 {0} はサポート終了です（最低 v{1}）。デーモンをアップグレードしてください"
+
+msgid "control Peers response has too many entries ({0} > {1})"
+msgstr "制御 Peers 応答のエントリ数が多すぎます（{0} > {1}）"
+
+msgid "`--role hub` cannot be combined with `--to` (hub does not dial a peer)"
+msgstr "`--role hub` は `--to` と併用できません（hub はピアへダイヤルしません）"
+
+msgid "`--role spoke` requires `--to <hub EndpointId>`"
+msgstr "`--role spoke` には `--to <hub EndpointId>` が必要です"
+
+msgid "invalid `--role {0}` (expected hub or spoke)"
+msgstr "無効な `--role {0}`（hub または spoke を指定）"
+
+msgid "TUN control Peers timed out"
+msgstr "TUN 制御 Peers がタイムアウトしました"
+
+msgid "waiting for named-pipe client"
+msgstr "名前付きパイプのクライアントを待っています"
+
+msgid "creating system runtime dir {0} (needs root or RuntimeDirectory=)"
+msgstr "システム実行時ディレクトリ {0} を作成しています（root または RuntimeDirectory= が必要）"
+
+msgid "TUN background daemon (`tun up` without `--foreground`) is not yet supported on this platform; use `tun up --foreground` or `tun serve` / `tun connect`"
+msgstr "このプラットフォームではバックグラウンド TUN デーモン（`--foreground` なしの `tun up`）は未対応です。`tun up --foreground` または `tun serve` / `tun connect` を使ってください"
+
+msgid "tun daemon already running (role={0}, pid file session {1})"
+msgstr "tun デーモンは既に実行中です（role={0}、pid ファイルセッション {1}）"
+
+msgid "TUN log path missing in ad-hoc mode"
+msgstr "アドホックモードで TUN ログパスがありません"
+
+msgid "timed out waiting for tun daemon to become ready; check {0}"
+msgstr "tun デーモンの準備完了待ちがタイムアウトしました。{0} を確認してください"
+
+msgid "tun daemon started in background (pid {0})"
+msgstr "tun デーモンをバックグラウンドで起動しました（pid {0}）"
+
+msgid "use `link-p2p tun status` to check state"
+msgstr "`link-p2p tun status` で状態を確認"
+
+msgid "use `link-p2p tun down` to stop it"
+msgstr "`link-p2p tun down` で停止"
+
+msgid "tun daemon is not running"
+msgstr "tun デーモンは実行されていません"
+
+msgid "tun daemon stopped"
+msgstr "tun デーモンを停止しました"
+
+msgid "daemon may still be shutting down; check service logs"
+msgstr "デーモンはまだ終了処理中の可能性があります。サービスログを確認してください"
+
+msgid "(no peers)"
+msgstr "（ピアなし）"
+
+msgid "unexpected Peers response from TUN daemon: {0}"
+msgstr "TUN デーモンから予期しない Peers 応答: {0}"
+
+msgid "permission denied: only an elevated administrator may stop the TUN daemon"
+msgstr "権限がありません: TUN デーモンを停止できるのは昇格した管理者だけです"
+
+msgid "spoke daemon requires --to <hub EndpointId>"
+msgstr "spoke デーモンには --to <hub EndpointId> が必要です"
+
+msgid "running {0}"
+msgstr "{0} を実行中"
+
+msgid "current_exe"
+msgstr "現在の実行ファイル"
+
+msgid "validating system named-pipe SDDL"
+msgstr "システム名前付きパイプの SDDL を検証しています"
+
+msgid "verifying system identity directory is writable"
+msgstr "システム ID ディレクトリが書き込み可能か確認しています"
+
+msgid "forward target failing repeatedly; backing off before accepting more streams"
+msgstr "転送先が繰り返し失敗しています。追加のストリーム受付前にバックオフします"
+
+msgid "passphrase must be at least {0} characters (you have {1})"
+msgstr "パスフレーズは少なくとも {0} 文字必要です（現在 {1}）"
+
+msgid "passphrase is too long (max {0} bytes, you have {1})"
+msgstr "パスフレーズが長すぎます（最大 {0} バイト、現在 {1}）"
+
+msgid "Local diagnostics: relay TCP probe, wintun path, loopback echo drain."
+msgstr "本地诊断：中继 TCP 探测、wintun 路径、回环 echo drain。"
+
+msgid "Checks that do not need python or nc: TCP-probe each --relay URL, verify Windows wintun.dll beside the exe, and run a loopback TCP echo drain. Useful when validating a host before starting the mesh."
+msgstr "无需 python/nc 的检查：对每个 --relay 做 TCP 探测、确认 Windows 下 wintun.dll 在 exe 旁，并做回环 TCP echo drain。适合开 mesh 前验证主机。"
+
+msgid "Skip the loopback TCP echo drain (relay/wintun checks only)."
+msgstr "跳过回环 TCP echo drain（仅做中继/wintun 检查）。"
+
+msgid "\nYou passed --relay without --no-n0-relays: the endpoint still\nstarts on n0's public relays. If n0 is blocked on this network,\neither add --no-n0-relays (custom relay only) or ensure UDP to\nn0 works. Custom URLs are installed before this wait; if you\nstill time out, probe your relay with `link-p2p tun selftest`."
+msgstr "\n你传了 --relay 但未加 --no-n0-relays：端点仍从 n0 公共中继起步。若本网络封禁 n0，请加 --no-n0-relays（仅用自建中继）或确保到 n0 的 UDP 可用。自定义 URL 会在等待上线前安装；若仍超时，用 `link-p2p tun selftest` 探测中继。"
+
+msgid "\n--no-n0-relays is set: only your --relay URL(s) are used.\nCheck that the relay is reachable (TCP) and accepts QUIC/UDP.\nTry: link-p2p tun selftest"
+msgstr "\n已设置 --no-n0-relays：仅使用你的 --relay。请确认中继 TCP 可达且接受 QUIC/UDP。\n尝试：link-p2p tun selftest"
+
+msgid "endpoint did not come online within {0}.\n\nThe most likely cause: outgoing UDP is blocked by a firewall.\niroh/QUIC relies on UDP for both direct hole-punching and\nrelay connections. Try:\nnc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\nRUST_LOG=iroh=debug {1}     # see exactly where it's stuck{2}"
+msgstr "endpoint did not come online within {0}.\n\nThe most likely cause: outgoing UDP is blocked by a firewall.\niroh/QUIC relies on UDP for both direct hole-punching and\nrelay connections. Try:\nnc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\nRUST_LOG=iroh=debug {1}     # see exactly where it's stuck{2}"
+
+msgid "bring-up order (custom relay before online wait):"
+msgstr "上线顺序（自定义中继先于 online 等待）："
+
+msgid "no --relay URLs configured (will use n0 public relays only)"
+msgstr "未配置 --relay（将仅使用 n0 公共中继）"
+
+msgid "probing --relay URL(s) over TCP (2s timeout):"
+msgstr "正在对 --relay 做 TCP 探测（2 秒超时）："
+
+msgid "FAIL"
+msgstr "失敗"
+
+msgid "system identity directory not writable (ok for ad-hoc; needed for tun service install)"
+msgstr "系统身份目录不可写（临时模式可忽略；tun service install 需要）"
+
+msgid "system identity directory writable"
+msgstr "系统身份目录可写"
+
+msgid "loopback TCP echo drain:"
+msgstr "回环 TCP echo drain："
+
+msgid "binding selftest echo listener"
+msgstr "绑定 selftest echo 监听"
+
+msgid "connecting to selftest echo listener"
+msgstr "连接 selftest echo 监听"
+
+msgid "echo {0} bytes via {1}"
+msgstr "经 {1} echo {0} 字节"
+
+msgid "FAIL echo mismatch"
+msgstr "失败：echo 不匹配"
+
+msgid "selftest reported {0} failure(s)"
+msgstr "selftest で {0} 件の失敗"
+
+msgid "selftest passed"
+msgstr "selftest 成功"
+
+msgid "firewall: inbound allow for {0} (rule {1})"
+msgstr "ファイアウォール: {0} の受信許可（ルール {1}）"
+
+msgid "could not add Windows firewall rule automatically; allow inbound UDP for this executable manually if peers cannot reach you"
+msgstr "无法自动添加 Windows 防火墙规则；若对端连不上你，请手动允许本可执行文件的入站 UDP"
+
+msgid "could not remove Windows firewall rule (may already be gone)"
+msgstr "无法删除 Windows 防火墙规则（可能已不存在）"
+
+msgid "running netsh advfirewall to add inbound rule"
+msgstr "正在运行 netsh advfirewall 添加入站规则"
+
+msgid "netsh failed to add firewall rule {0} for {1} (exit {2})"
+msgstr "netsh 添加防火墙规则 {0}（程序 {1}）失败（退出码 {2}）"
+
+msgid "running netsh advfirewall to delete inbound rule"
+msgstr "正在运行 netsh advfirewall 删除入站规则"
+
+msgid "netsh failed to delete firewall rule {0} (exit {1})"
+msgstr "netsh 删除防火墙规则 {0} 失败（退出码 {1}）"

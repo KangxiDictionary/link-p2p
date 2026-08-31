@@ -109,6 +109,38 @@ pub fn default_system_identity_path() -> PathBuf {
     }
 }
 
+/// Ensure the parent of `identity_path` exists and is writable by this process
+/// (LocalSystem / root / service account). Call before install or service start
+/// so failures are actionable instead of mid-key-write.
+pub fn verify_identity_parent_writable(identity_path: &std::path::Path) -> anyhow::Result<()> {
+    use std::fs;
+    let parent = identity_path
+        .parent()
+        .context(tr!("system identity path has no parent"))?;
+    fs::create_dir_all(parent).with_context(|| {
+        tr_fmt!(
+            "creating system identity directory {0}",
+            parent.display().to_string()
+        )
+    })?;
+    let probe = parent.join(".link-p2p-writetest");
+    fs::write(&probe, b"").with_context(|| {
+        tr_fmt!(
+            "system identity directory is not writable: {0}",
+            parent.display().to_string()
+        )
+    })?;
+    let _ = fs::remove_file(&probe);
+    Ok(())
+}
+
+/// Convenience: [`verify_identity_parent_writable`] for
+/// [`default_system_identity_path`].
+#[allow(dead_code)] // used by Windows service install / ignored Windows tests
+pub fn verify_system_identity_parent_writable() -> anyhow::Result<()> {
+    verify_identity_parent_writable(&default_system_identity_path())
+}
+
 /// SDDL for the Windows system named pipe (`\\.\pipe\link-p2p-tun-system`).
 ///
 /// `BUILTIN\Users` get connect (GR/GW); SYSTEM and Administrators get full
@@ -190,8 +222,16 @@ pub const CTL_MAGIC: &[u8; 4] = b"LPC1";
 /// Protocol version. Bump when request/response shapes are incompatible.
 pub const CTL_VERSION: u8 = 1;
 
+/// Oldest protocol version this binary will speak. Frames below this are
+/// rejected as unsupported (not merely "older than CLI").
+pub const MIN_SUPPORTED_VERSION: u8 = 1;
+
 /// Max JSON body size (1 MiB) — peers lists stay small; this caps abuse.
 pub const CTL_MAX_BODY: u32 = 1024 * 1024;
+
+/// Max peer entries accepted in a `Peers` control response (DoS cap after JSON
+/// decode; well below what fits in [`CTL_MAX_BODY`] for typical entry sizes).
+pub const CTL_MAX_PEERS: usize = 4096;
 
 /// How long a liveness `connect` may block before we treat the socket as dead.
 pub const PROBE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
@@ -202,7 +242,11 @@ pub const PROBE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from
 pub const CTL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// How long the parent waits for the child's ready line after spawn.
-pub const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+///
+/// Override with `LINK_P2P_TUN_READY_TIMEOUT_MS` (CI/slow VMs). After the TCP
+/// ready line, the parent still probes the control socket — that probe is the
+/// authoritative "daemon is accepting ctl" signal (mitigates ready/pid TOCTOU).
+pub const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// One peer as exported to control-plane clients (JSON-friendly).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,7 +319,11 @@ impl CtlResponse {
 pub fn encode_frame(version: u8, body: &[u8]) -> Result<Vec<u8>> {
     let len = u32::try_from(body.len()).context(tr!("control body too large"))?;
     if len > CTL_MAX_BODY {
-        bail!(tr_fmt!("control body exceeds max ({0} bytes)", CTL_MAX_BODY));
+        bail!(tr_fmt!(
+            "control body exceeds max ({0} bytes); \
+             this may indicate malformed serialization or a DoS attempt",
+            CTL_MAX_BODY
+        ));
     }
     let mut out = Vec::with_capacity(4 + 1 + 4 + body.len());
     out.extend_from_slice(CTL_MAGIC);
@@ -303,7 +351,11 @@ fn parse_header(hdr: &[u8; 9]) -> Result<(u8, u32)> {
     let version = hdr[4];
     let len = u32::from_be_bytes([hdr[5], hdr[6], hdr[7], hdr[8]]);
     if len > CTL_MAX_BODY {
-        bail!(tr_fmt!("control body exceeds max ({0} bytes)", CTL_MAX_BODY));
+        bail!(tr_fmt!(
+            "control body exceeds max ({0} bytes); \
+             this may indicate malformed serialization or a DoS attempt",
+            CTL_MAX_BODY
+        ));
     }
     Ok((version, len))
 }
@@ -312,23 +364,46 @@ fn check_version(version: u8) -> Result<()> {
     if version == CTL_VERSION {
         return Ok(());
     }
-    let msg = if version > CTL_VERSION {
-        tr_fmt!(
+    // Three mismatch buckets today:
+    // - version < MIN_SUPPORTED_VERSION: too old to speak at all
+    // - version > CTL_VERSION: daemon newer than this CLI
+    // - MIN_SUPPORTED_VERSION <= version < CTL_VERSION: deprecated intermediate
+    //   (still recognized as "older daemon"; widen this arm when we intentionally
+    //   support a multi-version window)
+    let msg = match version {
+        v if v < MIN_SUPPORTED_VERSION => tr_fmt!(
+            "TUN daemon protocol version {0} is no longer supported (minimum v{1}); upgrade the daemon",
+            v,
+            MIN_SUPPORTED_VERSION
+        ),
+        v if v > CTL_VERSION => tr_fmt!(
             "TUN daemon protocol is newer (v{0}) than this CLI (v{1}); upgrade link-p2p",
-            version,
+            v,
             CTL_VERSION
-        )
-    } else {
-        tr_fmt!(
+        ),
+        v => tr_fmt!(
             "TUN daemon protocol is older (v{0}) than this CLI (v{1}); restart the daemon or downgrade the CLI",
-            version,
+            v,
             CTL_VERSION
-        )
+        ),
     };
     bail!(exit::coded(
         exit::USAGE,
         ProtocolMismatch::new(version, CTL_VERSION, msg),
     ));
+}
+
+fn validate_ctl_response(resp: CtlResponse) -> Result<CtlResponse> {
+    if let CtlResponse::Peers { ref peers } = resp {
+        if peers.len() > CTL_MAX_PEERS {
+            bail!(tr_fmt!(
+                "control Peers response has too many entries ({0} > {1})",
+                peers.len(),
+                CTL_MAX_PEERS
+            ));
+        }
+    }
+    Ok(resp)
 }
 
 /// Marker for a live-but-incompatible control protocol version.
@@ -356,20 +431,24 @@ impl ProtocolMismatch {
     /// Find this marker anywhere in `err`'s chain, including inside a
     /// `CodedError` wrapper.
     ///
-    /// A plain `err.chain()` walk misses it there: `CodedError::source()`
-    /// returns `self.source.source()`, which collapses the inner
-    /// `anyhow::Error` wrapper (whose own source is `None`). So check the
-    /// wrapper's stored `source` field directly as well.
+    /// A plain `err.chain()` walk misses it there: [`CodedError::source`]
+    /// returns the *cause of* the wrapped `anyhow::Error` (not the wrapped
+    /// root) so Display does not print the same message twice. Walk
+    /// `CodedError.source.chain()` explicitly to recover nested markers.
     pub fn from_error(err: &anyhow::Error) -> Option<&ProtocolMismatch> {
-        err.chain().find_map(|c| {
-            if let Some(pm) = c.downcast_ref::<ProtocolMismatch>() {
-                Some(pm)
-            } else if let Some(ce) = c.downcast_ref::<crate::exit::CodedError>() {
-                ce.source.downcast_ref::<ProtocolMismatch>()
-            } else {
-                None
+        for cause in err.chain() {
+            if let Some(pm) = cause.downcast_ref::<ProtocolMismatch>() {
+                return Some(pm);
             }
-        })
+            if let Some(ce) = cause.downcast_ref::<crate::exit::CodedError>() {
+                for inner in ce.source.chain() {
+                    if let Some(pm) = inner.downcast_ref::<ProtocolMismatch>() {
+                        return Some(pm);
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
@@ -407,7 +486,9 @@ pub fn decode_response_frame(frame: &[u8]) -> Result<CtlResponse> {
     let body = frame
         .get(9..9 + len as usize)
         .context(tr!("control frame truncated"))?;
-    serde_json::from_slice(body).context(tr!("decode control response"))
+    let resp: CtlResponse =
+        serde_json::from_slice(body).context(tr!("decode control response"))?;
+    validate_ctl_response(resp)
 }
 
 /// Read one framed message from `r`.
@@ -446,7 +527,9 @@ pub async fn read_request<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<CtlReque
 pub async fn read_response<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<CtlResponse> {
     let (version, body) = read_frame(r).await?;
     check_version(version)?;
-    serde_json::from_slice(&body).context(tr!("decode control response"))
+    let resp: CtlResponse =
+        serde_json::from_slice(&body).context(tr!("decode control response"))?;
+    validate_ctl_response(resp)
 }
 
 pub async fn write_request<W: AsyncWriteExt + Unpin>(w: &mut W, req: &CtlRequest) -> Result<()> {
@@ -644,11 +727,30 @@ mod tests {
         // Encode with a fake lower version in the header.
         let body = serde_json::to_vec(&CtlRequest::Status).unwrap();
         let mut frame = encode_frame(CTL_VERSION, &body).unwrap();
-        frame[4] = 0; // older than CTL_VERSION (1)
+        frame[4] = 0; // below MIN_SUPPORTED_VERSION (1)
         let err = decode_request_frame(&frame).unwrap_err();
         assert_eq!(exit::code_from(&err), exit::USAGE);
         let msg = format!("{err:#}");
-        assert!(msg.contains("older") || msg.contains("restart"), "{msg}");
+        assert!(
+            msg.contains("no longer supported") || msg.contains("minimum"),
+            "{msg}"
+        );
+        assert!(ProtocolMismatch::from_error(&err).is_some());
+    }
+
+    #[test]
+    fn peers_response_rejects_oversized_list() {
+        let peers: Vec<CtlPeer> = (0..CTL_MAX_PEERS + 1)
+            .map(|i| CtlPeer {
+                vip: Ipv4Addr::new(10, 0, (i / 256) as u8, (i % 256) as u8),
+                id: format!("{i:064x}"),
+            })
+            .collect();
+        let resp = CtlResponse::Peers { peers };
+        let frame = encode_response(&resp).unwrap();
+        let err = decode_response_frame(&frame).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("too many") || msg.contains("entries"), "{msg}");
     }
 
     #[test]

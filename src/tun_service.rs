@@ -403,6 +403,9 @@ pub fn cmd_install(opts: InstallOpts, styler: &Styler) -> Result<()> {
     let exe = validate_service_binary(&std::env::current_exe().context(tr!("current_exe"))?)?;
     tun_daemon::resolve_up_role(Some(opts.role.as_str()), opts.to.as_deref())?;
 
+    // Fail early if the chosen system identity parent cannot be created/written.
+    crate::tun_ctl::verify_identity_parent_writable(&opts.identity)?;
+
     if let Some(parent) = opts.identity.parent() {
         fs::create_dir_all(parent).with_context(|| {
             tr_fmt!("creating {0}", parent.display().to_string())
@@ -443,6 +446,27 @@ fn cmd_install_windows(exe: PathBuf, opts: InstallOpts, styler: &Styler) -> Resu
     })?;
 
     crate::win_service::install_scm(&exe, &opts)?;
+
+    match crate::win_firewall::add_inbound_for_exe(&exe) {
+        Ok(()) => {
+            println!(
+                "  {}",
+                tr_fmt!(
+                    "firewall: inbound allow for {0} (rule {1})",
+                    exe.display().to_string(),
+                    crate::win_firewall::RULE_NAME
+                )
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "  {}: {e:#}",
+                styler.warn(&tr!(
+                    "could not add Windows firewall rule automatically; allow inbound UDP for this executable manually if peers cannot reach you"
+                ))
+            );
+        }
+    }
 
     println!(
         "{}",
@@ -594,6 +618,12 @@ pub fn cmd_uninstall(styler: &Styler) -> Result<()> {
     #[cfg(windows)]
     {
         crate::win_service::uninstall_scm()?;
+        if let Err(e) = crate::win_firewall::remove_inbound() {
+            eprintln!(
+                "  {}: {e:#}",
+                styler.warn(&tr!("could not remove Windows firewall rule (may already be gone)"))
+            );
+        }
         println!(
             "{}",
             styler.ok(&tr_fmt!(

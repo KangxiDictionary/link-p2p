@@ -46,26 +46,29 @@ pub fn config_path() -> PathBuf {
 }
 
 pub fn load(path: &Path) -> Result<UserConfig> {
-    if !path.exists() {
-        return Ok(UserConfig::default());
+    match fs::read_to_string(path) {
+        Ok(text) => {
+            toml::from_str(&text).with_context(|| tr_fmt!("parsing config {0}", path.display()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(UserConfig::default()),
+        Err(e) => Err(e).with_context(|| tr_fmt!("reading config {0}", path.display())),
     }
-    let text = fs::read_to_string(path)
-        .with_context(|| tr_fmt!("reading config {0}", path.display()))?;
-    toml::from_str(&text).with_context(|| tr_fmt!("parsing config {0}", path.display()))
 }
 
 /// Like [`load`], but on parse/IO errors log a warning and return defaults
-/// instead of failing the whole process (CLI still works; bad config is
-/// ignored rather than silent).
+/// instead of failing the whole process (CLI still works). Missing file is
+/// silent success via [`load`]; permission / TOML failures are warned with
+/// the underlying error so operators can tell "ignored bad file" from
+/// "no config yet".
 pub fn load_or_default(path: &Path) -> UserConfig {
     match load(path) {
         Ok(cfg) => cfg,
         Err(e) => {
             tracing::warn!(
-                error = format!("{e:#}"),
+                error = %e,
                 path = %path.display(),
                 "{}",
-                tr!("failed to parse config; using defaults")
+                tr!("failed to load config; using defaults")
             );
             UserConfig::default()
         }
@@ -81,12 +84,15 @@ pub fn save(path: &Path, cfg: &UserConfig) -> Result<()> {
     fs::write(path, text).with_context(|| tr_fmt!("writing config {0}", path.display()))
 }
 
-/// Merge CLI `--relay` with config file relays (CLI entries first, then config
-/// URLs not already listed).
+/// Merge CLI `--relay` with config file relays (**CLI entries first**, then
+/// config URLs not already listed). Preserves first-seen order; equality is
+/// exact string match (no URL normalization — `https://a/` ≠ `https://a`).
 pub fn merge_relay_urls(cli: &[String], cfg: &UserConfig) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
     let mut out = Vec::new();
     for u in cli.iter().chain(cfg.relays.urls.iter()) {
-        if !out.iter().any(|x| x == u) {
+        if seen.insert(u.as_str()) {
             out.push(u.clone());
         }
     }

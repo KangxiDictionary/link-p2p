@@ -105,6 +105,7 @@ link-p2p serve --forward 127.0.0.1:22 \
 | Flag / env | Effect |
 |---|---|
 | `--relay` (repeatable) / `LINK_P2P_RELAY` | Custom relay URL(s); magicsock picks among them |
+| `--no-n0-relays` | Custom relay(s) only (skip n0 public map). Prefer this when n0 is blocked |
 | `--relay-only` / `LINK_P2P_RELAY_ONLY=1` | Force relay-only (no direct upgrade); both peers; conflicts with `--to-addr` |
 | `--to-addr <ip:port>` | Pin direct address(es); skip discovery for that peer |
 

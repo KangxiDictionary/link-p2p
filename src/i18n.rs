@@ -43,6 +43,14 @@
 //!   startup. At ~150 entries this is microseconds and tens of KB — keeping
 //!   the .mo files loadable from disk (LINK_P2P_LOCALEDIR) beats baking them
 //!   into the binary with include_bytes!.
+//!
+//! ## TODO if this crate grows a public library API
+//!
+//! The process-wide catalog mutex is fine for a single CLI that calls [`init`]
+//! once. A reusable library would need per-context (or thread-local) catalogs
+//! so concurrent callers / tests need not serialize on [`ENV_LOCK`]. Until
+//! then, language-sensitive unit tests must hold [`pin_english_catalog`] /
+//! [`ENV_LOCK`].
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -82,6 +90,21 @@ pub fn init() {
 #[cfg(test)]
 pub fn reset_catalog() {
     *CATALOG.lock().unwrap() = None;
+}
+
+/// Pin English msgids for locale-sensitive assertions.
+///
+/// Holds [`ENV_LOCK`] so concurrent tests cannot flip `LANGUAGE` mid-assert.
+/// Call before baking any `tr!` / `tr_fmt!` error string you will match on.
+#[cfg(test)]
+pub(crate) fn pin_english_catalog() -> std::sync::MutexGuard<'static, ()> {
+    let guard = ENV_LOCK.lock().unwrap();
+    std::env::remove_var("LANGUAGE");
+    std::env::set_var("LANG", "C");
+    std::env::set_var("LC_ALL", "C");
+    reset_catalog();
+    init();
+    guard
 }
 
 /// Translate `msgid` and return an owned `String`.

@@ -186,6 +186,10 @@ relying on file mode alone. macOS system mode needs the same audit (`/var/run/li
 
 #### Step 3 — Windows SCM (**implemented**; verify on real hardware)
 
+Operator doc: [windows-service-setup.md](../user-guide/windows-service-setup.md)
+(Event Log source `link-p2p-tun`, 30s `SetServiceStatus` keep-alive, SDDL
+pre-validation at install/start, ProgramData identity writability check).
+
 Prerequisites: Windows named-pipe control in `tun_ctl`/`tun_daemon`/`win_pipe`
 (same LPC1 protocol as Unix). TUN data plane via Wintun is already in tree.
 

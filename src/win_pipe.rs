@@ -41,6 +41,31 @@ pub fn system_pipe_sddl() -> &'static str {
     WINDOWS_SYSTEM_PIPE_SDDL
 }
 
+/// Parse [`WINDOWS_SYSTEM_PIPE_SDDL`] with the Win32 SDDL API so a typo fails
+/// at install/start instead of at the first `CreateNamedPipeW`.
+pub fn validate_system_pipe_sddl() -> Result<()> {
+    let sddl = encode_wide(WINDOWS_SYSTEM_PIPE_SDDL);
+    let mut sd: *mut core::ffi::c_void = ptr::null_mut();
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut sd,
+            ptr::null_mut(),
+        )
+    };
+    if ok == FALSE || sd.is_null() {
+        bail!(
+            "invalid WINDOWS_SYSTEM_PIPE_SDDL (ConvertStringSecurityDescriptor failed): {}",
+            WINDOWS_SYSTEM_PIPE_SDDL
+        );
+    }
+    unsafe {
+        LocalFree(sd as _);
+    }
+    Ok(())
+}
+
 fn encode_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -275,5 +300,10 @@ mod tests {
             "D:(A;;GRGW;;;BU)(A;;GA;;;SY)(A;;GA;;;BA)"
         );
         assert_eq!(system_pipe_sddl(), WINDOWS_SYSTEM_PIPE_SDDL);
+    }
+
+    #[test]
+    fn system_pipe_sddl_parses_on_windows() {
+        validate_system_pipe_sddl().expect("hard-coded SDDL must parse");
     }
 }

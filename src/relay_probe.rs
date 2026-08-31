@@ -7,13 +7,26 @@
 use std::net::ToSocketAddrs;
 use std::time::{Duration, Instant};
 
+use tracing::warn;
+
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 /// Sort relay URLs by TCP connect RTT (fastest first). Unreachable URLs keep
-/// their relative order at the end.
+/// their relative order at the end and emit a warning so operators notice a
+/// dead `--relay` before `wait_online` times out on n0 alone.
 pub async fn order_by_connect_latency(urls: &[String]) -> Vec<String> {
-    if urls.len() <= 1 {
+    if urls.is_empty() {
+        return Vec::new();
+    }
+    if urls.len() == 1 {
+        let u = &urls[0];
+        if probe_one(u).await.is_none() {
+            warn!(
+                relay = %u,
+                "custom relay TCP probe failed (unreachable or timed out within 2s)"
+            );
+        }
         return urls.to_vec();
     }
     let mut join = tokio::task::JoinSet::new();
@@ -30,7 +43,24 @@ pub async fn order_by_connect_latency(urls: &[String]) -> Vec<String> {
         }
     }
     scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    for (d, _, u) in &scored {
+        if *d >= Duration::from_secs(60) {
+            warn!(
+                relay = %u,
+                "custom relay TCP probe failed (unreachable or timed out within 2s)"
+            );
+        }
+    }
     scored.into_iter().map(|(_, _, u)| u).collect()
+}
+
+/// Human-readable probe lines for `tun selftest` (ok / fail per URL).
+pub async fn probe_report(urls: &[String]) -> Vec<(String, Option<Duration>)> {
+    let mut out = Vec::with_capacity(urls.len());
+    for u in urls {
+        out.push((u.clone(), probe_one(u).await));
+    }
+    out
 }
 
 async fn probe_one(url: &str) -> Option<Duration> {

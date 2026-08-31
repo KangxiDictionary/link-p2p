@@ -126,8 +126,11 @@ pub fn parse_endpoint_token(token: &str) -> Result<EndpointId> {
         })
         .collect();
 
-    // New format: 52 payload chars + 1 check symbol.
-    if compact.chars().count() >= 53 {
+    // New format: 52 payload chars + 1 check symbol (exactly 53 chars).
+    // Anything longer is a raw id attempt that failed to validate (e.g. a
+    // 64-hex string that is not a valid Ed25519 point) — do NOT misread it
+    // as a short code; fall through to the generic error below.
+    if compact.chars().count() == 53 {
         let (body, check) = compact.split_at(compact.len() - 1);
         let check = check
             .chars()
@@ -189,6 +192,11 @@ pub fn encode_short_code(id: EndpointId) -> String {
 
 const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
+/// Typo-detection symbol for short codes (**not** a cryptographic MAC).
+///
+/// Anyone can forge a matching check digit; peer authenticity still comes
+/// from the QUIC/TLS handshake on the EndpointId. Do not treat this as a
+/// security boundary.
 fn check_symbol(data: &[u8]) -> char {
     let mut x = 0u32;
     for &b in data {
@@ -260,6 +268,7 @@ mod tests {
 
     #[test]
     fn short_code_check_digit_catches_typo() {
+        let _lang = crate::i18n::pin_english_catalog();
         let sk = SecretKey::from_bytes(&[9u8; 32]);
         let id = sk.public();
         let code = encode_short_code(id);
@@ -273,7 +282,7 @@ mod tests {
         let bad: String = chars.into_iter().collect();
         let err = parse_endpoint_token(&bad).unwrap_err().to_string();
         assert!(
-            err.contains("check digit") || err.contains("校验"),
+            err.contains("check digit"),
             "unexpected err: {err}"
         );
     }

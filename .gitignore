@@ -4,4 +4,10 @@ locales/**/*.mo
 # Locally built test tools (see scripts/local-test.sh for how to build)
 /tools/
 /tmp.log
+/target-win
 __pycache__/
+# Local test scratch / ad-hoc identity keys (never commit)
+.tmp/
+/*.key
+/src.zip
+/source.zip

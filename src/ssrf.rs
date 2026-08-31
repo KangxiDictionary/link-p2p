@@ -103,8 +103,9 @@ fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
 }
 
 fn is_teredo(ip: Ipv6Addr) -> bool {
+    // RFC 4380: Teredo prefix is 2001:0000::/32 (not 2001::/16).
     let s = ip.segments();
-    s[0] == 0x2001 && s[1] == 0
+    s[0] == 0x2001 && s[1] == 0x0000
 }
 
 fn ipv4_from_u16_pair(hi: u16, lo: u16) -> Ipv4Addr {

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::endpoint::{Connection, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use tokio::net::TcpListener;
@@ -32,9 +32,9 @@ use crate::relay_probe;
 use crate::style::Styler;
 use crate::tun_roster::should_dial;
 use crate::{
-    build_dial_addr, build_endpoint, handle_forward_stream, install_extra_relays, open_stream_wait,
-    reject_relay_only_with_to_addr, spawn_path_monitor, spawn_reconnect_watcher, wait_online,
-    ConnSlot, PingHandler, ServeMode, TransportTune, Ui, ALPN, PING_ALPN,
+    bring_endpoint_online, build_dial_addr, build_endpoint, handle_forward_stream, open_stream_wait,
+    reject_relay_only_with_to_addr, spawn_path_monitor, spawn_reconnect_watcher, ConnSlot,
+    PingHandler, ServeMode, TransportTune, Ui, ALPN, PING_ALPN,
 };
 
 /// How the local side of a call presents traffic.
@@ -119,8 +119,9 @@ pub async fn run_call(
             anyhow::Error::new(e).context(tr!("binding endpoint")),
         )
     })?;
-    wait_online(&endpoint).await?;
-    install_extra_relays(&endpoint, &relays, no_n0).await?;
+    // Machine-readable for scripts / ignored integration tests (same as serve).
+    println!("ENDPOINT_ID={}", endpoint.id());
+    bring_endpoint_online(&endpoint, &relays, no_n0).await?;
 
     let slot = ConnSlot::new(None);
     let tasks: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -243,6 +244,8 @@ fn install_dialer_session(
 ) {
     // Abort the previous session's background tasks so reconnect does not
     // leave duplicate path-stats / accept loops running on a dead conn.
+    // `spawn_forward_accept_loop` itself cannot fail — replace always aborts
+    // the prior JoinHandle first, then installs the new one (or None).
     replace_bg_task(
         path_monitor,
         Some(spawn_path_monitor(
@@ -293,6 +296,12 @@ fn spawn_call_dialer_watcher(
         let mut rx = slot.subscribe();
         let mut seen = rx.borrow_and_update().clone();
         // Initial conn already installed monitors in run_call.
+        //
+        // `stable_id()` is unique for the lifetime of a Connection object
+        // (quinn); we only care that consecutive slot values differ. A
+        // usize wraparound ABA between two `changed()` wakes is not a
+        // practical concern. `install_dialer_session` cannot fail — it only
+        // aborts/replaces JoinHandles.
         loop {
             if rx.changed().await.is_err() {
                 break;
@@ -335,11 +344,19 @@ async fn write_stream_hello_timed(send: &mut SendStream, slot: &ConnSlot) -> Res
             let conn = slot.borrow();
             let stats = conn.as_ref().map(Connection::stats);
             let close = conn.as_ref().and_then(Connection::close_reason);
+            let path = conn
+                .as_ref()
+                .map(|c| crate::path_kind::path_kind(c).as_str());
             warn!(
-                elapsed_ms = start.elapsed().as_millis() as u64,
-                close = ?close,
-                udp_tx = stats.as_ref().map(|s| s.udp_tx.bytes),
-                udp_rx = stats.as_ref().map(|s| s.udp_rx.bytes),
+                elapsed_secs = start.elapsed().as_secs_f64(),
+                close = close.as_ref().map(std::string::ToString::to_string),
+                path,
+                udp_tx_bytes = stats.as_ref().map(|s| s.udp_tx.bytes),
+                udp_rx_bytes = stats.as_ref().map(|s| s.udp_rx.bytes),
+                udp_tx_packets = stats.as_ref().map(|s| s.udp_tx.datagrams),
+                udp_rx_packets = stats.as_ref().map(|s| s.udp_rx.datagrams),
+                lost_packets = stats.as_ref().map(|s| s.lost_packets),
+                lost_bytes = stats.as_ref().map(|s| s.lost_bytes),
                 "stream hello write timed out"
             );
             Err(anyhow::anyhow!(tr!(
@@ -349,6 +366,17 @@ async fn write_stream_hello_timed(send: &mut SendStream, slot: &ConnSlot) -> Res
     }
 }
 
+/// Exit the accept loop after this many consecutive `accept_bi` failures when
+/// the connection has not yet reported a close reason (defensive; normal close
+/// exits on the first error).
+const ACCEPT_BI_GIVE_UP: u32 = 3;
+
+/// After this many consecutive `--forward` target failures, pause before
+/// accepting more streams so a dead local target cannot pin the peer's
+/// concurrency budget in a tight spawn/fail loop.
+const FORWARD_FAIL_CIRCUIT: u32 = 8;
+const FORWARD_FAIL_BACKOFF: Duration = Duration::from_millis(250);
+
 fn spawn_forward_accept_loop(
     connection: Connection,
     target: SocketAddr,
@@ -356,29 +384,84 @@ fn spawn_forward_accept_loop(
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let peer = connection.remote_id();
-        loop {
-            let permit = match semaphore.clone().acquire_owned().await {
-                Ok(p) => p,
-                Err(_) => break,
-            };
-            let (send, recv) = match connection.accept_bi().await {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!(%peer, error = %e, "{}", tr!("connection ended"));
+        run_forward_accept_loop(connection, target, semaphore, tasks).await;
+    })
+}
+
+/// Shared dialer/waiter `--forward` accept loop.
+///
+/// - `accept_bi` errors → retry briefly only if the conn is still open, else exit
+///   (never spin forever spawning tasks).
+/// - Semaphore is taken **after** accept so idle waiting does not hold a permit.
+/// - Consecutive `handle_forward_stream` failures trip a short backoff.
+async fn run_forward_accept_loop(
+    connection: Connection,
+    target: SocketAddr,
+    semaphore: Arc<Semaphore>,
+    tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let peer = connection.remote_id();
+    let fail_streak = Arc::new(AtomicU32::new(0));
+    let mut accept_errors = 0u32;
+
+    loop {
+        let streak = fail_streak.load(Ordering::Relaxed);
+        if streak >= FORWARD_FAIL_CIRCUIT {
+            warn!(
+                %peer,
+                streak,
+                target = %target,
+                "{}",
+                tr!("forward target failing repeatedly; backing off before accepting more streams")
+            );
+            tokio::time::sleep(FORWARD_FAIL_BACKOFF).await;
+        }
+
+        let (send, recv) = match connection.accept_bi().await {
+            Ok(p) => {
+                accept_errors = 0;
+                p
+            }
+            Err(e) => {
+                accept_errors = accept_errors.saturating_add(1);
+                warn!(
+                    %peer,
+                    conn = connection.stable_id(),
+                    error = %e,
+                    attempt = accept_errors,
+                    "{}",
+                    tr!("connection ended")
+                );
+                if connection.close_reason().is_some() || accept_errors >= ACCEPT_BI_GIVE_UP {
                     break;
                 }
-            };
-            let mode = ServeMode::Forward(target);
-            let task = tokio::spawn(async move {
-                let _permit = permit;
-                if let Err(e) = handle_forward_stream(mode, send, recv).await {
-                    warn!(%peer, error = %e, "{}", tr!("stream error"));
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+
+        let permit = match semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        let mode = ServeMode::Forward(target);
+        let streak = fail_streak.clone();
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            match handle_forward_stream(mode, send, recv).await {
+                Ok(()) => {
+                    streak.store(0, Ordering::Relaxed);
                 }
-            });
-            crate::push_task(&tasks, task);
-        }
-    })
+                Err(e) => {
+                    let n = streak.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+                    warn!(%peer, error = %e, consecutive_failures = n, "{}", tr!("stream error"));
+                }
+            }
+        });
+        crate::push_task(&tasks, task);
+    }
 }
 
 fn resolve_relay_opts(
@@ -496,27 +579,13 @@ impl ProtocolHandler for CallAcceptHandler {
             return Ok(());
         };
 
-        loop {
-            let permit = match self.semaphore.clone().acquire_owned().await {
-                Ok(p) => p,
-                Err(_) => break,
-            };
-            let (send, recv): (SendStream, RecvStream) = match connection.accept_bi().await {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!(%peer, error = %e, "{}", tr!("connection ended"));
-                    break;
-                }
-            };
-            let mode = ServeMode::Forward(target);
-            let task = tokio::spawn(async move {
-                let _permit = permit;
-                if let Err(e) = handle_forward_stream(mode, send, recv).await {
-                    warn!(%peer, error = %e, "{}", tr!("stream error"));
-                }
-            });
-            crate::push_task(&self.tasks, task);
-        }
+        run_forward_accept_loop(
+            connection.clone(),
+            target,
+            self.semaphore.clone(),
+            self.tasks.clone(),
+        )
+        .await;
         connection.closed().await;
         Ok(())
     }
