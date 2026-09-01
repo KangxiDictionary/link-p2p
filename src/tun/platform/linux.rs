@@ -93,7 +93,11 @@ impl TunPlatform for Linux {
             "dev",
             &name,
         ])?;
-        run_ip(&["link", "set", "dev", &name, "mtu", &mtu.to_string()])?;
+        // Linux disables IPv6 on an interface when MTU < 1280 (RFC 8200 min).
+        // Keep the iface at ≥1280; path ceilings below that are enforced via
+        // ICMP PTB / Frag Needed injection on the datagram send path.
+        let iface_mtu = mtu.max(1280);
+        run_ip(&["link", "set", "dev", &name, "mtu", &iface_mtu.to_string()])?;
         run_ip(&["link", "set", "dev", &name, "up"])?;
         Ok((device, name))
     }
@@ -149,7 +153,19 @@ impl TunPlatform for Linux {
     }
 
     /// Lower/raise the interface MTU to the connection's datagram ceiling.
+    ///
+    /// Never programs an MTU below 1280: the kernel then turns off IPv6 on the
+    /// device (`addr add` / routes fail with ENODEV). Oversized inner packets
+    /// still get ICMP Frag Needed / PTB from the TUN send path.
     fn set_mtu(tun_name: &str, mtu: u16) -> Result<()> {
-        run_ip(&["link", "set", "dev", tun_name, "mtu", &mtu.to_string()])
+        let iface_mtu = mtu.max(1280);
+        run_ip(&[
+            "link",
+            "set",
+            "dev",
+            tun_name,
+            "mtu",
+            &iface_mtu.to_string(),
+        ])
     }
 }

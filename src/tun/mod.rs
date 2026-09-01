@@ -582,6 +582,9 @@ fn del_mesh_route(tun_name: &str) -> Result<()> {
 }
 
 /// Lower/raise the interface MTU to the connection's datagram ceiling.
+///
+/// On Linux the platform backend floors at 1280 so IPv6 stays enabled; see
+/// [`platform::linux::Linux::set_mtu`].
 fn set_tun_mtu(tun_name: &str, mtu: u16) -> Result<()> {
     platform::Os::set_mtu(tun_name, mtu)
 }

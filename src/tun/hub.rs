@@ -6,6 +6,10 @@ use super::*;
 #[derive(Clone)]
 struct HubPeer {
     id: EndpointId,
+    /// Per-session generation number, so a reconnecting peer's *fresh* session
+    /// can replace the stale entry and the old session's teardown can tell
+    /// "my entry" apart from "the new session's entry" before removing it.
+    session: u64,
     vip: Ipv4Addr,
     vip6: Ipv6Addr,
     conn: Connection,
@@ -40,15 +44,24 @@ fn try_claim_peer(peers: &HubPeers, peer: HubPeer) -> Result<()> {
     let vip = peer.vip;
     let vip6 = peer.vip6;
     let peer_id = peer.id;
-    let after = peers.rcu(|idx| {
-        if idx.by_v4.contains_key(&vip) || idx.by_v6.contains_key(&vip6) {
+    // NOTE: arc-swap's `rcu` returns the value stored *before* the update
+    // (the `prev` of the successful CAS), NOT the new value. Verifying against
+    // the rcu return would never see our own just-inserted entry and the first
+    // claim from any peer would always fail. Re-load the table instead.
+    peers.rcu(|idx| {
+        let v4 = idx.by_v4.get(&vip);
+        let v6 = idx.by_v6.get(&vip6);
+        let foreign = |p: &HubPeer| p.id != peer_id;
+        if v4.map(foreign).unwrap_or(false) || v6.map(foreign).unwrap_or(false) {
             return (**idx).clone();
         }
+        // Empty slots, or same peer reconnecting (replace stale conn/session).
         let mut next = (**idx).clone();
         next.by_v4.insert(vip, peer.clone());
         next.by_v6.insert(vip6, peer.clone());
         next
     });
+    let after = peers.load_full();
     match after.by_v4.get(&vip) {
         Some(p) if p.id == peer_id => Ok(()),
         _ => bail!(tr_fmt!(
@@ -59,13 +72,42 @@ fn try_claim_peer(peers: &HubPeers, peer: HubPeer) -> Result<()> {
     }
 }
 
-fn peers_remove(peers: &HubPeers, vip: Ipv4Addr, vip6: Ipv6Addr) {
+/// Remove the entry only if it still belongs to session `session`. A
+/// reconnecting peer's fresh session may have replaced the entry by the time
+/// the old session tears down; removing blindly would clobber the live one.
+///
+/// Returns `true` when the VIP slots are empty afterwards (no successor
+/// session) — callers then delete the host route. Do **not** delete the route
+/// when a newer session still holds the slots.
+///
+/// The bool is derived from a post-CAS load (not a flag mutated inside the
+/// `rcu` closure): arc-swap may run the closure more than once.
+fn peers_remove_if_owned(peers: &HubPeers, vip: Ipv4Addr, vip6: Ipv6Addr, session: u64) -> bool {
     peers.rcu(|idx| {
+        let ours_v4 = idx
+            .by_v4
+            .get(&vip)
+            .map(|p| p.session == session)
+            .unwrap_or(false);
+        let ours_v6 = idx
+            .by_v6
+            .get(&vip6)
+            .map(|p| p.session == session)
+            .unwrap_or(false);
+        if !ours_v4 && !ours_v6 {
+            return (**idx).clone();
+        }
         let mut next = (**idx).clone();
-        next.by_v4.remove(&vip);
-        next.by_v6.remove(&vip6);
+        if ours_v4 {
+            next.by_v4.remove(&vip);
+        }
+        if ours_v6 {
+            next.by_v6.remove(&vip6);
+        }
         next
     });
+    let after = peers.load_full();
+    !after.by_v4.contains_key(&vip) && !after.by_v6.contains_key(&vip6)
 }
 
 async fn broadcast_roster(fans: &RosterFans, msg: Bytes) {
@@ -345,6 +387,7 @@ pub async fn run_tun_serve(
         println!("ENDPOINT_ID={ep_hex}");
     }
 
+    let mut session_seq: u64 = 0;
     loop {
         tokio::select! {
             incoming = endpoint.accept() => {
@@ -371,6 +414,8 @@ pub async fn run_tun_serve(
                     continue;
                 }
 
+                session_seq += 1;
+                let session = session_seq;
                 let peer_id = conn.remote_id();
                 if let Err(e) = check_allow(allow.as_ref(), peer_id) {
                     warn!(peer = %peer_id, error = format!("{e:#}"), "{}", tr!("TUN session error"));
@@ -406,6 +451,7 @@ pub async fn run_tun_serve(
                             peers,
                             fans,
                             peer_id,
+                            session,
                             conn,
                             user_mtu,
                             raise_gate,
@@ -447,6 +493,7 @@ async fn hub_run_spoke(
     peers: HubPeers,
     fans: RosterFans,
     peer_id: EndpointId,
+    session: u64,
     conn: Connection,
     user_mtu: u16,
     raise_gate: MtuRaiseGate,
@@ -500,6 +547,7 @@ async fn hub_run_spoke(
         &peers,
         HubPeer {
             id: peer_id,
+            session,
             vip: peer.v4,
             vip6: peer.v6,
             conn: conn.clone(),
@@ -510,7 +558,9 @@ async fn hub_run_spoke(
     fans.write().await.insert(peer_id, fan_tx);
 
     if let Err(e) = add_peer_route(&tun_name, peer.v4, peer.v6) {
-        peers_remove(&peers, peer.v4, peer.v6);
+        // Ownership-aware: if a newer session already replaced our claim, do
+        // not tear its entry down.
+        peers_remove_if_owned(&peers, peer.v4, peer.v6, session);
         fans.write().await.remove(&peer_id);
         return Err(e);
     }
@@ -566,6 +616,7 @@ async fn hub_run_spoke(
 
     let hub_peer = HubPeer {
         id: peer_id,
+        session,
         vip: peer.v4,
         vip6: peer.v6,
         conn: conn.clone(),
@@ -575,7 +626,11 @@ async fn hub_run_spoke(
     hub_peer_to_mesh(tun, own, Arc::clone(&peers), hub_peer).await;
 
     ctrl_send_task.abort();
-    peers_remove(&peers, peer.v4, peer.v6);
+    // Ownership-aware: a reconnecting peer may have replaced our entry with a
+    // fresh session before this teardown ran — do not clobber it, and only
+    // delete the /32 route if no newer session for this peer exists (the new
+    // session's add_peer_route needs it).
+    let removed = peers_remove_if_owned(&peers, peer.v4, peer.v6, session);
     fans.write().await.remove(&peer_id);
     if !hidden {
         let left = Bytes::from(encode_left(&RosterEntry {
@@ -588,8 +643,10 @@ async fn hub_run_spoke(
     if let Some(h) = &hooks {
         refresh_hub_peers_state(&h.state, &peers).await;
     }
-    if let Err(e) = del_peer_route(&tun_name, peer.v4, peer.v6) {
-        warn!(%peer_id, error = %e, "{}", tr!("could not remove peer route"));
+    if removed {
+        if let Err(e) = del_peer_route(&tun_name, peer.v4, peer.v6) {
+            warn!(%peer_id, error = %e, "{}", tr!("could not remove peer route"));
+        }
     }
     info!(%peer_id, vip = %peer.v4, vip6 = %peer.v6, "{}", tr!("peer left the mesh"));
     Ok(())

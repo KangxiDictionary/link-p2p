@@ -42,19 +42,29 @@ impl SpokeMesh {
 
     fn lookup_out(&self, pkt: &[u8]) -> Option<mpsc::Sender<Bytes>> {
         if let Some(dst) = ipv4_dst(pkt) {
+            // The hub's own VIP always goes via the dedicated hub connection
+            // (hub_out). A roster-dial of the hub must never install a direct
+            // link that shadows it: that direct connection has no roster
+            // control stream and the hub rejects it, so packets would vanish.
+            if self.hub_vip == Some(dst) {
+                return self.hub_out.clone();
+            }
             if let Some(tx) = self.direct.get(&dst) {
                 return Some(tx.clone());
             }
-            if self.hub_vip == Some(dst) || vip_in_mesh(dst) {
+            if vip_in_mesh(dst) {
                 return self.hub_out.clone();
             }
             return None;
         }
         if let Some(dst) = ipv6_dst(pkt) {
+            if self.hub_vip6 == Some(dst) {
+                return self.hub_out.clone();
+            }
             if let Some(tx) = self.direct6.get(&dst) {
                 return Some(tx.clone());
             }
-            if self.hub_vip6 == Some(dst) || vip6_in_mesh(dst) {
+            if vip6_in_mesh(dst) {
                 return self.hub_out.clone();
             }
         }
