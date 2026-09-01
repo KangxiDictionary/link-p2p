@@ -1641,6 +1641,64 @@ async fn serve_ctl_until_shutdown(
     Ok(())
 }
 
+/// Shared ctl business logic (Unix socket + Windows named pipe call this).
+async fn handle_ctl_request(
+    req: CtlRequest,
+    hooks: &crate::tun::TunHooks,
+    shutdown_tx: &watch::Sender<bool>,
+    allow_privileged: bool,
+) -> CtlResponse {
+    let denied = || CtlResponse::Err {
+        code: exit::DENIED,
+        message: tr!(
+            "permission denied: elevated privileges required for this TUN control operation"
+        ),
+    };
+    match req {
+        CtlRequest::Status => hooks.state.status_response().await,
+        CtlRequest::Peers => hooks.state.peers_response().await,
+        CtlRequest::Call { to } => match hooks.try_send_call_cmd(crate::tun::CallCmd::Dial { to }) {
+            Ok(()) => CtlResponse::Ok,
+            Err(e) => CtlResponse::Err {
+                code: exit::USAGE,
+                message: format!("{e:#}"),
+            },
+        },
+        CtlRequest::Accept { peer } => {
+            if !allow_privileged {
+                return denied();
+            }
+            match hooks.try_send_call_cmd(crate::tun::CallCmd::Accept { peer }) {
+                Ok(()) => CtlResponse::Ok,
+                Err(e) => CtlResponse::Err {
+                    code: exit::USAGE,
+                    message: format!("{e:#}"),
+                },
+            }
+        }
+        CtlRequest::Reject { peer } => {
+            if !allow_privileged {
+                return denied();
+            }
+            match hooks.try_send_call_cmd(crate::tun::CallCmd::Reject { peer }) {
+                Ok(()) => CtlResponse::Ok,
+                Err(e) => CtlResponse::Err {
+                    code: exit::USAGE,
+                    message: format!("{e:#}"),
+                },
+            }
+        }
+        CtlRequest::Shutdown => {
+            if !allow_privileged {
+                return denied();
+            }
+            let _ = shutdown_tx.send(true);
+            hooks.request_shutdown();
+            CtlResponse::Ok
+        }
+    }
+}
+
 /// Serve one control request. Timeout-bound both directions: a client that
 /// never sends a frame, or never reads our response, dies on its own without
 /// affecting any other connection.
@@ -1656,70 +1714,8 @@ async fn handle_one_connection(
         _ => return, // read timeout or bad frame: drop this connection only
     };
 
-    let resp = match req {
-        CtlRequest::Status => hooks.state.status_response().await,
-        CtlRequest::Peers => hooks.state.peers_response().await,
-        CtlRequest::Call { to } => match hooks.try_send_call_cmd(crate::tun::CallCmd::Dial { to }) {
-            Ok(()) => CtlResponse::Ok,
-            Err(e) => CtlResponse::Err {
-                code: exit::USAGE,
-                message: format!("{e:#}"),
-            },
-        },
-        CtlRequest::Accept { peer } => {
-            if require_privilege && !peer_is_privileged(&stream) {
-                CtlResponse::Err {
-                    code: exit::DENIED,
-                    message: tr!(
-                        "permission denied: only root or the service account may accept TUN calls"
-                    ),
-                }
-            } else {
-                match hooks.try_send_call_cmd(crate::tun::CallCmd::Accept { peer }) {
-                    Ok(()) => CtlResponse::Ok,
-                    Err(e) => CtlResponse::Err {
-                        code: exit::USAGE,
-                        message: format!("{e:#}"),
-                    },
-                }
-            }
-        }
-        CtlRequest::Reject { peer } => {
-            if require_privilege && !peer_is_privileged(&stream) {
-                CtlResponse::Err {
-                    code: exit::DENIED,
-                    message: tr!(
-                        "permission denied: only root or the service account may reject TUN calls"
-                    ),
-                }
-            } else {
-                match hooks.try_send_call_cmd(crate::tun::CallCmd::Reject { peer }) {
-                    Ok(()) => CtlResponse::Ok,
-                    Err(e) => CtlResponse::Err {
-                        code: exit::USAGE,
-                        message: format!("{e:#}"),
-                    },
-                }
-            }
-        }
-        CtlRequest::Shutdown => {
-            if require_privilege && !peer_is_privileged(&stream) {
-                CtlResponse::Err {
-                    code: exit::DENIED,
-                    message: tr!(
-                        "permission denied: only root or the service account may stop the TUN daemon"
-                    ),
-                }
-            } else {
-                // Signal the accept loop to stop taking new connections; the
-                // data-plane teardown happens in the drain/join phase. The
-                // client still gets its Ok immediately.
-                let _ = shutdown_tx.send(true);
-                hooks.request_shutdown();
-                CtlResponse::Ok
-            }
-        }
-    };
+    let allow = !require_privilege || peer_is_privileged(&stream);
+    let resp = handle_ctl_request(req, &hooks, &shutdown_tx, allow).await;
     let _ = timeout(CTL_READ_TIMEOUT, write_response(&mut stream, &resp)).await;
 }
 
@@ -1788,67 +1784,8 @@ async fn handle_one_connection(
         _ => return,
     };
 
-    let resp = match req {
-        CtlRequest::Status => hooks.state.status_response().await,
-        CtlRequest::Peers => hooks.state.peers_response().await,
-        CtlRequest::Call { to } => match hooks.try_send_call_cmd(crate::tun::CallCmd::Dial { to }) {
-            Ok(()) => CtlResponse::Ok,
-            Err(e) => CtlResponse::Err {
-                code: exit::USAGE,
-                message: format!("{e:#}"),
-            },
-        },
-        CtlRequest::Accept { peer } => {
-            if require_privilege && !crate::win_pipe::peer_is_admin(&stream) {
-                CtlResponse::Err {
-                    code: exit::DENIED,
-                    message: tr!(
-                        "permission denied: only an elevated administrator may accept TUN calls"
-                    ),
-                }
-            } else {
-                match hooks.try_send_call_cmd(crate::tun::CallCmd::Accept { peer }) {
-                    Ok(()) => CtlResponse::Ok,
-                    Err(e) => CtlResponse::Err {
-                        code: exit::USAGE,
-                        message: format!("{e:#}"),
-                    },
-                }
-            }
-        }
-        CtlRequest::Reject { peer } => {
-            if require_privilege && !crate::win_pipe::peer_is_admin(&stream) {
-                CtlResponse::Err {
-                    code: exit::DENIED,
-                    message: tr!(
-                        "permission denied: only an elevated administrator may reject TUN calls"
-                    ),
-                }
-            } else {
-                match hooks.try_send_call_cmd(crate::tun::CallCmd::Reject { peer }) {
-                    Ok(()) => CtlResponse::Ok,
-                    Err(e) => CtlResponse::Err {
-                        code: exit::USAGE,
-                        message: format!("{e:#}"),
-                    },
-                }
-            }
-        }
-        CtlRequest::Shutdown => {
-            if require_privilege && !crate::win_pipe::peer_is_admin(&stream) {
-                CtlResponse::Err {
-                    code: exit::DENIED,
-                    message: tr!(
-                        "permission denied: only an elevated administrator may stop the TUN daemon"
-                    ),
-                }
-            } else {
-                let _ = shutdown_tx.send(true);
-                hooks.request_shutdown();
-                CtlResponse::Ok
-            }
-        }
-    };
+    let allow = !require_privilege || crate::win_pipe::peer_is_admin(&stream);
+    let resp = handle_ctl_request(req, &hooks, &shutdown_tx, allow).await;
     let _ = timeout(CTL_READ_TIMEOUT, write_response(&mut stream, &resp)).await;
 }
 

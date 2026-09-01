@@ -19,13 +19,14 @@ struct Ringing {
     since_unix_ms: u64,
 }
 
+#[derive(Clone)]
 struct ActivePeer {
     id: EndpointId,
     vip: Ipv4Addr,
     outbound: mpsc::Sender<Bytes>,
 }
 
-type ActivePeers = Arc<RwLock<HashMap<EndpointId, ActivePeer>>>;
+type ActivePeers = Arc<arc_swap::ArcSwap<HashMap<EndpointId, ActivePeer>>>;
 type RingingList = Arc<RwLock<Vec<Ringing>>>;
 
 fn now_unix_ms() -> u64 {
@@ -35,25 +36,22 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn is_known_contact(peer: EndpointId) -> bool {
-    let book = contacts::load(&contacts::contacts_path()).unwrap_or_default();
-    contacts::name_for_id(&book, peer).is_some()
+fn is_known_contact(book: &contacts::ContactBook, peer: EndpointId) -> bool {
+    contacts::name_for_id(book, peer).is_some()
 }
 
-fn resolve_peer_token(to: &str) -> Result<EndpointId> {
-    let book = contacts::load(&contacts::contacts_path()).unwrap_or_default();
-    Ok(contacts::resolve(&book, to)?.id)
+fn resolve_peer_token(book: &contacts::ContactBook, to: &str) -> Result<EndpointId> {
+    Ok(contacts::resolve(book, to)?.id)
 }
 
-fn match_peer_token(token: &str, peer: EndpointId) -> bool {
+fn match_peer_token(book: &contacts::ContactBook, token: &str, peer: EndpointId) -> bool {
     if token.eq_ignore_ascii_case(&peer.to_string()) {
         return true;
     }
     if let Ok(id) = contacts::parse_endpoint_token(token) {
         return id == peer;
     }
-    let book = contacts::load(&contacts::contacts_path()).unwrap_or_default();
-    contacts::name_for_id(&book, peer)
+    contacts::name_for_id(book, peer)
         .map(|n| n.eq_ignore_ascii_case(token))
         .unwrap_or(false)
 }
@@ -72,7 +70,7 @@ async fn publish_pending(state: &TunLiveState, ringing: &RingingList) {
 }
 
 async fn refresh_active_peers(state: &TunLiveState, peers: &ActivePeers) {
-    let map = peers.read().await;
+    let map = peers.load_full();
     let list: Vec<CtlPeer> = map
         .values()
         .map(|p| CtlPeer {
@@ -158,7 +156,13 @@ pub async fn run_tun_phone(
         )));
     }
 
-    let peers: ActivePeers = Arc::new(RwLock::new(HashMap::new()));
+    // Contacts are stable for the daemon lifetime; reload via restart (or a
+    // future ctl) rather than sync disk I/O on every dial/ring decision.
+    let book = Arc::new(
+        contacts::load(&contacts::contacts_path()).unwrap_or_default(),
+    );
+
+    let peers: ActivePeers = Arc::new(arc_swap::ArcSwap::from_pointee(HashMap::new()));
     let ringing: RingingList = Arc::new(RwLock::new(Vec::new()));
     let raise_gate = new_mtu_raise_gate();
 
@@ -173,12 +177,11 @@ pub async fn run_tun_phone(
                 if dst == own_vip || !vip_in_mesh(dst) {
                     continue;
                 }
-                let out = {
-                    let map = peers.read().await;
-                    map.values()
-                        .find(|p| p.vip == dst)
-                        .map(|p| p.outbound.clone())
-                };
+                let out = peers
+                    .load()
+                    .values()
+                    .find(|p| p.vip == dst)
+                    .map(|p| p.outbound.clone());
                 if let Some(tx) = out {
                     let _ = tx.try_send(pkt);
                 }
@@ -219,11 +222,11 @@ pub async fn run_tun_phone(
                     conn.close(0u32.into(), b"denied");
                     continue;
                 }
-                if peers.read().await.contains_key(&peer_id) {
+                if peers.load().contains_key(&peer_id) {
                     conn.close(0u32.into(), b"already connected");
                     continue;
                 }
-                if is_known_contact(peer_id) {
+                if is_known_contact(&book, peer_id) {
                     spawn_phone_session(
                         tun_io.clone(),
                         tun_name.clone(),
@@ -255,18 +258,18 @@ pub async fn run_tun_phone(
                 let Some(cmd) = cmd else { break; };
                 match cmd {
                     CallCmd::Dial { to } => {
-                        match resolve_peer_token(&to) {
+                        match resolve_peer_token(&book, &to) {
                             Ok(peer_id) => {
                                 if peer_id == own_id {
                                     warn!("{}", tr!("cannot call yourself"));
                                     continue;
                                 }
-                                if peers.read().await.contains_key(&peer_id) {
+                                if peers.load().contains_key(&peer_id) {
                                     info!(peer = %peer_id, "{}", tr!("already connected"));
                                     continue;
                                 }
                                 // Tie-break: only the lower id dials when both know each other.
-                                if is_known_contact(peer_id) && !should_dial(own_id, peer_id) {
+                                if is_known_contact(&book, peer_id) && !should_dial(own_id, peer_id) {
                                     info!(
                                         peer = %peer_id,
                                         "{}",
@@ -327,7 +330,9 @@ pub async fn run_tun_phone(
                     CallCmd::Accept { peer } => {
                         let taken = {
                             let mut list = ringing.write().await;
-                            let idx = list.iter().position(|r| match_peer_token(&peer, r.peer));
+                            let idx = list
+                                .iter()
+                                .position(|r| match_peer_token(&book, &peer, r.peer));
                             idx.map(|i| list.remove(i))
                         };
                         publish_pending(&hooks.state, &ringing).await;
@@ -362,7 +367,9 @@ pub async fn run_tun_phone(
                     CallCmd::Reject { peer } => {
                         let taken = {
                             let mut list = ringing.write().await;
-                            let idx = list.iter().position(|r| match_peer_token(&peer, r.peer));
+                            let idx = list
+                                .iter()
+                                .position(|r| match_peer_token(&book, &peer, r.peer));
                             idx.map(|i| list.remove(i))
                         };
                         publish_pending(&hooks.state, &ringing).await;
@@ -488,24 +495,32 @@ async fn phone_run_peer(
     );
 
     {
-        let mut map = peers.write().await;
-        if map.values().any(|p| p.vip == peer_vip) {
+        let claimed = peers.load().values().any(|p| p.vip == peer_vip);
+        if claimed {
             bail!(tr_fmt!(
                 "virtual IP {0} is already claimed by another peer",
                 peer_vip
             ));
         }
-        map.insert(
-            peer_id,
-            ActivePeer {
-                id: peer_id,
-                vip: peer_vip,
-                outbound: out_tx,
-            },
-        );
+        peers.rcu(|map| {
+            let mut next = (**map).clone();
+            next.insert(
+                peer_id,
+                ActivePeer {
+                    id: peer_id,
+                    vip: peer_vip,
+                    outbound: out_tx.clone(),
+                },
+            );
+            next
+        });
     }
     if let Err(e) = add_peer_route(&tun_name, peer_vip, own_vip) {
-        peers.write().await.remove(&peer_id);
+        peers.rcu(|map| {
+            let mut next = (**map).clone();
+            next.remove(&peer_id);
+            next
+        });
         return Err(e);
     }
 
@@ -548,7 +563,11 @@ async fn phone_run_peer(
         }
     }
 
-    peers.write().await.remove(&peer_id);
+    peers.rcu(|map| {
+        let mut next = (**map).clone();
+        next.remove(&peer_id);
+        next
+    });
     refresh_active_peers(&hooks.state, &peers).await;
     if let Err(e) = del_peer_route(&tun_name, peer_vip) {
         warn!(%peer_id, error = %e, "{}", tr!("could not remove peer route"));

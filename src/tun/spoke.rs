@@ -3,6 +3,7 @@
 use super::*;
 
 /// Spoke-side mesh table: hub fallback + optional direct peer connections.
+#[derive(Clone)]
 struct SpokeMesh {
     #[allow(dead_code)]
     own_id: EndpointId,
@@ -44,7 +45,15 @@ impl SpokeMesh {
     }
 }
 
-type SharedSpokeMesh = Arc<RwLock<SpokeMesh>>;
+type SharedSpokeMesh = Arc<arc_swap::ArcSwap<SpokeMesh>>;
+
+fn mesh_update(mesh: &SharedSpokeMesh, f: impl FnOnce(&mut SpokeMesh)) {
+    // Infrequent join/leave path: clone snapshot, mutate, store. Packet path
+    // only `load()`s and never waits.
+    let mut next = (*mesh.load_full()).clone();
+    f(&mut next);
+    mesh.store(Arc::new(next));
+}
 
 fn spawn_conn_sender(
     tun: TunIo,
@@ -85,9 +94,10 @@ async fn spoke_install_direct(
         raise_gate,
     );
     {
-        let mut g = mesh.write().await;
-        g.roster.insert(peer_id, peer_vip);
-        g.direct.insert(peer_vip, tx);
+        mesh_update(mesh, |g| {
+            g.roster.insert(peer_id, peer_vip);
+            g.direct.insert(peer_vip, tx);
+        });
     }
     info!(%peer_id, %peer_vip, path = path_label(&conn), "{}", tr!("direct mesh link ready"));
     // Read datagrams from this direct link into TUN.
@@ -111,8 +121,9 @@ async fn spoke_install_direct(
                 }
             }
         }
-        let mut g = mesh_drop.write().await;
-        g.direct.remove(&peer_vip_c);
+        mesh_update(&mesh_drop, |g| {
+            g.direct.remove(&peer_vip_c);
+        });
         info!(%peer_id, %peer_vip_c, "{}", tr!("direct mesh link closed"));
     });
 }
@@ -139,11 +150,8 @@ async fn spoke_try_dial_peer(
     if !should_dial(own_id, entry.id) {
         return;
     }
-    {
-        let g = mesh.read().await;
-        if g.direct.contains_key(&entry.vip) {
-            return;
-        }
+    if mesh.load().direct.contains_key(&entry.vip) {
+        return;
     }
     let dial = EndpointAddr::from(entry.id);
     match endpoint.connect(dial, TUN_ALPN).await {
@@ -203,7 +211,9 @@ async fn spoke_apply_roster_msg(
                 if e.id == own_id {
                     continue;
                 }
-                mesh.write().await.roster.insert(e.id, e.vip);
+                mesh_update(&mesh, |g| {
+                    g.roster.insert(e.id, e.vip);
+                });
                 let ep = endpoint.clone();
                 let mesh = Arc::clone(&mesh);
                 let tun = tun.clone();
@@ -231,7 +241,9 @@ async fn spoke_apply_roster_msg(
             if e.id == own_id {
                 return;
             }
-            mesh.write().await.roster.insert(e.id, e.vip);
+            mesh_update(&mesh, |g| {
+                g.roster.insert(e.id, e.vip);
+            });
             if !quiet {
                 println!(
                     "{}",
@@ -252,9 +264,10 @@ async fn spoke_apply_roster_msg(
             ));
         }
         RosterMsg::Left(e) => {
-            let mut g = mesh.write().await;
-            g.roster.remove(&e.id);
-            g.direct.remove(&e.vip);
+            mesh_update(&mesh, |g| {
+                g.roster.remove(&e.id);
+                g.direct.remove(&e.vip);
+            });
             info!(peer = %e.id, vip = %e.vip, "{}", tr!("mesh peer left"));
         }
     }
@@ -409,7 +422,9 @@ async fn run_tun_connect_inner(
     }
     let (tun_io, mut from_tun) = spawn_tun_io(tun, mtu);
     let raise_gate = new_mtu_raise_gate();
-    let mesh: SharedSpokeMesh = Arc::new(RwLock::new(SpokeMesh::new(own_id, own_vip)));
+    let mesh: SharedSpokeMesh = Arc::new(arc_swap::ArcSwap::from_pointee(SpokeMesh::new(
+        own_id, own_vip,
+    )));
 
     // Long-lived TUN → mesh demux (hub and direct outs live in SpokeMesh).
     {
@@ -420,7 +435,7 @@ async fn run_tun_connect_inner(
                 if dst == own_vip {
                     continue;
                 }
-                let out = mesh_d.read().await.lookup_out(dst);
+                let out = mesh_d.load().lookup_out(dst);
                 if let Some(tx) = out {
                     let _ = tx.try_send(pkt);
                 }
@@ -569,10 +584,11 @@ async fn run_tun_connect_inner(
                 Arc::clone(&raise_gate),
             );
             {
-                let mut g = mesh.write().await;
-                g.hub_vip = Some(hub_vip);
-                g.hub_out = Some(hub_tx);
-                g.roster.insert(hub_id, hub_vip);
+                mesh_update(&mesh, |g| {
+                    g.hub_vip = Some(hub_vip);
+                    g.hub_out = Some(hub_tx);
+                    g.roster.insert(hub_id, hub_vip);
+                });
             }
 
             if !connected_once {
@@ -591,8 +607,7 @@ async fn run_tun_connect_inner(
 
             if let Some(h) = &hooks {
                 let peers: Vec<CtlPeer> = mesh
-                    .read()
-                    .await
+                    .load()
                     .roster
                     .iter()
                     .map(|(id, vip)| CtlPeer {
@@ -699,7 +714,7 @@ async fn run_tun_connect_inner(
 
             roster_task.abort();
             hub_read.abort();
-            mesh.write().await.clear_hub();
+            mesh_update(&mesh, |g| g.clear_hub());
             Ok::<_, anyhow::Error>((end, true))
         }
         .await;

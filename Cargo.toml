@@ -54,6 +54,8 @@ serde_json = "1"
 toml = "0.8"
 # Exclusive lock for TUN daemon lifetime (cross-platform).
 fslock = "0.2"
+# Lock-free snapshot swaps for TUN peer tables (read on every packet).
+arc-swap = "1"
 
 # Unix: setsid in the TUN daemon worker (detach from controlling terminal);
 # safe umask around control-socket bind (never born with broad perms).

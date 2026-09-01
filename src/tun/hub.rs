@@ -15,7 +15,7 @@ struct HubPeer {
     hidden: bool,
 }
 
-type HubPeers = Arc<RwLock<HashMap<Ipv4Addr, HubPeer>>>;
+type HubPeers = Arc<arc_swap::ArcSwap<HashMap<Ipv4Addr, HubPeer>>>;
 /// Control-stream writers for roster push (one per spoke).
 type RosterFans = Arc<RwLock<HashMap<EndpointId, mpsc::Sender<Bytes>>>>;
 
@@ -32,7 +32,7 @@ async fn broadcast_roster(fans: &RosterFans, msg: Bytes) {
 }
 
 /// Roster entries visible to other spokes (hub always included; hidden peers omitted).
-async fn hub_roster_snapshot(
+fn hub_roster_snapshot(
     own_id: EndpointId,
     own_vip: Ipv4Addr,
     peers: &HubPeers,
@@ -41,7 +41,7 @@ async fn hub_roster_snapshot(
         vip: own_vip,
         id: own_id,
     }];
-    for (vip, p) in peers.read().await.iter() {
+    for (vip, p) in peers.load().iter() {
         if p.hidden {
             continue;
         }
@@ -66,10 +66,7 @@ async fn hub_tun_to_peers(
         if dst == own_vip || !vip_in_mesh(dst) {
             continue;
         }
-        let peer = {
-            let map = peers.read().await;
-            map.get(&dst).cloned()
-        };
+        let peer = peers.load().get(&dst).cloned();
         let Some(peer) = peer else {
             tracing::debug!(%dst, "no hub peer for destination VIP; dropping");
             continue;
@@ -108,10 +105,7 @@ async fn hub_peer_to_mesh(
                         if !vip_in_mesh(dst) || dst == peer_vip {
                             continue;
                         }
-                        let other = {
-                            let map = peers.read().await;
-                            map.get(&dst).cloned()
-                        };
+                        let other = peers.load().get(&dst).cloned();
                         let Some(other) = other else {
                             tracing::debug!(%dst, "no hub peer for forwarded VIP; dropping");
                             continue;
@@ -209,7 +203,7 @@ pub async fn run_tun_serve(
     }
     let (tun_io, from_tun) = spawn_tun_io(tun, mtu);
     let raise_gate = new_mtu_raise_gate();
-    let peers: HubPeers = Arc::new(RwLock::new(HashMap::new()));
+    let peers: HubPeers = Arc::new(arc_swap::ArcSwap::from_pointee(HashMap::new()));
     let fans: RosterFans = Arc::new(RwLock::new(HashMap::new()));
 
     tokio::spawn(hub_tun_to_peers(from_tun, own_vip, Arc::clone(&peers)));
@@ -394,27 +388,35 @@ async fn hub_run_spoke(
     );
 
     {
-        let mut map = peers.write().await;
-        if map.contains_key(&peer_vip) {
+        let occupied = peers.load().contains_key(&peer_vip);
+        if occupied {
             bail!(tr_fmt!(
                 "virtual IP {0} is already claimed by another peer",
                 peer_vip
             ));
         }
-        map.insert(
-            peer_vip,
-            HubPeer {
-                id: peer_id,
-                conn: conn.clone(),
-                outbound: out_tx,
-                hidden,
-            },
-        );
+        peers.rcu(|map| {
+            let mut next = (**map).clone();
+            next.insert(
+                peer_vip,
+                HubPeer {
+                    id: peer_id,
+                    conn: conn.clone(),
+                    outbound: out_tx.clone(),
+                    hidden,
+                },
+            );
+            next
+        });
     }
     fans.write().await.insert(peer_id, fan_tx);
 
     if let Err(e) = add_peer_route(&tun_name, peer_vip, own_vip) {
-        peers.write().await.remove(&peer_vip);
+        peers.rcu(|map| {
+            let mut next = (**map).clone();
+            next.remove(&peer_vip);
+            next
+        });
         fans.write().await.remove(&peer_id);
         return Err(e);
     }
@@ -438,7 +440,7 @@ async fn hub_run_spoke(
     }
 
     // Snapshot to the new spoke, then Joined to everyone else (skip if hidden).
-    let snap = hub_roster_snapshot(own_id, own_vip, &peers).await;
+    let snap = hub_roster_snapshot(own_id, own_vip, &peers);
     let _ = write_msg(&mut ctrl_send, &encode_snapshot(&snap)).await;
     if !hidden {
         let joined = Bytes::from(encode_joined(&RosterEntry {
@@ -474,7 +476,11 @@ async fn hub_run_spoke(
     hub_peer_to_mesh(tun, own_vip, Arc::clone(&peers), peer_vip, hub_peer).await;
 
     ctrl_send_task.abort();
-    peers.write().await.remove(&peer_vip);
+    peers.rcu(|map| {
+        let mut next = (**map).clone();
+        next.remove(&peer_vip);
+        next
+    });
     fans.write().await.remove(&peer_id);
     if !hidden {
         let left = Bytes::from(encode_left(&RosterEntry {
@@ -494,7 +500,7 @@ async fn hub_run_spoke(
 }
 
 async fn refresh_hub_peers_state(state: &TunLiveState, peers: &HubPeers) {
-    let map = peers.read().await;
+    let map = peers.load_full();
     let list: Vec<CtlPeer> = map
         .iter()
         .map(|(vip, p)| CtlPeer {
