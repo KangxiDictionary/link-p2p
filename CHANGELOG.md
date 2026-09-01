@@ -39,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `macros`).
 - TUN datagram / control mpsc depths are named constants (`TUN_PKT_QUEUE` /
   `TUN_CTRL_QUEUE`) instead of scattered `256` / `32` literals.
+- OS TUN device/route/MTU ops live behind `tun::platform::TunPlatform`
+  (`linux` / `macos` / `windows`); `tun/mod.rs` keeps thin wrappers only.
+- `contact` / `config` subcommands moved to `commands/` (alongside serve/
+  connect/ping).
+- TUN recv path reads into a reusable `BytesMut` (no per-packet
+  `copy_from_slice`); peer sender tasks get a `tun_peer_sender` tracing span.
 
 ## [0.3.0] - 2026-08-31
 

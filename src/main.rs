@@ -72,16 +72,18 @@ pub(crate) use runtime::{
 use std::io::{IsTerminal, Write};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches};
 use iroh::SecretKey;
 use tracing::{info, warn};
 
 use crate::cli::{
-    localized_command, Cli, Command, ConfigCommand, ConnectMode, ContactCommand, LogFormat,
-    OutputFormat, TunCommand, TunServiceCommand,
+    localized_command, Cli, Command, ConnectMode, LogFormat, OutputFormat, TunCommand,
+    TunServiceCommand,
 };
+use crate::commands::config::run_config;
 use crate::commands::connect::run_connect;
+use crate::commands::contact::run_contact;
 use crate::commands::ping::run_ping;
 use crate::commands::serve::run_serve;
 use crate::i18n::{tr, tr_fmt};
@@ -831,88 +833,8 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
             )
             .await
         }
-        Command::Contact { command } => match command {
-            ContactCommand::Add { name, id } => {
-                let path = contacts::contacts_path();
-                let mut book = contacts::load(&path)?;
-                let eid = contacts::parse_endpoint_token(&id)?;
-                book.contacts.insert(
-                    name.clone(),
-                    contacts::Contact {
-                        id: eid.to_string(),
-                        relays: Vec::new(),
-                        addrs: Vec::new(),
-                    },
-                );
-                contacts::save(&path, &book)?;
-                let code = contacts::encode_short_code(eid);
-                ui.line(styler.ok(&tr_fmt!(
-                    "saved contact {0} → {1}",
-                    name,
-                    code
-                )));
-                ui.line(styler.dim(&tr_fmt!(
-                    "next: link-p2p call --to {0} --listen 127.0.0.1:2222 --forward 127.0.0.1:22",
-                    name
-                )));
-                Ok(())
-            }
-            ContactCommand::Remove { name } => {
-                let path = contacts::contacts_path();
-                let mut book = contacts::load(&path)?;
-                if book.contacts.remove(&name).is_none() {
-                    bail!(tr_fmt!("no contact named '{0}'", name));
-                }
-                contacts::save(&path, &book)?;
-                ui.line(styler.ok(&tr_fmt!("removed contact {0}", name)));
-                Ok(())
-            }
-            ContactCommand::List => {
-                let book = contacts::load(&contacts::contacts_path())?;
-                if book.contacts.is_empty() {
-                    ui.line(styler.dim(&tr!("no contacts yet — use `contact add` or pair a short code")));
-                } else {
-                    // Machine-readable TSV for scripts (`name\tid`), like
-                    // `contact code` / `ping --format json`: always stdout,
-                    // not via `ui.line` — quiet must not suppress data output.
-                    for (name, c) in &book.contacts {
-                        println!("{name}\t{}", c.id);
-                    }
-                }
-                Ok(())
-            }
-            ContactCommand::Code => {
-                // Machine-readable identity lines for scripts / pairing —
-                // always stdout, even under `-q` (same rule as ENDPOINT_ID=).
-                let id = secret_key.public();
-                println!("ENDPOINT_ID={id}");
-                println!("SHORT_CODE={}", contacts::encode_short_code(id));
-                Ok(())
-            }
-        },
-        Command::Config { command } => match command {
-            ConfigCommand::Path => {
-                // Machine-readable path for scripts — always stdout.
-                println!("{}", config::config_path().display());
-                Ok(())
-            }
-            ConfigCommand::Init { force } => {
-                let path = config::config_path();
-                if path.exists() && !force {
-                    return Err(exit::coded(
-                        exit::USAGE,
-                        anyhow::anyhow!(tr_fmt!(
-                            "config already exists at {0} (use --force to overwrite)",
-                            path.display()
-                        )),
-                    ));
-                }
-                let cfg = config::UserConfig::default();
-                config::save(&path, &cfg)?;
-                ui.line(styler.ok(&tr_fmt!("wrote {0}", path.display())));
-                Ok(())
-            }
-        },
+        Command::Contact { command } => run_contact(command, secret_key, ui, styler),
+        Command::Config { command } => run_config(command, ui, styler),
         Command::Completions { .. }
         | Command::Help { .. }
         | Command::Stats { .. }
