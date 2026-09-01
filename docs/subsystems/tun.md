@@ -19,8 +19,13 @@ spoke C ──QUIC──┘    fallback)        │
 
 | Role | Command | Responsibility |
 |---|---|---|
-| Hub | `tun serve` | Accept peers, broadcast VIP↔EndpointId roster, forward when direct path missing |
-| Spoke | `tun connect --to <hub>` | Join mesh, install `/16` route, dial other spokes when roster updates |
+| Hub | `tun serve` / `tun up --role hub` | Accept peers, broadcast VIP↔EndpointId roster, forward when direct path missing |
+| Spoke | `tun join <hub>` / `tun connect --to <hub>` | Join mesh, install `/16` route, dial other spokes when roster updates |
+| Phone | `tun call <peer>` / `tun up --role phone` | 1:1 TUN; contacts auto-accept; unknowns ring → `tun call accept\|reject` |
+
+**Spoke visibility:** `tun join --hidden` (or `tun up --to … --hidden`) tells the
+hub not to put you on other spokes' rosters. The hub still routes your traffic;
+other spokes cannot learn your VIP↔id to dial you directly.
 
 **Behavior:**
 
@@ -110,10 +115,13 @@ single-process blocking CLIs.
 | Command | Role |
 |---|---|
 | `tun up … [--system]` | Ad-hoc background (Unix) or foreground; `--system` for supervisors |
+| `tun join <hub>` | Sugar for spoke `tun up --to <hub>` |
+| `tun call …` / `tun ring` | Phone-mode dial / accept / reject / list pending (ctl v2) |
 | `tun down [--system]` | Graceful shutdown (idempotent) |
-| `tun status` / `tun peers` | Queries (`--format text\|json`, `--system`) |
+| `tun status` / `tun peers` | Queries (`--format text\|json`, `--system`; status includes `pending_calls`) |
 
 `tun serve` / `tun connect` = `tun up --foreground` (ad-hoc paths only).
+Control protocol version is **2** (`Call` / `Accept` / `Reject` + `pending_calls`).
 
 #### Runtime modes (`RuntimeMode` in `src/tun_ctl.rs`)
 

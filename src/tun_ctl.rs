@@ -220,11 +220,11 @@ pub fn windows_system_pipe_name() -> String {
 pub const CTL_MAGIC: &[u8; 4] = b"LPC1";
 
 /// Protocol version. Bump when request/response shapes are incompatible.
-pub const CTL_VERSION: u8 = 1;
+pub const CTL_VERSION: u8 = 2;
 
 /// Oldest protocol version this binary will speak. Frames below this are
 /// rejected as unsupported (not merely "older than CLI").
-pub const MIN_SUPPORTED_VERSION: u8 = 1;
+pub const MIN_SUPPORTED_VERSION: u8 = 2;
 
 /// Max JSON body size (1 MiB) — peers lists stay small; this caps abuse.
 pub const CTL_MAX_BODY: u32 = 1024 * 1024;
@@ -265,12 +265,36 @@ impl From<&RosterEntry> for CtlPeer {
     }
 }
 
+/// Inbound/outbound call waiting for a decision or completion (phone mode).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCall {
+    /// EndpointId hex of the other party.
+    pub peer: String,
+    /// Unix milliseconds when the call entered pending.
+    pub since_unix_ms: u64,
+    /// `"in"` (remote dialed us) or `"out"` (we dialed them).
+    pub direction: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum CtlRequest {
     Status,
     Peers,
     Shutdown,
+    /// Phone mode: ask the daemon to dial `to` (contact / id / short code).
+    /// Returns immediately; watch [`CtlResponse::Status::pending_calls`] / peers.
+    Call {
+        to: String,
+    },
+    /// Accept a pending inbound call (`peer` = EndpointId hex or short code).
+    Accept {
+        peer: String,
+    },
+    /// Reject / cancel a pending call.
+    Reject {
+        peer: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,6 +311,9 @@ pub enum CtlResponse {
         /// system mode keeps it in memory only.
         #[serde(default)]
         session: String,
+        /// Phone-mode ringing / outbound waits. Empty on hub/spoke.
+        #[serde(default)]
+        pending_calls: Vec<PendingCall>,
     },
     Peers {
         peers: Vec<CtlPeer>,
@@ -641,6 +668,15 @@ mod tests {
             CtlRequest::Status,
             CtlRequest::Peers,
             CtlRequest::Shutdown,
+            CtlRequest::Call {
+                to: "alice".into(),
+            },
+            CtlRequest::Accept {
+                peer: "deadbeef".into(),
+            },
+            CtlRequest::Reject {
+                peer: "deadbeef".into(),
+            },
         ];
         for req in &reqs {
             let frame = encode_request(req).unwrap();
@@ -662,6 +698,7 @@ mod tests {
                 vip: Ipv4Addr::new(172, 24, 0, 1),
                 path_kind: "direct".into(),
                 session: "abc".into(),
+                pending_calls: vec![],
             },
             CtlResponse::Peers { peers },
             CtlResponse::Ok,
@@ -727,7 +764,7 @@ mod tests {
         // Encode with a fake lower version in the header.
         let body = serde_json::to_vec(&CtlRequest::Status).unwrap();
         let mut frame = encode_frame(CTL_VERSION, &body).unwrap();
-        frame[4] = 0; // below MIN_SUPPORTED_VERSION (1)
+        frame[4] = 0; // below MIN_SUPPORTED_VERSION
         let err = decode_request_frame(&frame).unwrap_err();
         assert_eq!(exit::code_from(&err), exit::USAGE);
         let msg = format!("{err:#}");

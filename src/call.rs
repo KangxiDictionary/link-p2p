@@ -78,7 +78,11 @@ pub async fn run_call(
     let mut addrs = to_addr;
     addrs.extend(peer.addrs.iter().copied());
 
-    ui.line(styler.info(&tr_fmt!("calling {0}...", label)));
+    if let Some(name) = &peer.name {
+        ui.line(styler.info(&tr_fmt!("calling contact {0}...", name)));
+    } else {
+        ui.line(styler.info(&tr_fmt!("calling {0}...", label)));
+    }
     let relays = relay_probe::order_by_connect_latency(&relays).await;
 
     // Know the role before bind: dialer must NOT register accept ALPNs / Router
@@ -90,10 +94,7 @@ pub async fn run_call(
     } else {
         tr!("we wait for peer to dial (EndpointId tie-break)")
     }));
-    ui.line(styler.dim(&tr_fmt!(
-        "your short code: {0}",
-        contacts::encode_short_code(own_id)
-    )));
+    contacts::hint_share_identity(ui, &styler, own_id);
 
     let builder = build_endpoint(
         secret_key,
@@ -120,7 +121,7 @@ pub async fn run_call(
         )
     })?;
     // Machine-readable for scripts / ignored integration tests (same as serve).
-    println!("ENDPOINT_ID={}", endpoint.id());
+    contacts::print_machine_identity(endpoint.id());
     bring_endpoint_online(&endpoint, &relays, no_n0).await?;
 
     let slot = ConnSlot::new(None);
@@ -162,7 +163,9 @@ pub async fn run_call(
             .map_err(|e| {
                 exit::coded(
                     exit::CONNECT,
-                    anyhow::Error::new(e).context(tr!("connecting to remote endpoint")),
+                    anyhow::Error::new(e).context(tr!(
+                        "connecting to remote endpoint — if this fails or hangs, run: link-p2p selftest"
+                    )),
                 )
             })?;
         install_dialer_session(
@@ -208,6 +211,7 @@ pub async fn run_call(
         }
     }
     ui.line(styler.ok(&tr_fmt!("connected to {0}", label)));
+    contacts::hint_save_contact(ui, &styler, &peer);
 
     let result = match local {
         CallLocal::Listen(addr) => run_local_listen(addr, &slot, semaphore, ui, styler).await,
@@ -255,6 +259,7 @@ fn install_dialer_session(
             relay_only,
             styler,
             quiet,
+            "call",
         )),
     );
     let next_forward = forward.map(|target| {
@@ -568,6 +573,7 @@ impl ProtocolHandler for CallAcceptHandler {
                 self.relay_only,
                 self.styler,
                 self.quiet,
+                "call",
             )),
         );
         // Always prefer the newest inbound connection (covers peer redial

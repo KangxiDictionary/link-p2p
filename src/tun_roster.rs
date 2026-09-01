@@ -17,6 +17,10 @@ pub const ROSTER_MAGIC: &[u8; 4] = b"LPR2";
 pub const MSG_SNAPSHOT: u8 = 1;
 pub const MSG_JOINED: u8 = 2;
 pub const MSG_LEFT: u8 = 3;
+/// Spoke → hub after opening the control stream: visibility flags.
+pub const MSG_HELLO: u8 = 4;
+/// Bit 0 of HELLO flags: omit this spoke from roster broadcasts to others.
+pub const HELLO_FLAG_HIDDEN: u8 = 0x01;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RosterEntry {
@@ -41,6 +45,27 @@ impl RosterEntry {
             .context(tr!("invalid EndpointId in roster"))?;
         Ok((Self { vip, id }, 36))
     }
+}
+
+pub fn encode_hello(hidden: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(6);
+    out.extend_from_slice(ROSTER_MAGIC);
+    out.push(MSG_HELLO);
+    out.push(if hidden { HELLO_FLAG_HIDDEN } else { 0 });
+    out
+}
+
+/// Read a spoke HELLO; returns whether the spoke asked to stay hidden.
+pub async fn read_hello<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<bool> {
+    let mut hdr = [0u8; 6];
+    r.read_exact(&mut hdr).await?;
+    if &hdr[..4] != ROSTER_MAGIC {
+        bail!(tr!("bad roster magic"));
+    }
+    if hdr[4] != MSG_HELLO {
+        bail!(tr_fmt!("expected roster HELLO, got type {0}", hdr[4]));
+    }
+    Ok(hdr[5] & HELLO_FLAG_HIDDEN != 0)
 }
 
 pub fn encode_snapshot(entries: &[RosterEntry]) -> Vec<u8> {
@@ -168,6 +193,16 @@ mod tests {
         ];
         let bytes = encode_snapshot(&entries);
         assert_eq!(decode_snapshot_sync(&bytes), entries);
+    }
+
+    #[test]
+    fn hello_hidden_flag_roundtrip() {
+        let bytes = encode_hello(true);
+        assert_eq!(&bytes[..4], ROSTER_MAGIC);
+        assert_eq!(bytes[4], MSG_HELLO);
+        assert_eq!(bytes[5] & HELLO_FLAG_HIDDEN, HELLO_FLAG_HIDDEN);
+        let bytes = encode_hello(false);
+        assert_eq!(bytes[5] & HELLO_FLAG_HIDDEN, 0);
     }
 
     #[test]

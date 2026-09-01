@@ -1403,17 +1403,17 @@ msgstr ""
 msgid "Disable and remove the TUN system service."
 msgstr "禁用并移除 TUN 系统服务。"
 
-msgid "`hub` or `spoke`. Default: spoke if `--to` is set, otherwise hub."
-msgstr "`hub` 或 `spoke`。默认：若设置了 `--to` 则为 spoke，否则为 hub。"
+msgid "`hub`, `spoke`, or `phone`. Default: spoke if `--to` is set, otherwise hub."
+msgstr "`hub`、`spoke` 或 `phone`。默认：若设置了 `--to` 则为 spoke，否则为 hub。"
 
 msgid ""
 "Make machines reachable at the IP layer over QUIC datagrams.\n"
 "\n"
-"Creates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). Preferred day-to-day commands: `tun up` / `tun down` / `tun status` / `tun peers`. Foreground debug aliases remain: `tun serve` (hub) and `tun connect` (spoke) — same as `tun up --foreground --role hub|spoke`. Prefer `--cc bbr3` on lossy paths. Virtual IPs are IPv4 only — see docs/subsystems/tun.md."
+"Creates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). Preferred day-to-day commands: `tun call` (1:1 phone), `tun join <hub>` (mesh channel), `tun status` / `tun peers` / `tun down`. Also `tun up --role phone|hub|spoke`. Foreground aliases: `tun serve` / `tun connect`. Prefer `--cc bbr3` on lossy paths. Virtual IPs are IPv4 only — see docs/subsystems/tun.md."
 msgstr ""
 "通过 QUIC datagram 在 IP 层打通整机互通。\n"
 "\n"
-"创建 TUN 接口（Linux/macOS 需要 root / CAP_NET_ADMIN；Windows 需要管理员与二进制旁的 wintun.dll）。日常优先用 `tun up` / `tun down` / `tun status` / `tun peers`。前台调试别名仍可用：`tun serve`（hub）与 `tun connect`（spoke）——等同 `tun up --foreground --role hub|spoke`。丢包路径建议 `--cc bbr3`。虚拟 IP 仅 IPv4——见 docs/subsystems/tun.md。"
+"创建 TUN 接口（Linux/macOS 需要 root / CAP_NET_ADMIN；Windows 需要管理员与二进制旁的 wintun.dll）。日常优先用 `tun call`（点对点电话）、`tun join <hub>`（加入网络频道）、`tun status` / `tun peers` / `tun down`。也可用 `tun up --role phone|hub|spoke`。前台别名：`tun serve` / `tun connect`。丢包路径建议 `--cc bbr3`。虚拟 IP 仅 IPv4——见 docs/subsystems/tun.md。"
 
 msgid "Start the TUN mesh daemon (or run foreground with --foreground)."
 msgstr "启动 TUN mesh daemon（或用 --foreground 前台运行）。"
@@ -1423,7 +1423,7 @@ msgid ""
 "\n"
 "Without `--foreground`, spawns a background daemon and returns after it is ready (Unix today; on Windows use `--foreground`). With `--foreground`, blocks like `tun serve` / `tun connect` (same code paths).\n"
 "\n"
-"Role defaults: if `--to` is set, role is `spoke`; otherwise `hub`. Do not pass `--role hub` together with `--to`. `--role spoke` requires `--to <hub EndpointId>`.\n"
+"Role defaults: if `--to` is set, role is `spoke`; otherwise `hub`. Roles: `hub`, `spoke`, `phone`. Do not pass `--role hub`/`phone` together with `--to`. `--role spoke` requires `--to <hub>`.\n"
 "\n"
 "Already-running daemon → usage error (exit 2). Ready timeout → exit 4 (check tun.log). Init failure reported by the child → exit 3."
 msgstr ""
@@ -1431,7 +1431,7 @@ msgstr ""
 "\n"
 "不加 `--foreground` 时在后台拉起 daemon，就绪后返回（目前 Unix；Windows 请用 `--foreground`）。加 `--foreground` 时像 `tun serve` / `tun connect` 一样阻塞（同一代码路径）。\n"
 "\n"
-"角色默认：有 `--to` 则为 `spoke`，否则 `hub`。不要同时传 `--role hub` 与 `--to`。`--role spoke` 需要 `--to <hub EndpointId>`。\n"
+"角色默认：有 `--to` 则为 `spoke`，否则 `hub`。可选角色：`hub`、`spoke`、`phone`。不要把 `--role hub`/`phone` 与 `--to` 一起用。`--role spoke` 需要 `--to <hub>`。\n"
 "\n"
 "已在运行 → 用法错误（退出码 2）。就绪超时 → 退出码 4（查看 tun.log）。子进程初始化失败 → 退出码 3。"
 
@@ -1677,3 +1677,132 @@ msgstr "正在运行 netsh advfirewall 删除入站规则"
 
 msgid "netsh failed to delete firewall rule {0} (exit {1})"
 msgstr "netsh 删除防火墙规则 {0} 失败（退出码 {1}）"
+
+msgid "Show local direct-vs-relay path history."
+msgstr "显示本地直连/中继路径历史。"
+
+msgid "Aggregates samples written by ping and by connect/call/tun sessions when a connection closes (path kind + time-to-direct). Share ~/.config/link-p2p/path-stats.jsonl when debugging NAT — no lab required."
+msgstr "汇总 ping 以及 connect/call/tun 会话结束时写入的样本（路径类型与打洞耗时）。排查 NAT 时可分享 ~/.config/link-p2p/path-stats.jsonl，无需实验室。"
+
+msgid "How many recent samples to include (default 100)."
+msgstr "包含最近多少条样本（默认 100）。"
+
+msgid "Host diagnostics: relay TCP probe and loopback echo (no identity)."
+msgstr "主机自检：中继 TCP 探测与回环回显（无需身份密钥）。"
+
+msgid "Run before first serve/connect/call when a dial times out. TCP-probes each --relay URL (note: TCP ok does not prove UDP/QUIC), then a loopback echo. Pass --tun for wintun/system-identity checks (same as tun selftest)."
+msgstr "首次 serve/connect/call 超时前可先运行。对每个 --relay URL 做 TCP 探测（注意：TCP 通不代表 UDP/QUIC 通），再做回环回显。加 --tun 则含 wintun/系统身份目录检查（等同 tun selftest）。"
+
+msgid "Skip the loopback TCP echo drain."
+msgstr "跳过回环 TCP 回显检查。"
+
+msgid "Also run TUN-oriented checks (wintun path, system identity directory)."
+msgstr "同时运行 TUN 相关检查（wintun 路径、系统身份目录）。"
+
+msgid "link-p2p path stats"
+msgstr "link-p2p 路径统计"
+
+msgid "file: {0} (last {1} samples)"
+msgstr "文件：{0}（最近 {1} 条样本）"
+
+msgid "no samples yet — run `ping` or a connect/call session first"
+msgstr "尚无样本 — 请先运行 ping 或一次 connect/call 会话"
+
+msgid "direct {0}/{1} ({2:.0}%)  relay {3}  relay+candidate {4}  unknown {5}"
+msgstr "直连 {0}/{1}（{2:.0}%）  中继 {3}  中继+候选 {4}  未知 {5}"
+
+msgid "link-p2p selftest"
+msgstr "link-p2p 自检"
+
+msgid "probing --relay URL(s) over TCP (2s timeout; TCP ok ≠ UDP/QUIC path):"
+msgstr "正在对 --relay URL 做 TCP 探测（2 秒超时；TCP 通 ≠ UDP/QUIC 路径）："
+
+msgid "tip: save them so next time is just a name:\n  link-p2p contact add <nickname> {0}"
+msgstr "提示：存成联系人后下次只记名字：\n  link-p2p contact add <昵称> {0}"
+
+msgid "give the other peer your SHORT_CODE (or ENDPOINT_ID); both sides run the same `call`:"
+msgstr "把你的 SHORT_CODE（或 ENDPOINT_ID）发给对方；两边跑同一条 `call`："
+
+msgid "calling contact {0}..."
+msgstr "正在呼叫联系人 {0}…"
+
+msgid "dialing contact {0}..."
+msgstr "正在拨号联系人 {0}…"
+
+msgid "your identity (give SHORT_CODE to peers; both can `call --to` each other):"
+msgstr "你的身份（把 SHORT_CODE 给对方；两边都可 `call --to`）："
+
+msgid "connecting to remote endpoint — if this fails or hangs, run: link-p2p selftest"
+msgstr "连接远端失败或卡住时，请运行：link-p2p selftest"
+
+msgid "next: link-p2p call --to {0} --listen 127.0.0.1:2222 --forward 127.0.0.1:22"
+msgstr "下一步：link-p2p call --to {0} --listen 127.0.0.1:2222 --forward 127.0.0.1:22"
+
+msgid "Contact name, EndpointId, or short code. Use `-` to read one line from stdin. Also `LINK_P2P_TO`."
+msgstr "联系人名称、EndpointId 或短码。用 `-` 从 stdin 读一行。也可用 `LINK_P2P_TO`。"
+
+msgid "Contact name, EndpointId, or short code. Also `LINK_P2P_TO`."
+msgstr "联系人名称、EndpointId 或短码。也可用 `LINK_P2P_TO`。"
+
+msgid "EndpointId hex or short code (from the peer's SHORT_CODE= line)."
+msgstr "EndpointId 十六进制或短码（来自对方的 SHORT_CODE= 行）。"
+
+msgid "Best first-time path: both sides run the same `call` with each other's SHORT_CODE (printed at start). After it connects once, `contact add <name> <short-code>` — next time use `--to <name>`. Prefer this over juggling separate serve/connect roles."
+msgstr "最佳上手路径：两边用对方启动时打印的 SHORT_CODE 跑同一条 `call`。连通一次后执行 `contact add <名字> <短码>`，以后 `--to <名字>` 即可。优先用这条，而不是分别跑 serve/connect。"
+
+msgid "dialing with address hint(s): {0}"
+msgstr "使用地址提示拨号：{0}"
+
+msgid "Spoke only: join without appearing on other spokes' rosters (hub still knows you)."
+msgstr "仅 spoke：加入时不出现在其他 spoke 的名单里（hub 仍认识你）。"
+
+msgid "Join a hub mesh channel (alias for `tun up --to <hub>`)."
+msgstr "加入 hub mesh 频道（`tun up --to <hub>` 的别名）。"
+
+msgid "Join without appearing on other spokes' rosters (hub still knows you)."
+msgstr "加入时不出现在其他 spoke 的名单里（hub 仍认识你）。"
+
+msgid "Run in the foreground instead of daemonizing."
+msgstr "前台运行而不 daemonize。"
+
+msgid "Use system-service paths. Requires `--foreground`."
+msgstr "使用系统服务路径。需要 `--foreground`。"
+
+msgid "Phone-mode TUN call: dial a peer, or accept/reject a ringing call."
+msgstr "电话模式 TUN 呼叫：拨号，或接听/拒接响铃来电。"
+
+msgid ""
+"1:1 TUN calls via the local daemon (remote-control).\n"
+"\n"
+"`tun call <contact|id>` — start phone daemon if needed, dial, short-poll status.\n"
+"`tun call accept <peer>` / `tun call reject <peer>` — decide a ringing stranger call.\n"
+"Known contacts auto-accept; unknowns ring until accept/reject/timeout.\n"
+"See also `tun ring` and daemon logs (`tun.log`)."
+msgstr ""
+"通过本地 daemon（遥控器）发起 1:1 TUN 通话。\n"
+"\n"
+"`tun call <联系人|id>` — 必要时启动 phone daemon，拨号并短轮询状态。\n"
+"`tun call accept <peer>` / `tun call reject <peer>` — 处理陌生人响铃来电。\n"
+"已知联系人自动接听；未知来电响铃直至接听/拒接/超时。\n"
+"另见 `tun ring` 与 daemon 日志（`tun.log`）。"
+
+msgid "Enqueue the dial and exit without polling status."
+msgstr "只排队拨号并退出，不轮询状态。"
+
+msgid "Talk to the system-service daemon."
+msgstr "与系统服务 daemon 通信。"
+
+msgid "List pending inbound phone-mode TUN calls."
+msgstr "列出待处理的电话模式入站 TUN 呼叫。"
+
+msgid "Query the system-service daemon."
+msgstr "查询系统服务 daemon。"
+
+msgid "Omit yourself from other spokes' rosters (hub still knows you)."
+msgstr "不把自己暴露给其他 spoke 的名单（hub 仍认识你）。"
+
+msgid "`<peer>` to dial, or `accept|reject <peer>` for a ringing call."
+msgstr "`<peer>` 拨号，或对响铃来电使用 `accept|reject <peer>`。"
+
+msgid "`hub` or `spoke`. Default: spoke if `--to` is set, otherwise hub."
+msgstr "`hub` 或 `spoke`。默认：若设置了 `--to` 则为 spoke，否则为 hub。"

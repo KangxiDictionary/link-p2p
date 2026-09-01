@@ -10,6 +10,28 @@ For OS-specific setup, see [platforms.md](platforms.md).
 
 ## Stream forward
 
+**Fastest first use** — same command on both peers (EndpointId tie-break picks
+who dials). Each side prints `SHORT_CODE=` / `ENDPOINT_ID=` at start — exchange
+those once out-of-band:
+
+```bash
+# both machines (example: forward local SSH)
+link-p2p call --to <peer SHORT_CODE or EndpointId> \
+  --listen 127.0.0.1:2222 --forward 127.0.0.1:22
+# when connected, the CLI reminds you to save them:
+link-p2p contact add alice <their SHORT_CODE>
+# forever after:
+link-p2p call --to alice --listen 127.0.0.1:2222 --forward 127.0.0.1:22
+```
+
+Before the first dial, `link-p2p selftest` TCP-probes `--relay` URLs (TCP ok ≠
+UDP/QUIC). After a few sessions, `link-p2p stats` shows how often you got a
+direct path vs relay (`~/.config/link-p2p/path-stats.jsonl`).
+
+### Explicit roles (`serve` + `connect`)
+
+`connect --to` also accepts contact names / short codes (same book as `call`).
+
 Expose one local TCP port over a P2P QUIC link:
 
 ```bash
@@ -55,20 +77,31 @@ Fixed-port mode (`serve --forward` + `connect --listen`) still exists unchanged.
 
 ## TUN mesh (short)
 
+Two day-to-day shapes (both use the local daemon as a remote control):
+
 ```bash
+# 1:1 "phone" — known contacts auto-connect; strangers ring until accept/reject
+sudo link-p2p tun call <contact-or-id>
+link-p2p tun ring
+link-p2p tun call accept <peer>   # or: tun call reject <peer>
+
+# Join a hub "channel" (hub always knows you; --hidden hides you from other spokes)
+sudo link-p2p tun join <hub EndpointId>
+# sudo link-p2p tun join <hub> --hidden
+
+# Foreground debug aliases still work:
 sudo link-p2p tun serve
 sudo link-p2p tun connect --to <hub EndpointId>
-# optional on lossy links:
-sudo link-p2p --cc bbr3 tun connect --to <hub EndpointId>
 ```
 
-Each node gets a VIP in `172.24.0.0/16` (IPv4 only). Spokes prefer direct
+Each node gets a VIP in `172.24.0.0/16` (IPv4 only). Mesh spokes prefer direct
 paths; hub forwards as fallback. Privileged mode — see
 [platforms.md](platforms.md) and [subsystems/tun.md](../subsystems/tun.md).
 
-`tun connect` reconnects automatically (same backoff as stream mode). The TUN
-interface and `/16` route survive across sessions. `link-p2p ping` works against
-`tun serve`. `--max-conns` does **not** apply to TUN.
+`tun connect` / spoke reconnects automatically (same backoff as stream mode).
+The TUN interface and `/16` route survive across sessions. `link-p2p ping` works
+against `tun serve`. `--max-conns` does **not** apply to TUN. Diagnose failures
+in the daemon log (`tun.log`), not the short CLI remote.
 
 ---
 

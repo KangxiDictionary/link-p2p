@@ -101,6 +101,8 @@ pub struct SpawnOpts {
     pub mtu: Option<u16>,
     pub tun_ip: Option<Ipv4Addr>,
     pub allow: Vec<String>,
+    /// Spoke: omit self from hub roster broadcasts to other spokes.
+    pub hidden: bool,
 }
 
 /// Parameters for supervisor-managed `tun up --foreground --system`.
@@ -139,6 +141,12 @@ pub fn resolve_up_role(role: Option<&str>, to: Option<&str>) -> Result<String> {
                 "`--role hub` cannot be combined with `--to` (hub does not dial a peer)"
             )),
         )),
+        (Some("phone"), Some(_)) => bail!(exit::coded(
+            exit::USAGE,
+            anyhow::anyhow!(tr!(
+                "`--role phone` cannot be combined with `--to` (use `tun call <peer>` after up)"
+            )),
+        )),
         (Some("spoke"), None) => bail!(exit::coded(
             exit::USAGE,
             anyhow::anyhow!(tr!(
@@ -146,11 +154,12 @@ pub fn resolve_up_role(role: Option<&str>, to: Option<&str>) -> Result<String> {
             )),
         )),
         (Some("hub") | None, None) => Ok("hub".into()),
+        (Some("phone"), None) => Ok("phone".into()),
         (Some("spoke") | None, Some(_)) => Ok("spoke".into()),
         (Some(other), _) => bail!(exit::coded(
             exit::USAGE,
             anyhow::anyhow!(tr_fmt!(
-                "invalid `--role {0}` (expected hub or spoke)",
+                "invalid `--role {0}` (expected hub, spoke, or phone)",
                 other
             )),
         )),
@@ -362,23 +371,27 @@ mod ctl_sock {
     }
 
     pub async fn send_shutdown(path: &Path, mode: RuntimeMode) -> Result<()> {
+        send_expect_ok(path, mode, &CtlRequest::Shutdown).await
+    }
+
+    pub async fn send_expect_ok(path: &Path, mode: RuntimeMode, req: &CtlRequest) -> Result<()> {
         let mut stream = connect_timed(path, PROBE_CONNECT_TIMEOUT)
             .await
             .map_err(|_| tun_ctl::not_running(mode))?;
-        write_request(&mut stream, &CtlRequest::Shutdown).await?;
+        write_request(&mut stream, req).await?;
         let resp = timeout(ready_timeout(), tun_ctl::read_response(&mut stream))
             .await
             .map_err(|_| {
                 exit::coded(
                     exit::TIMEOUT,
-                    anyhow::anyhow!(tr!("TUN daemon Shutdown timed out")),
+                    anyhow::anyhow!(tr!("TUN control request timed out")),
                 )
             })??;
         match resp {
             CtlResponse::Ok => Ok(()),
             CtlResponse::Err { code, message } => Err(exit::coded(code, anyhow::anyhow!(message))),
             other => bail!(tr_fmt!(
-                "unexpected Shutdown response: {0}",
+                "unexpected control response: {0}",
                 format!("{other:?}")
             )),
         }
@@ -473,23 +486,27 @@ mod ctl_sock {
     }
 
     pub async fn send_shutdown(path: &Path, mode: RuntimeMode) -> Result<()> {
+        send_expect_ok(path, mode, &CtlRequest::Shutdown).await
+    }
+
+    pub async fn send_expect_ok(path: &Path, mode: RuntimeMode, req: &CtlRequest) -> Result<()> {
         let mut stream = connect_timed(path, PROBE_CONNECT_TIMEOUT)
             .await
             .map_err(|_| tun_ctl::not_running(mode))?;
-        write_request(&mut stream, &CtlRequest::Shutdown).await?;
+        write_request(&mut stream, req).await?;
         let resp = timeout(ready_timeout(), tun_ctl::read_response(&mut stream))
             .await
             .map_err(|_| {
                 exit::coded(
                     exit::TIMEOUT,
-                    anyhow::anyhow!(tr!("TUN daemon Shutdown timed out")),
+                    anyhow::anyhow!(tr!("TUN control request timed out")),
                 )
             })??;
         match resp {
             CtlResponse::Ok => Ok(()),
             CtlResponse::Err { code, message } => Err(exit::coded(code, anyhow::anyhow!(message))),
             other => bail!(tr_fmt!(
-                "unexpected Shutdown response: {0}",
+                "unexpected control response: {0}",
                 format!("{other:?}")
             )),
         }
@@ -741,6 +758,9 @@ async fn spawn_daemon_unix(opts: &SpawnOpts, skeleton: bool) -> Result<PidRecord
     if !opts.allow.is_empty() {
         cmd.env("LINK_P2P_ALLOW", opts.allow.join(","));
     }
+    if opts.hidden {
+        cmd.env("LINK_P2P_TUN_HIDDEN", "1");
+    }
 
     let mut child = cmd.spawn().context(tr!("spawning TUN daemon worker"))?;
 
@@ -870,6 +890,7 @@ pub async fn cmd_up_background(
     mtu: u16,
     tun_ip: Option<Ipv4Addr>,
     allow: &[String],
+    hidden: bool,
     styler: &Styler,
 ) -> Result<()> {
     if mode == RuntimeMode::System {
@@ -882,7 +903,7 @@ pub async fn cmd_up_background(
     }
     #[cfg(not(unix))]
     {
-        let _ = (role, to, mtu, tun_ip, allow, styler);
+        let _ = (role, to, mtu, tun_ip, allow, hidden, styler);
         bail!(exit::coded(
             exit::USAGE,
             anyhow::anyhow!(tr!(
@@ -898,6 +919,7 @@ pub async fn cmd_up_background(
             mtu: Some(mtu),
             tun_ip,
             allow: allow.to_vec(),
+            hidden,
         };
         let rec = spawn_live(&opts).await?;
 
@@ -1042,6 +1064,124 @@ pub async fn cmd_peers(mode: RuntimeMode, format: CliFormat) -> Result<()> {
     Ok(())
 }
 
+/// Ensure a phone-mode daemon is up (spawn if needed), then dial `to`.
+pub async fn cmd_call(
+    mode: RuntimeMode,
+    to: &str,
+    no_wait: bool,
+    styler: &Styler,
+) -> Result<()> {
+    match probe(mode).await? {
+        Liveness::NotRunning => {
+            if mode == RuntimeMode::System {
+                return Err(tun_ctl::not_running(mode));
+            }
+            cmd_up_background(mode, "phone", None, 1280, None, &[], false, styler).await?;
+        }
+        Liveness::Running {
+            status: CtlResponse::Status { role, .. },
+            ..
+        } => {
+            if role != "phone" && role != "call" {
+                bail!(exit::coded(
+                    exit::USAGE,
+                    anyhow::anyhow!(tr_fmt!(
+                        "TUN daemon is role {0}; `tun call` needs phone mode (`tun down` then `tun call`, or `tun up --role phone`)",
+                        role
+                    )),
+                ));
+            }
+        }
+        Liveness::Running { .. } => {}
+    }
+
+    ctl_sock::send_expect_ok(
+        &tun_ctl::socket_path(mode),
+        mode,
+        &CtlRequest::Call {
+            to: to.to_string(),
+        },
+    )
+    .await?;
+
+    if no_wait {
+        println!("{}", styler.ok(&tr_fmt!("dialing {0}", to)));
+        return Ok(());
+    }
+
+    // Short poll: connected peers or still dialing — never block the shell long.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Liveness::Running { status, .. } = probe(mode).await? {
+            if let CtlResponse::Status { .. } = &status {
+                let peers = ctl_sock::handshake_peers(&tun_ctl::socket_path(mode)).await;
+                if let Ok(CtlResponse::Peers { peers }) = peers {
+                    if !peers.is_empty() {
+                        println!("{}", styler.ok(&tr!("connected")));
+                        print_status_text(&status);
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            println!(
+                "{}",
+                styler.dim(&tr!(
+                    "waiting for peer — check `tun status` / `tun peers` (daemon keeps dialing)"
+                ))
+            );
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// List pending inbound calls (`tun ring`).
+pub async fn cmd_ring(mode: RuntimeMode) -> Result<()> {
+    match probe(mode).await? {
+        Liveness::NotRunning => Err(tun_ctl::not_running(mode)),
+        Liveness::Running { status, .. } => {
+            if let CtlResponse::Status { pending_calls, .. } = status {
+                if pending_calls.is_empty() {
+                    println!("{}", tr!("(no ringing calls)"));
+                } else {
+                    for c in pending_calls {
+                        println!("{}  {}", c.direction, c.peer);
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+pub async fn cmd_call_accept(mode: RuntimeMode, peer: &str, styler: &Styler) -> Result<()> {
+    ctl_sock::send_expect_ok(
+        &tun_ctl::socket_path(mode),
+        mode,
+        &CtlRequest::Accept {
+            peer: peer.to_string(),
+        },
+    )
+    .await?;
+    println!("{}", styler.ok(&tr_fmt!("accepted {0}", peer)));
+    Ok(())
+}
+
+pub async fn cmd_call_reject(mode: RuntimeMode, peer: &str, styler: &Styler) -> Result<()> {
+    ctl_sock::send_expect_ok(
+        &tun_ctl::socket_path(mode),
+        mode,
+        &CtlRequest::Reject {
+            peer: peer.to_string(),
+        },
+    )
+    .await?;
+    println!("{}", styler.ok(&tr_fmt!("rejected {0}", peer)));
+    Ok(())
+}
+
 fn peer_short_code(p: &CtlPeer) -> String {
     match p.id.parse::<EndpointId>() {
         Ok(id) => contacts::encode_short_code(id),
@@ -1061,6 +1201,7 @@ fn print_status_text(status: &CtlResponse) {
         uptime_secs,
         vip,
         path_kind,
+        pending_calls,
         ..
     } = status
     {
@@ -1068,6 +1209,12 @@ fn print_status_text(status: &CtlResponse) {
         println!("vip:      {vip}");
         println!("path:     {path_kind}");
         println!("uptime:   {}", format_uptime(*uptime_secs));
+        if !pending_calls.is_empty() {
+            println!("ringing:");
+            for c in pending_calls {
+                println!("  {} ({})", c.peer, c.direction);
+            }
+        }
     }
 }
 
@@ -1512,6 +1659,49 @@ async fn handle_one_connection(
     let resp = match req {
         CtlRequest::Status => hooks.state.status_response().await,
         CtlRequest::Peers => hooks.state.peers_response().await,
+        CtlRequest::Call { to } => match hooks.try_send_call_cmd(crate::tun::CallCmd::Dial { to }) {
+            Ok(()) => CtlResponse::Ok,
+            Err(e) => CtlResponse::Err {
+                code: exit::USAGE,
+                message: format!("{e:#}"),
+            },
+        },
+        CtlRequest::Accept { peer } => {
+            if require_privilege && !peer_is_privileged(&stream) {
+                CtlResponse::Err {
+                    code: exit::DENIED,
+                    message: tr!(
+                        "permission denied: only root or the service account may accept TUN calls"
+                    ),
+                }
+            } else {
+                match hooks.try_send_call_cmd(crate::tun::CallCmd::Accept { peer }) {
+                    Ok(()) => CtlResponse::Ok,
+                    Err(e) => CtlResponse::Err {
+                        code: exit::USAGE,
+                        message: format!("{e:#}"),
+                    },
+                }
+            }
+        }
+        CtlRequest::Reject { peer } => {
+            if require_privilege && !peer_is_privileged(&stream) {
+                CtlResponse::Err {
+                    code: exit::DENIED,
+                    message: tr!(
+                        "permission denied: only root or the service account may reject TUN calls"
+                    ),
+                }
+            } else {
+                match hooks.try_send_call_cmd(crate::tun::CallCmd::Reject { peer }) {
+                    Ok(()) => CtlResponse::Ok,
+                    Err(e) => CtlResponse::Err {
+                        code: exit::USAGE,
+                        message: format!("{e:#}"),
+                    },
+                }
+            }
+        }
         CtlRequest::Shutdown => {
             if require_privilege && !peer_is_privileged(&stream) {
                 CtlResponse::Err {
@@ -1601,6 +1791,49 @@ async fn handle_one_connection(
     let resp = match req {
         CtlRequest::Status => hooks.state.status_response().await,
         CtlRequest::Peers => hooks.state.peers_response().await,
+        CtlRequest::Call { to } => match hooks.try_send_call_cmd(crate::tun::CallCmd::Dial { to }) {
+            Ok(()) => CtlResponse::Ok,
+            Err(e) => CtlResponse::Err {
+                code: exit::USAGE,
+                message: format!("{e:#}"),
+            },
+        },
+        CtlRequest::Accept { peer } => {
+            if require_privilege && !crate::win_pipe::peer_is_admin(&stream) {
+                CtlResponse::Err {
+                    code: exit::DENIED,
+                    message: tr!(
+                        "permission denied: only an elevated administrator may accept TUN calls"
+                    ),
+                }
+            } else {
+                match hooks.try_send_call_cmd(crate::tun::CallCmd::Accept { peer }) {
+                    Ok(()) => CtlResponse::Ok,
+                    Err(e) => CtlResponse::Err {
+                        code: exit::USAGE,
+                        message: format!("{e:#}"),
+                    },
+                }
+            }
+        }
+        CtlRequest::Reject { peer } => {
+            if require_privilege && !crate::win_pipe::peer_is_admin(&stream) {
+                CtlResponse::Err {
+                    code: exit::DENIED,
+                    message: tr!(
+                        "permission denied: only an elevated administrator may reject TUN calls"
+                    ),
+                }
+            } else {
+                match hooks.try_send_call_cmd(crate::tun::CallCmd::Reject { peer }) {
+                    Ok(()) => CtlResponse::Ok,
+                    Err(e) => CtlResponse::Err {
+                        code: exit::USAGE,
+                        message: format!("{e:#}"),
+                    },
+                }
+            }
+        }
         CtlRequest::Shutdown => {
             if require_privilege && !crate::win_pipe::peer_is_admin(&stream) {
                 CtlResponse::Err {
@@ -1699,6 +1932,24 @@ async fn run_live_data_plane(role: &str, hooks: Arc<crate::tun::TunHooks>) -> Re
             )
             .await
         }
+        "phone" | "call" => {
+            crate::tun::run_tun_phone(
+                secret_key,
+                tun_ip,
+                mtu,
+                &relays,
+                relay_only,
+                no_n0,
+                keepalive,
+                idle_timeout,
+                tune,
+                allow,
+                ui,
+                styler,
+                hooks,
+            )
+            .await
+        }
         other => {
             let err = anyhow::anyhow!(tr_fmt!("unknown TUN daemon role {0}", other));
             hooks.signal_ready(Err(anyhow::anyhow!("{err:#}")));
@@ -1754,6 +2005,24 @@ async fn run_live_data_plane_explicit(
                 ui,
                 styler,
                 Some(hooks),
+            )
+            .await
+        }
+        "phone" | "call" => {
+            crate::tun::run_tun_phone(
+                opts.secret_key,
+                opts.tun_ip,
+                opts.mtu,
+                &opts.relays,
+                opts.relay_only,
+                opts.no_n0_relays,
+                opts.keepalive,
+                opts.idle_timeout,
+                opts.tune,
+                opts.allow,
+                ui,
+                styler,
+                hooks,
             )
             .await
         }
@@ -1895,6 +2164,7 @@ mod tests {
                 1280,
                 None,
                 &[],
+                false,
                 &styler,
             ))
             .unwrap_err();
@@ -2035,12 +2305,17 @@ mod tests {
         assert_eq!(resolve_up_role(None, Some("abc")).unwrap(), "spoke");
         assert_eq!(resolve_up_role(Some("hub"), None).unwrap(), "hub");
         assert_eq!(resolve_up_role(Some("spoke"), Some("abc")).unwrap(), "spoke");
+        assert_eq!(resolve_up_role(Some("phone"), None).unwrap(), "phone");
         assert_eq!(
             exit::code_from(&resolve_up_role(Some("hub"), Some("abc")).unwrap_err()),
             exit::USAGE
         );
         assert_eq!(
             exit::code_from(&resolve_up_role(Some("spoke"), None).unwrap_err()),
+            exit::USAGE
+        );
+        assert_eq!(
+            exit::code_from(&resolve_up_role(Some("phone"), Some("abc")).unwrap_err()),
             exit::USAGE
         );
         assert_eq!(
@@ -2099,7 +2374,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        let err = cmd_up_background(MODE, "hub", None, 1280, None, &[], &styler)
+        let err = cmd_up_background(MODE, "hub", None, 1280, None, &[], false, &styler)
             .await
             .unwrap_err();
         assert_eq!(exit::code_from(&err), exit::USAGE);
@@ -2279,6 +2554,7 @@ mod tests {
                 vip: Ipv4Addr::new(172, 24, 0, 1),
                 path_kind: "unknown".into(),
                 session: "x".into(),
+                pending_calls: vec![],
             })
             .unwrap();
             let frame = tun_ctl::encode_frame(tun_ctl::CTL_VERSION + 1, &body).unwrap();

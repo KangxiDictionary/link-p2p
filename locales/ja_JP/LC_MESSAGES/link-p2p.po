@@ -1388,13 +1388,13 @@ msgstr ""
 msgid "Disable and remove the TUN system service."
 msgstr "TUN システムサービスを無効化して削除。"
 
-msgid "`hub` or `spoke`. Default: spoke if `--to` is set, otherwise hub."
+msgid "`hub`, `spoke`, or `phone`. Default: spoke if `--to` is set, otherwise hub."
 msgstr "`hub` または `spoke`。既定: `--to` があれば spoke、なければ hub。"
 
 msgid ""
 "Make machines reachable at the IP layer over QUIC datagrams.\n"
 "\n"
-"Creates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). Preferred day-to-day commands: `tun up` / `tun down` / `tun status` / `tun peers`. Foreground debug aliases remain: `tun serve` (hub) and `tun connect` (spoke) — same as `tun up --foreground --role hub|spoke`. Prefer `--cc bbr3` on lossy paths. Virtual IPs are IPv4 only — see docs/subsystems/tun.md."
+"Creates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). Preferred day-to-day commands: `tun call` (1:1 phone), `tun join <hub>` (mesh channel), `tun status` / `tun peers` / `tun down`. Also `tun up --role phone|hub|spoke`. Foreground aliases: `tun serve` / `tun connect`. Prefer `--cc bbr3` on lossy paths. Virtual IPs are IPv4 only — see docs/subsystems/tun.md."
 msgstr ""
 "QUIC データグラムで IP 層のマシン間到達性を提供。\n"
 "\n"
@@ -1408,7 +1408,7 @@ msgid ""
 "\n"
 "Without `--foreground`, spawns a background daemon and returns after it is ready (Unix today; on Windows use `--foreground`). With `--foreground`, blocks like `tun serve` / `tun connect` (same code paths).\n"
 "\n"
-"Role defaults: if `--to` is set, role is `spoke`; otherwise `hub`. Do not pass `--role hub` together with `--to`. `--role spoke` requires `--to <hub EndpointId>`.\n"
+"Role defaults: if `--to` is set, role is `spoke`; otherwise `hub`. Roles: `hub`, `spoke`, `phone`. Do not pass `--role hub`/`phone` together with `--to`. `--role spoke` requires `--to <hub>`.\n"
 "\n"
 "Already-running daemon → usage error (exit 2). Ready timeout → exit 4 (check tun.log). Init failure reported by the child → exit 3."
 msgstr ""
@@ -1662,3 +1662,130 @@ msgstr "正在运行 netsh advfirewall 删除入站规则"
 
 msgid "netsh failed to delete firewall rule {0} (exit {1})"
 msgstr "netsh 删除防火墙规则 {0} 失败（退出码 {1}）"
+
+msgid "Show local direct-vs-relay path history."
+msgstr ""
+
+msgid "Aggregates samples written by ping and by connect/call/tun sessions when a connection closes (path kind + time-to-direct). Share ~/.config/link-p2p/path-stats.jsonl when debugging NAT — no lab required."
+msgstr ""
+
+msgid "How many recent samples to include (default 100)."
+msgstr ""
+
+msgid "Host diagnostics: relay TCP probe and loopback echo (no identity)."
+msgstr ""
+
+msgid "Run before first serve/connect/call when a dial times out. TCP-probes each --relay URL (note: TCP ok does not prove UDP/QUIC), then a loopback echo. Pass --tun for wintun/system-identity checks (same as tun selftest)."
+msgstr ""
+
+msgid "Skip the loopback TCP echo drain."
+msgstr ""
+
+msgid "Also run TUN-oriented checks (wintun path, system identity directory)."
+msgstr ""
+
+msgid "link-p2p path stats"
+msgstr ""
+
+msgid "file: {0} (last {1} samples)"
+msgstr ""
+
+msgid "no samples yet — run `ping` or a connect/call session first"
+msgstr ""
+
+msgid "direct {0}/{1} ({2:.0}%)  relay {3}  relay+candidate {4}  unknown {5}"
+msgstr ""
+
+msgid "link-p2p selftest"
+msgstr ""
+
+msgid "probing --relay URL(s) over TCP (2s timeout; TCP ok ≠ UDP/QUIC path):"
+msgstr ""
+
+msgid "tip: save them so next time is just a name:\n  link-p2p contact add <nickname> {0}"
+msgstr ""
+
+msgid "give the other peer your SHORT_CODE (or ENDPOINT_ID); both sides run the same `call`:"
+msgstr ""
+
+msgid "calling contact {0}..."
+msgstr ""
+
+msgid "dialing contact {0}..."
+msgstr ""
+
+msgid "your identity (give SHORT_CODE to peers; both can `call --to` each other):"
+msgstr ""
+
+msgid "connecting to remote endpoint — if this fails or hangs, run: link-p2p selftest"
+msgstr ""
+
+msgid "next: link-p2p call --to {0} --listen 127.0.0.1:2222 --forward 127.0.0.1:22"
+msgstr ""
+
+msgid "Contact name, EndpointId, or short code. Use `-` to read one line from stdin. Also `LINK_P2P_TO`."
+msgstr ""
+
+msgid "Contact name, EndpointId, or short code. Also `LINK_P2P_TO`."
+msgstr ""
+
+msgid "EndpointId hex or short code (from the peer's SHORT_CODE= line)."
+msgstr ""
+
+msgid "Best first-time path: both sides run the same `call` with each other's SHORT_CODE (printed at start). After it connects once, `contact add <name> <short-code>` — next time use `--to <name>`. Prefer this over juggling separate serve/connect roles."
+msgstr ""
+
+msgid "dialing with address hint(s): {0}"
+msgstr ""
+msgid "Spoke only: join without appearing on other spokes' rosters (hub still knows you)."
+msgstr "Spoke only: join without appearing on other spokes' rosters (hub still knows you)."
+
+msgid "Join a hub mesh channel (alias for `tun up --to <hub>`)."
+msgstr "Join a hub mesh channel (alias for `tun up --to <hub>`)."
+
+msgid "Join without appearing on other spokes' rosters (hub still knows you)."
+msgstr "Join without appearing on other spokes' rosters (hub still knows you)."
+
+msgid "Run in the foreground instead of daemonizing."
+msgstr "Run in the foreground instead of daemonizing."
+
+msgid "Use system-service paths. Requires `--foreground`."
+msgstr "Use system-service paths. Requires `--foreground`."
+
+msgid "Phone-mode TUN call: dial a peer, or accept/reject a ringing call."
+msgstr "Phone-mode TUN call: dial a peer, or accept/reject a ringing call."
+
+msgid "Enqueue the dial and exit without polling status."
+msgstr "Enqueue the dial and exit without polling status."
+
+msgid "Talk to the system-service daemon."
+msgstr "Talk to the system-service daemon."
+
+msgid "List pending inbound phone-mode TUN calls."
+msgstr "List pending inbound phone-mode TUN calls."
+
+msgid "Query the system-service daemon."
+msgstr "Query the system-service daemon."
+
+msgid "Omit yourself from other spokes' rosters (hub still knows you)."
+msgstr "Omit yourself from other spokes' rosters (hub still knows you)."
+
+msgid ""
+"1:1 TUN calls via the local daemon (remote-control).\n"
+"\n"
+"`tun call <contact|id>` — start phone daemon if needed, dial, short-poll status.\n"
+"`tun call accept <peer>` / `tun call reject <peer>` — decide a ringing stranger call.\n"
+"Known contacts auto-accept; unknowns ring until accept/reject/timeout.\n"
+"See also `tun ring` and daemon logs (`tun.log`)."
+msgstr ""
+"1:1 TUN calls via the local daemon (remote-control).\n"
+"\n"
+"`tun call <contact|id>` — start phone daemon if needed, dial, short-poll status.\n"
+"`tun call accept <peer>` / `tun call reject <peer>` — decide a ringing stranger call.\n"
+"Known contacts auto-accept; unknowns ring until accept/reject/timeout.\n"
+"See also `tun ring` and daemon logs (`tun.log`)."
+
+
+msgid "`<peer>` to dial, or `accept|reject <peer>` for a ringing call."
+msgstr "`<peer>` to dial, or `accept|reject <peer>` for a ringing call."
+

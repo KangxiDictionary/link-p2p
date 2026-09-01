@@ -10,7 +10,7 @@
 //! - **`ping` / `contact` / `config`** — diagnostics and local bookkeeping.
 //!
 //! Identity keys live in [`identity`]; stream pipes in [`pipe`]; SOCKS5 in
-//! [`socks5`]. See README.md and `docs/` for ops and platform notes.
+//! [`socks5`]. CLI definitions in [`cli`]; shared session helpers in [`runtime`].
 //!
 //! NOTE ON API STABILITY: iroh's surface has moved a lot release to release
 //! (NodeId → EndpointId, …). Calls match the documented 1.x API; if something
@@ -18,6 +18,8 @@
 //! overall approach is wrong.
 
 mod call;
+mod cli;
+mod commands;
 mod config;
 mod contacts;
 mod exit;
@@ -25,8 +27,11 @@ mod helptext;
 mod i18n;
 mod identity;
 mod path_kind;
+mod path_stats;
 mod pipe;
 mod relay_probe;
+mod runtime;
+mod selftest;
 mod socks5;
 mod ssrf;
 mod style;
@@ -46,1066 +51,35 @@ mod win_service;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 compile_error!(
-    "link-p2p supports Linux, macOS, and Windows only. \
-     Please open a GitHub issue if you need another platform."
+    "link-p2p supports Linux, macOS, and Windows only.      Please open a GitHub issue if you need another platform."
 );
 
 pub(crate) use identity::{load_or_create_secret_key, resolve_identity_path, validate_passphrase};
+pub(crate) use runtime::{
+    bring_endpoint_online, build_dial_addr, build_endpoint, conn_semaphore, handle_forward_stream,
+    open_stream_wait, push_task, reject_relay_only_with_to_addr, spawn_path_monitor,
+    spawn_reconnect_watcher, Backoff, ConnSlot, PingHandler, ServeMode, TransportTune, Ui, ALPN,
+    ENDPOINT_ONLINE_STEPS, MIN_STABLE_CONN, PING_ALPN, RECONNECT_BASE, RECONNECT_MAX,
+};
 
-use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
-use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand};
-use clap_complete::Shell;
-use iroh::{
-    endpoint::{presets, Connection, QuicTransportConfig, RecvStream, SendStream, VarInt},
-    protocol::{AcceptError, ProtocolHandler, Router},
-    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, SecretKey,
+use clap::{CommandFactory, FromArgMatches};
+use iroh::SecretKey;
+use tracing::info;
+
+use crate::cli::{
+    localized_command, Cli, Command, ConfigCommand, ConnectMode, ContactCommand, LogFormat,
+    OutputFormat, TunCommand, TunServiceCommand,
 };
-use noq_proto::congestion::{Bbr3Config, CubicConfig};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{watch, Semaphore};
-use tokio::task::JoinHandle;
-use tokio::time::{self, Duration};
-use tracing::{info, warn};
-
+use crate::commands::connect::run_connect;
+use crate::commands::ping::run_ping;
+use crate::commands::serve::run_serve;
 use crate::i18n::{tr, tr_fmt};
-use crate::ssrf::check_proxy_target;
+use crate::runtime::{merge_allow_list, parse_tun_allow, resolve_peer_to};
 use crate::style::{ColorMode, Styler};
-
-/// ALPN identifies this application protocol during the QUIC/TLS handshake.
-/// `/1` requires a 4-byte [`pipe::STREAM_HELLO`] on every fixed-forward stream
-/// so `open_bi()` becomes visible on the wire (QUIC has no stream-open frame).
-/// Mismatch must fail handshake — do not route `/0` and `/1` together.
-const ALPN: &[u8] = b"link-p2p/tcp-forward/1";
-
-/// ALPN for the `ping` probe (echoes a timestamp, reports RTT and path).
-/// Separate from the forwarding ALPN so a ping can target a node that is
-/// also serving streams — the Router accepts both. Also registered on TUN
-/// nodes (see tun.rs) so `ping` works against `tun serve` too.
-pub(crate) const PING_ALPN: &[u8] = b"link-p2p/ping/0";
-
-#[derive(Parser)]
-#[command(
-    name = "link-p2p",
-    version,
-    about = "Minimal TCP-over-QUIC forwarder on iroh",
-    long_about = "link-p2p exposes a local TCP service to a P2P network (or dials one) \
-                  over a direct, end-to-end encrypted QUIC connection. No TUN device, \
-                  no root/admin privileges — just a persistent EndpointId and a QUIC hop.",
-    after_help = "See README.md and docs/user-guide/platforms.md."
-)]
-#[allow(clippy::struct_excessive_bools)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-
-    /// Path to store/load this node's persistent secret key. If it doesn't
-    /// exist yet, a new one is generated and saved there. Default: the XDG
-    /// config dir, `$XDG_CONFIG_HOME/link-p2p/identity.key` (usually
-    /// `~/.config/link-p2p/identity.key`); a legacy `./identity.key` in the
-    /// working directory is migrated there once. Keep this stable if you
-    /// want your EndpointId to stay the same across restarts.
-    #[arg(long, global = true, conflicts_with = "ephemeral")]
-    identity: Option<PathBuf>,
-
-    /// Use a temporary identity that is never written to disk: the EndpointId
-    /// changes every start. Conflicts with --identity.
-    #[arg(long, short = 'e', global = true, conflicts_with = "identity")]
-    ephemeral: bool,
-
-    /// Passphrase protecting the identity key file. When set, the key is
-    /// stored encrypted (Argon2id + XChaCha20-Poly1305) instead of plaintext
-    /// hex, so a disk/backup leak doesn't expose the key. Prefer the
-    /// LINK_P2P_PASSPHRASE environment variable over passing it inline — the
-    /// flag value is visible in `ps` and shell history. Conflicts with
-    /// --ephemeral.
-    #[arg(long, global = true, conflicts_with = "ephemeral")]
-    identity_passphrase: Option<String>,
-
-    /// Custom relay URL(s), repeatable. Replaces n0's default map when set
-    /// (skips n0 DNS/pkarr). Pass several for failover, e.g. a self-hosted
-    /// relay first then an n0 URL as backup. **Does not disable hole-punch** —
-    /// use `--relay-only` for a true relay-only baseline. Also
-    /// `LINK_P2P_RELAY` (comma-separated; flag wins / appends).
-    #[arg(long, global = true, env = "LINK_P2P_RELAY", value_delimiter = ',', action = ArgAction::Append)]
-    relay: Vec<String>,
-
-    /// Disable IP transports so traffic stays on relay (no hole-punch / LAN
-    /// direct). Both sides of a session must set this for a reliable
-    /// relay-only baseline. Conflicts with `--to-addr` (direct hints). Also
-    /// `LINK_P2P_RELAY_ONLY=1`.
-    #[arg(long, global = true, env = "LINK_P2P_RELAY_ONLY", default_value_t = false)]
-    relay_only: bool,
-
-    /// When `--relay` is set, do **not** keep n0's public relays / discovery
-    /// (replace the map entirely). Default is to **merge** custom relays into
-    /// n0 so self-hosted + public failover both work. Also `LINK_P2P_NO_N0_RELAYS`.
-    #[arg(long = "no-n0-relays", global = true, env = "LINK_P2P_NO_N0_RELAYS", default_value_t = false)]
-    no_n0_relays: bool,
-
-    /// Control colored output: auto (colors on TTY only), always, or never.
-    #[arg(long, global = true, value_enum, default_value_t = ColorMode::Auto)]
-    color: ColorMode,
-
-    /// Maximum number of concurrent forwarded connections. 0 means unlimited.
-    /// Prevents resource exhaustion on endpoints exposed to the network.
-    #[arg(long, global = true, default_value_t = 1024)]
-    max_conns: usize,
-
-    /// Log output format: text (human-readable) or json (structured, for
-    /// jq/CI pipelines).
-    #[arg(long, global = true, value_enum, default_value_t = LogFormat::Text)]
-    log_format: LogFormat,
-
-    /// Quiet user-facing banners (errors still print). Independent of
-    /// `RUST_LOG` / `-v`.
-    #[arg(short = 'q', long, global = true, conflicts_with = "verbose")]
-    quiet: bool,
-
-    /// Increase user-facing / tracing detail (`-v`, `-vv`). Ignored when
-    /// `RUST_LOG` is set.
-    #[arg(short = 'v', long, global = true, action = ArgAction::Count)]
-    verbose: u8,
-
-    /// QUIC congestion controller: `cubic` (default) or `bbr3`. Also
-    /// `LINK_P2P_CC`. Experimental — see docs/architecture/performance.md.
-    #[arg(long, global = true, env = "LINK_P2P_CC", value_enum)]
-    cc: Option<CongestionControl>,
-
-    /// QUIC connection send window in bytes. Also `LINK_P2P_SEND_WINDOW`.
-    #[arg(long, global = true, env = "LINK_P2P_SEND_WINDOW")]
-    send_window: Option<u64>,
-
-    /// QUIC per-stream receive window in bytes. Also
-    /// `LINK_P2P_STREAM_RECV_WINDOW`.
-    #[arg(long, global = true, env = "LINK_P2P_STREAM_RECV_WINDOW")]
-    stream_recv_window: Option<u64>,
-
-    /// QUIC keepalive interval in seconds (default 5). Keeps NAT UDP
-    /// mappings alive; the typical home-router mapping expires after
-    /// 20-30s of idle. Raise it on high-latency links, lower it where
-    /// NAT timeouts are aggressive.
-    #[arg(long, global = true, default_value_t = 5)]
-    keepalive: u64,
-
-    /// QUIC max idle timeout in seconds (default 30). After this long
-    /// without traffic the peer is declared dead and the connection
-    /// re-dialed. Raise it for lossy / high-latency links so a brief
-    /// outage doesn't tear the connection down.
-    #[arg(long, global = true, default_value_t = 30)]
-    idle_timeout: u64,
-}
-
-/// Log output format.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-enum LogFormat {
-    Text,
-    Json,
-}
-
-#[derive(Subcommand)]
-enum ContactCommand {
-    /// Add or update a contact.
-    Add {
-        /// Local nickname.
-        name: String,
-        /// EndpointId hex or short code.
-        id: String,
-    },
-    /// Remove a contact.
-    Remove {
-        name: String,
-    },
-    /// List contacts.
-    List,
-    /// Print this node's short code (and EndpointId).
-    Code,
-}
-
-#[derive(Subcommand)]
-enum ConfigCommand {
-    /// Write a default `config.toml` (refuses to overwrite unless `--force`).
-    Init {
-        /// Replace an existing config file.
-        #[arg(long)]
-        force: bool,
-    },
-    /// Print the resolved config file path.
-    Path,
-}
-
-/// Machine-oriented output for status commands (`ping`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-enum OutputFormat {
-    Text,
-    Json,
-}
-
-/// QUIC congestion controller selection (maps to noq-proto factories).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-enum CongestionControl {
-    Cubic,
-    Bbr3,
-}
-
-/// Tunables applied on top of iroh/noq transport defaults.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct TransportTune {
-    cc: Option<CongestionControl>,
-    send_window: Option<u64>,
-    stream_recv_window: Option<u64>,
-}
-
-/// User-facing status lines: respect `-q` and keep stdout clean in `--stdio`.
-#[derive(Clone, Copy)]
-pub(crate) struct Ui {
-    pub(crate) quiet: bool,
-    pub(crate) stderr_only: bool,
-}
-
-impl Ui {
-    pub(crate) fn line(self, s: impl AsRef<str>) {
-        if self.quiet {
-            return;
-        }
-        if self.stderr_only {
-            eprintln!("{}", s.as_ref());
-        } else {
-            println!("{}", s.as_ref());
-        }
-    }
-}
-
-/// Shared `--max-conns` → semaphore mapping (`0` = unlimited).
-pub(crate) fn conn_semaphore(max_conns: usize) -> Arc<Semaphore> {
-    Arc::new(Semaphore::new(if max_conns == 0 {
-        usize::MAX
-    } else {
-        max_conns
-    }))
-}
-
-/// Push a JoinHandle into a shared task list, surviving a poisoned mutex.
-pub(crate) fn push_task(tasks: &Mutex<Vec<JoinHandle<()>>>, task: JoinHandle<()>) {
-    match tasks.lock() {
-        Ok(mut g) => g.push(task),
-        Err(poisoned) => poisoned.into_inner().push(task),
-    }
-}
-
-/// Serve mode — exactly one of fixed forward or proxy. Encoded as an enum so
-/// "neither / both" cannot be represented after CLI validation.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum ServeMode {
-    Forward(SocketAddr),
-    Proxy { allow_private: bool },
-}
-
-/// Connect local side — listen, SOCKS5, or (Unix) stdio.
-#[derive(Clone, Copy, Debug)]
-enum ConnectMode {
-    Listen(SocketAddr),
-    Socks5(SocketAddr),
-    #[cfg(unix)]
-    Stdio,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Expose a local TCP service to the P2P network.
-    Serve {
-        /// Local address to forward incoming P2P streams to, e.g. 127.0.0.1:8080
-        #[arg(long, conflicts_with = "proxy")]
-        forward: Option<SocketAddr>,
-        /// Generic proxy mode: dial the address from each stream's header
-        /// instead of a fixed --forward target. Pairs with `connect
-        /// --socks5-listen`. Conflicts with --forward.
-        #[arg(long, conflicts_with = "forward")]
-        proxy: bool,
-        /// Only accept P2P connections from these EndpointIds (repeatable).
-        /// Default: accept anyone who knows this node's EndpointId. Strongly
-        /// recommended when the node is reachable from untrusted networks.
-        #[arg(long)]
-        allow: Vec<String>,
-        /// In proxy mode, allow forwarding to private/loopback/link-local
-        /// addresses (blocked by default to prevent SSRF — a malicious peer
-        /// could otherwise make this node reach into your LAN or cloud
-        /// metadata endpoints such as 169.254.169.254).
-        #[arg(long)]
-        allow_private: bool,
-    },
-    /// Dial a remote node and expose it as a local TCP listener.
-    Connect {
-        /// The remote node's EndpointId (printed by `serve` on startup).
-        /// On Unix, `-` reads one line from stdin. Also `LINK_P2P_TO`.
-        #[arg(long, env = "LINK_P2P_TO")]
-        to: Option<String>,
-        /// Local address to listen on, e.g. 127.0.0.1:9090
-        #[arg(long, conflicts_with = "socks5_listen")]
-        listen: Option<SocketAddr>,
-        /// Speak SOCKS5 (no-auth, CONNECT only) on this local address; local
-        /// clients can then reach any destination through the remote
-        /// `serve --proxy`. Conflicts with --listen
-        #[arg(long, conflicts_with = "listen")]
-        socks5_listen: Option<SocketAddr>,
-        /// Pipe stdin/stdout to one QUIC stream (ssh ProxyCommand / rsync -e).
-        /// Unix only. Status banners go to stderr. Conflicts with --listen /
-        /// --socks5-listen and with `--to -` (stdin is the data path).
-        #[cfg(unix)]
-        #[arg(long, conflicts_with_all = ["listen", "socks5_listen"])]
-        stdio: bool,
-        /// Direct address hint(s) for the peer (repeatable), e.g. its public
-        /// ip:port or a LAN address. Dialed directly, skipping discovery —
-        /// use it when you exchanged addresses out-of-band and want no
-        /// DNS/pkarr lookup (also faster reconnects). May be combined with
-        /// --relay, which then stays as the fallback path.
-        #[arg(long = "to-addr")]
-        to_addr: Vec<SocketAddr>,
-    },
-    /// Make two machines reachable at the IP layer over QUIC datagrams.
-    ///
-    /// Creates a TUN interface (needs root / CAP_NET_ADMIN, or Administrator
-    /// and wintun.dll on Windows) and routes `172.24.0.0/16` through it.
-    /// Unlike `serve`/`connect`, which forward one TCP port, this bridges the
-    /// whole machine: TCP, UDP and ICMP on mesh virtual IPs, with no per-port
-    /// setup. Hub coordinates the roster; spokes prefer direct links — see
-    /// docs/subsystems/tun.md.
-    Tun {
-        #[command(subcommand)]
-        command: TunCommand,
-    },
-    /// Measure RTT to a remote node over the P2P network.
-    Ping {
-        /// The remote node's EndpointId (printed by `serve` on startup).
-        /// Use `-` to read one line from stdin. Also `LINK_P2P_TO`.
-        #[arg(long, env = "LINK_P2P_TO")]
-        to: Option<String>,
-        /// Direct address hint(s) for the peer (repeatable) — see `connect
-        /// --to-addr`. Dialed directly, skipping discovery.
-        #[arg(long = "to-addr")]
-        to_addr: Vec<SocketAddr>,
-        /// Output format: text (default) or json (for jq).
-        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-        format: OutputFormat,
-    },
-    /// Symmetric call: both sides publish and dial (EndpointId tie-break).
-    ///
-    /// Resolves a contact name, EndpointId, or short code. Merges config.toml
-    /// relays with n0 by default. Pair with the same flags on both peers.
-    Call {
-        /// Contact name, EndpointId, or short code.
-        to: String,
-        /// Local TCP listen address (forwards to the peer).
-        #[arg(long, conflicts_with = "stdio")]
-        listen: Option<SocketAddr>,
-        /// Local TCP target for streams the peer opens to us.
-        #[arg(long)]
-        forward: Option<SocketAddr>,
-        /// Pipe stdin/stdout (Unix). Conflicts with --listen.
-        #[cfg(unix)]
-        #[arg(long, conflicts_with = "listen")]
-        stdio: bool,
-        /// Direct address hint(s) (repeatable).
-        #[arg(long = "to-addr")]
-        to_addr: Vec<SocketAddr>,
-    },
-    /// Manage the local contacts book (names → EndpointId).
-    Contact {
-        #[command(subcommand)]
-        command: ContactCommand,
-    },
-    /// Read or write `~/.config/link-p2p/config.toml` defaults.
-    Config {
-        #[command(subcommand)]
-        command: ConfigCommand,
-    },
-    /// Print a shell completion script to stdout.
-    ///
-    /// Redirect it to wherever your shell loads completions from, e.g.
-    /// `link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish`
-    /// or `link-p2p completions powershell` on Windows.
-    Completions {
-        /// Which shell to generate a completion script for.
-        shell: Shell,
-    },
-    /// Print a man page (troff) for link-p2p to stdout. Unix builds only.
-    #[cfg(unix)]
-    Man,
-    /// Print help for link-p2p or one of its subcommands.
-    //
-    // (implementation detail, not user-facing: this replaces clap's built-in
-    // `help` subcommand, whose description is hardcoded English and cannot be
-    // localized. Handled in real_main like Completions. Kept as a single-line
-    // doc so no long_about is derived that would need its own translation.)
-    Help {
-        /// The subcommand path to print help for, e.g. `tun serve`
-        #[arg(value_name = "COMMAND")]
-        sub: Vec<String>,
-    },
-}
-
-/// Subcommands of `link-p2p tun`.
-#[derive(Subcommand)]
-enum TunCommand {
-    /// Start the TUN mesh (background daemon, or `--foreground` like serve/connect).
-    Up {
-        /// `hub` or `spoke`. Default: `spoke` if `--to` is set, otherwise `hub`.
-        #[arg(long)]
-        role: Option<String>,
-        /// Hub EndpointId when role is spoke (also implies `--role spoke` if role omitted).
-        #[arg(long, env = "LINK_P2P_TO")]
-        to: Option<String>,
-        /// Run in the foreground (same as `tun serve` / `tun connect`). Do not daemonize.
-        #[arg(long)]
-        foreground: bool,
-        /// System-service paths (e.g. `/run/link-p2p/tun.sock`). Requires `--foreground`.
-        #[arg(long)]
-        system: bool,
-        /// Internal: running under Windows SCM (set only in the registered service command line).
-        #[arg(long, hide = true)]
-        windows_service: bool,
-        /// Override this node's virtual IP (default: derived from its
-        /// EndpointId, inside 172.24.0.0/16).
-        #[arg(long)]
-        tun_ip: Option<Ipv4Addr>,
-        /// Upper bound for the TUN interface MTU (default 1280). The final
-        /// MTU is min(this, the negotiated QUIC datagram max); values above
-        /// 1280 are refused.
-        #[arg(long, default_value_t = 1280)]
-        mtu: u16,
-        /// Only accept TUN mesh connections from these EndpointIds
-        /// (repeatable). Default: anyone who knows this hub's EndpointId.
-        /// Also `LINK_P2P_ALLOW` (comma-separated).
-        #[arg(long)]
-        allow: Vec<String>,
-        /// Direct address hint(s) for the hub (spoke / foreground only).
-        #[arg(long = "to-addr")]
-        to_addr: Vec<SocketAddr>,
-    },
-    /// Stop the background TUN daemon (idempotent if already stopped).
-    Down {
-        /// Talk to the system-service daemon (fixed runtime paths).
-        #[arg(long)]
-        system: bool,
-    },
-    /// Show daemon role / VIP / path / uptime.
-    Status {
-        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-        format: OutputFormat,
-        /// Query the system-service daemon (fixed runtime paths).
-        #[arg(long)]
-        system: bool,
-    },
-    /// List mesh peers known to the local daemon.
-    Peers {
-        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-        format: OutputFormat,
-        /// Query the system-service daemon (fixed runtime paths).
-        #[arg(long)]
-        system: bool,
-    },
-    /// Local diagnostics that do not need python/nc: relay TCP probes, identity
-    /// path, Windows wintun.dll placement, and a loopback TCP echo drain.
-    Selftest {
-        /// Skip the loopback echo drain (relay/wintun checks only).
-        #[arg(long)]
-        no_echo: bool,
-    },
-    /// Exposed side: coordination hub for a virtual IP mesh. Accepts many
-    /// concurrent peers, broadcasts the VIP↔EndpointId roster, bridges this
-    /// machine to each, and forwards when spokes have no direct path.
-    Serve {
-        /// Override this node's virtual IP (default: derived from its
-        /// EndpointId, inside 172.24.0.0/16).
-        #[arg(long)]
-        tun_ip: Option<Ipv4Addr>,
-        /// Upper bound for the TUN interface MTU (default 1280). The final
-        /// MTU is min(this, the negotiated QUIC datagram max); values above
-        /// 1280 are refused.
-        #[arg(long, default_value_t = 1280)]
-        mtu: u16,
-        /// Only accept TUN mesh connections from these EndpointIds
-        /// (repeatable). Default: anyone who knows this hub's EndpointId.
-        /// Also `LINK_P2P_ALLOW` (comma-separated).
-        #[arg(long)]
-        allow: Vec<String>,
-    },
-    /// Dial a hub (`tun serve`), join the mesh, and try direct peer links.
-    Connect {
-        /// The remote node's EndpointId (printed by `tun serve` on startup).
-        /// Use `-` to read one line from stdin. Also `LINK_P2P_TO`.
-        #[arg(long, env = "LINK_P2P_TO")]
-        to: Option<String>,
-        /// Override this node's virtual IP (default: derived from its
-        /// EndpointId, inside 172.24.0.0/16).
-        #[arg(long)]
-        tun_ip: Option<Ipv4Addr>,
-        /// Upper bound for the TUN interface MTU (default 1280). The final
-        /// MTU is min(this, the negotiated QUIC datagram max); values above
-        /// 1280 are refused.
-        #[arg(long, default_value_t = 1280)]
-        mtu: u16,
-        /// Direct address hint(s) for the peer (repeatable) — see `connect
-        /// --to-addr`. Dialed directly, skipping discovery.
-        #[arg(long = "to-addr")]
-        to_addr: Vec<SocketAddr>,
-        /// Only accept inbound direct mesh links from these EndpointIds
-        /// (repeatable). Hub dial is always attempted; this gates peer↔peer
-        /// accepts and outbound dials. Also `LINK_P2P_ALLOW`.
-        #[arg(long)]
-        allow: Vec<String>,
-    },
-    /// Install or remove a system service (Linux: systemd; macOS: LaunchDaemon).
-    Service {
-        #[command(subcommand)]
-        command: TunServiceCommand,
-    },
-}
-
-/// `tun service` subcommands.
-#[derive(Subcommand, Clone)]
-enum TunServiceCommand {
-    /// Write the platform service definition and enable it.
-    Install {
-        /// `hub` or `spoke`. Default: spoke if `--to` is set, otherwise hub.
-        #[arg(long)]
-        role: Option<String>,
-        /// Hub EndpointId when role is spoke.
-        #[arg(long, env = "LINK_P2P_TO")]
-        to: Option<String>,
-        /// Identity key path for the service (stable EndpointId).
-        #[arg(long, default_value = tun_service::DEFAULT_IDENTITY_PATH)]
-        identity: PathBuf,
-        /// Unix account the Linux systemd service runs as (ignored on macOS — runs as root).
-        #[arg(long, default_value = tun_service::DEFAULT_SERVICE_USER)]
-        user: String,
-    },
-    /// Disable and remove the service unit (keeps `/etc/link-p2p/identity.key`).
-    Uninstall,
-}
-
-/// Localized `-h/--help` argument, replacing clap's built-in one (whose
-/// "Print help..." text is hardcoded English and can't be localized).
-/// Applied to the top command and every subcommand, alongside
-/// `disable_help_flag(true)`.
-///
-/// clap's `ArgAction::Help` already chooses short vs long help from whether
-/// the user typed `-h` or `--help`.
-fn help_arg() -> clap::Arg {
-    clap::Arg::new("help")
-        .short('h')
-        .long("help")
-        .action(clap::ArgAction::Help)
-        .help(tr!("Print help"))
-        .long_help(tr!(
-            "Print help. `-h` lists commands and examples; `--help` shows full option details."
-        ))
-        .hide_short_help(true)
-}
-
-/// Localized `-V/--version` argument, same story as [`help_arg`]. Top level
-/// only (subcommands don't get a version flag).
-fn version_arg() -> clap::Arg {
-    clap::Arg::new("version")
-        .short('V')
-        .long("version")
-        .action(clap::ArgAction::Version)
-        .help(tr!("Print version"))
-        .hide_short_help(true)
-}
-
-/// The `Command` from derive, with all display strings overridden at runtime
-/// so `--help` output is localized. clap derive only accepts string literals,
-/// so the structure comes from derive and the text is swapped here.
-/// Platform-specific quick start appended to `--help`.
-#[cfg(unix)]
-fn platform_after_help() -> &'static str {
-    "QUICK START:\n    link-p2p serve --forward 127.0.0.1:22\n    link-p2p connect --to <EndpointId> --listen 127.0.0.1:2222\n\nUNIX-ONLY:\n    connect --stdio, --to -, link-p2p man\n\nCOMPLETIONS:\n    link-p2p completions fish|bash|zsh > …\n\nSee docs/user-guide/platforms.md and README.md."
-}
-
-#[cfg(windows)]
-fn platform_after_help() -> &'static str {
-    "QUICK START:\n    link-p2p serve --forward 127.0.0.1:3389\n    link-p2p connect --to <EndpointId> --listen 127.0.0.1:13389\n\nCOMPLETIONS:\n    link-p2p completions powershell | Out-File $PROFILE\\link-p2p.ps1\n\nTUN mode needs Administrator + wintun.dll beside the binary. See docs/user-guide/platforms.md and README.md."
-}
-
-#[cfg(not(any(unix, windows)))]
-fn platform_after_help() -> &'static str {
-    "See README.md. TUN mode supports Linux, macOS, and Windows."
-}
-
-#[cfg(unix)]
-fn peer_to_help() -> String {
-    tr!("The remote node's EndpointId (printed by `serve` on startup). Use `-` to read one line from stdin. Also `LINK_P2P_TO`.")
-}
-
-#[cfg(not(unix))]
-fn peer_to_help() -> String {
-    tr!("The remote node's EndpointId (printed by `serve` on startup). Also `LINK_P2P_TO`.")
-}
-
-fn localized_command() -> clap::Command {
-    let cmd = Cli::command()
-        // clap's built-in `help` subcommand hardcodes English text that
-        // cannot be localized; disable it and localize the derived Help
-        // variant instead (see the Command::Help doc). Same for the
-        // -h/--help and -V/--version flags: replaced below with our own
-        // localized arguments.
-        .disable_help_subcommand(true)
-        .disable_help_flag(true)
-        .disable_version_flag(true)
-        // wrap_help: detect terminal width; cap so ultra-wide terminals stay readable.
-        // Indentation of wrapped option text is preserved by clap.
-        .max_term_width(100)
-        .about(tr!("Minimal TCP-over-QUIC forwarder on iroh"))
-        .long_about(helptext::hard_wrap_help(&tr!(
-            "link-p2p exposes a local TCP service to a P2P network (or dials one) over a direct, end-to-end encrypted QUIC connection. No TUN device, no root/admin privileges — just a persistent EndpointId and a QUIC hop."
-        )))
-        .after_help(i18n::lookup(platform_after_help()))
-        .mut_arg(
-            "identity",
-            |a| helptext::set_help(a, &tr!("Path to store/load this node's persistent secret key. If it doesn't exist yet, a new one is generated and saved there. Default: the XDG config dir, $XDG_CONFIG_HOME/link-p2p/identity.key (usually ~/.config/link-p2p/identity.key); a legacy ./identity.key in the working directory is migrated there once. Keep this stable if you want your EndpointId to stay the same across restarts.")),
-        )
-        .mut_arg(
-            "ephemeral",
-            |a| helptext::set_help(a, &tr!("Use a temporary identity that is never written to disk: the EndpointId changes every start. Conflicts with --identity.")),
-        )
-        .mut_arg(
-            "identity_passphrase",
-            |a| helptext::set_help(a, &tr!("Passphrase protecting the identity key file. When set, the key is stored encrypted (Argon2id + XChaCha20-Poly1305) instead of plaintext hex, so a disk/backup leak doesn't expose the key. Prefer the LINK_P2P_PASSPHRASE environment variable over passing it inline — the flag value is visible in `ps` and shell history. Conflicts with --ephemeral.")),
-        )
-        .mut_arg(
-            "relay",
-            |a| helptext::set_help(a, &tr!("Custom relay URL(s), repeatable. Merged with n0 by default (keeps discovery); use --no-n0-relays to replace. Does NOT disable hole-punch — use --relay-only for a true relay-only baseline. Also LINK_P2P_RELAY (comma-separated) and config.toml.")),
-        )
-        .mut_arg(
-            "relay_only",
-            |a| helptext::set_help(a, &tr!("Disable IP transports (no hole-punch / LAN direct); traffic stays on relay. Set on both peers for a reliable baseline. Conflicts with --to-addr. Also LINK_P2P_RELAY_ONLY.")),
-        )
-        .mut_arg(
-            "no_n0_relays",
-            |a| helptext::set_help(a, &tr!("With --relay, use only the listed relays (no n0 public relays / discovery). Default merges custom relays into n0. Also LINK_P2P_NO_N0_RELAYS and config.toml relays.no_n0.")),
-        )
-        .mut_arg(
-            "color",
-            |a| helptext::set_help(a, &tr!("Control colored output: auto (colors on TTY only), always, or never.")),
-        )
-        .mut_arg(
-            "max_conns",
-            |a| helptext::set_help(a, &tr!("Maximum number of concurrent forwarded connections. 0 means unlimited. Prevents resource exhaustion on endpoints exposed to the network.")),
-        )
-        .mut_arg(
-            "log_format",
-            |a| helptext::set_help(a, &tr!("Log output format: text (human-readable) or json (structured, for jq/CI pipelines).")),
-        )
-        .mut_arg(
-            "quiet",
-            |a| helptext::set_help(a, &tr!("Quiet user-facing banners (errors still print). Independent of RUST_LOG / -v.")),
-        )
-        .mut_arg(
-            "verbose",
-            |a| helptext::set_help(a, &tr!("Increase tracing detail (-v, -vv). Ignored when RUST_LOG is set.")),
-        )
-        .mut_arg(
-            "cc",
-            |a| helptext::set_help(a, &tr!("QUIC congestion controller: cubic (default) or bbr3. Also LINK_P2P_CC. See docs/architecture/performance.md.")),
-        )
-        .mut_arg(
-            "send_window",
-            |a| helptext::set_help(a, &tr!("QUIC connection send window in bytes. Also LINK_P2P_SEND_WINDOW.")),
-        )
-        .mut_arg(
-            "stream_recv_window",
-            |a| helptext::set_help(a, &tr!("QUIC per-stream receive window in bytes. Also LINK_P2P_STREAM_RECV_WINDOW.")),
-        )
-        .mut_arg(
-            "keepalive",
-            |a| helptext::set_help(a, &tr!("QUIC keepalive interval in seconds (default 5). Keeps NAT UDP mappings alive; the typical home-router mapping expires after 20-30s of idle. Raise it on high-latency links, lower it where NAT timeouts are aggressive.")),
-        )
-        .mut_arg(
-            "idle_timeout",
-            |a| helptext::set_help(a, &tr!("QUIC max idle timeout in seconds (default 30). After this long without traffic the peer is declared dead and the connection re-dialed. Raise it for lossy / high-latency links so a brief outage doesn't tear the connection down.")),
-        )
-        .mut_subcommand("serve", |s| {
-            s.disable_help_flag(true)
-                .arg(help_arg())
-                .about(tr!("Expose a local TCP service to the P2P network."))
-                .mut_arg(
-                    "forward",
-                    |a| helptext::set_help(a, &tr!("Local address to forward incoming P2P streams to, e.g. 127.0.0.1:8080")),
-                )
-                .mut_arg(
-                    "proxy",
-                    |a| helptext::set_help(a, &tr!("Generic proxy mode: dial the address from each stream's header instead of a fixed --forward target. Pairs with `connect --socks5-listen`.")),
-                )
-                .mut_arg(
-                    "allow",
-                    |a| helptext::set_help(a, &tr!("Only accept P2P connections from these EndpointIds (repeatable). Default: accept anyone who knows this node's EndpointId. Strongly recommended when the node is reachable from untrusted networks.")),
-                )
-                .mut_arg(
-                    "allow_private",
-                    |a| helptext::set_help(a, &tr!("In proxy mode, allow forwarding to private/loopback/link-local addresses (blocked by default to prevent SSRF — a malicious peer could otherwise make this node reach into your LAN or cloud metadata endpoints such as 169.254.169.254).")),
-                )
-        })
-        .mut_subcommand("connect", |s| {
-            let s = s
-                .disable_help_flag(true)
-                .arg(help_arg())
-                .about(tr!("Dial a remote node and expose it as a local TCP listener."))
-                .mut_arg("to", |a| helptext::set_help(a, &peer_to_help()))
-                .mut_arg(
-                    "listen",
-                    |a| helptext::set_help(a, &tr!("Local address to listen on, e.g. 127.0.0.1:9090")),
-                )
-                .mut_arg(
-                    "socks5_listen",
-                    |a| helptext::set_help(a, &tr!("Speak SOCKS5 (no-auth, CONNECT only) on this local address; local clients can then reach any destination through the remote `serve --proxy`.")),
-                );
-            #[cfg(unix)]
-            let s = s.mut_arg(
-                "stdio",
-                |a| helptext::set_help(a, &tr!(
-                    "Pipe stdin/stdout to one QUIC stream (ssh ProxyCommand / rsync -e). Status banners go to stderr."
-                )),
-            );
-            s.mut_arg(
-                "to_addr",
-                |a| helptext::set_help(a, &tr!(
-                    "Direct address hint(s) for the peer (repeatable), e.g. its public ip:port or a LAN address. Dialed directly, skipping discovery — use it when you exchanged addresses out-of-band and want no DNS/pkarr lookup (also faster reconnects). May be combined with --relay, which then stays as the fallback path."
-                )),
-            )
-        })
-        .mut_subcommand("tun", |s| {
-            s.disable_help_flag(true)
-                .arg(help_arg())
-                .about(tr!("Make machines reachable at the IP layer over QUIC datagrams (mesh with hub coordination)."))
-                .long_about(helptext::hard_wrap_help(&tr!(
-                    "Make machines reachable at the IP layer over QUIC datagrams.\n\nCreates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). Preferred day-to-day commands: `tun up` / `tun down` / `tun status` / `tun peers`. Foreground debug aliases remain: `tun serve` (hub) and `tun connect` (spoke) — same as `tun up --foreground --role hub|spoke`. Prefer `--cc bbr3` on lossy paths. Virtual IPs are IPv4 only — see docs/subsystems/tun.md."
-                )))
-                .mut_subcommand("up", |ss| {
-                    ss.disable_help_flag(true)
-                        .arg(help_arg())
-                        .about(tr!("Start the TUN mesh daemon (or run foreground with --foreground)."))
-                        .long_about(helptext::hard_wrap_help(&tr!(
-                            "Start the TUN mesh.\n\nWithout `--foreground`, spawns a background daemon and returns after it is ready (Unix today; on Windows use `--foreground`). With `--foreground`, blocks like `tun serve` / `tun connect` (same code paths).\n\nRole defaults: if `--to` is set, role is `spoke`; otherwise `hub`. Do not pass `--role hub` together with `--to`. `--role spoke` requires `--to <hub EndpointId>`.\n\nAlready-running daemon → usage error (exit 2). Ready timeout → exit 4 (check tun.log). Init failure reported by the child → exit 3."
-                        )))
-                        .mut_arg(
-                            "role",
-                            |a| helptext::set_help(a, &tr!("`hub` or `spoke`. Default: spoke if `--to` is set, otherwise hub.")),
-                        )
-                        .mut_arg(
-                            "to",
-                            |a| helptext::set_help(a, &peer_to_help()),
-                        )
-                        .mut_arg(
-                            "foreground",
-                            |a| helptext::set_help(a, &tr!("Run in the foreground instead of daemonizing (alias of `tun serve` / `tun connect`).")),
-                        )
-                        .mut_arg(
-                            "system",
-                            |a| helptext::set_help(a, &tr!("Use system-service paths (e.g. `/run/link-p2p/tun.sock`). Requires `--foreground`; pin identity with `--identity`.")),
-                        )
-                        .mut_arg(
-                            "tun_ip",
-                            |a| helptext::set_help(a, &tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16).")),
-                        )
-                        .mut_arg(
-                            "mtu",
-                            |a| helptext::set_help(a, &tr!("Upper bound for the TUN interface MTU (default 1280). The final MTU is min(this, the negotiated QUIC datagram max); values above 1280 are refused.")),
-                        )
-                        .mut_arg(
-                            "allow",
-                            |a| helptext::set_help(a, &tr!("Only accept TUN mesh connections from these EndpointIds (repeatable). Default: accept anyone who knows this hub's EndpointId. Also LINK_P2P_ALLOW.")),
-                        )
-                        .mut_arg(
-                            "to_addr",
-                            |a| helptext::set_help(a, &tr!("Direct address hint(s) for the hub (foreground spoke only) — see `connect --to-addr`.")),
-                        )
-                })
-                .mut_subcommand("down", |ss| {
-                    ss.disable_help_flag(true)
-                        .arg(help_arg())
-                        .about(tr!("Stop the background TUN daemon."))
-                        .long_about(helptext::hard_wrap_help(&tr!(
-                            "Ask the local TUN daemon to shut down and wait until it is gone. Safe to call when nothing is running (exit 0). Use `--system` for the supervisor-managed daemon."
-                        )))
-                        .mut_arg(
-                            "system",
-                            |a| helptext::set_help(a, &tr!("Target the system-service daemon (fixed runtime paths).")),
-                        )
-                })
-                .mut_subcommand("status", |ss| {
-                    ss.disable_help_flag(true)
-                        .arg(help_arg())
-                        .about(tr!("Show TUN daemon status (role, VIP, path, uptime)."))
-                        .mut_arg(
-                            "format",
-                            |a| helptext::set_help(a, &tr!("Output format: text (default) or json (for jq).")),
-                        )
-                        .mut_arg(
-                            "system",
-                            |a| helptext::set_help(a, &tr!("Query the system-service daemon (fixed runtime paths).")),
-                        )
-                })
-                .mut_subcommand("peers", |ss| {
-                    ss.disable_help_flag(true)
-                        .arg(help_arg())
-                        .about(tr!("List mesh peers known to the local TUN daemon."))
-                        .mut_arg(
-                            "format",
-                            |a| helptext::set_help(a, &tr!("Output format: text (default) or json (for jq).")),
-                        )
-                        .mut_arg(
-                            "system",
-                            |a| helptext::set_help(a, &tr!("Query the system-service daemon (fixed runtime paths).")),
-                        )
-                })
-                .mut_subcommand("selftest", |ss| {
-                    ss.disable_help_flag(true)
-                        .arg(help_arg())
-                        .about(tr!("Local diagnostics: relay TCP probe, wintun path, loopback echo drain."))
-                        .long_about(helptext::hard_wrap_help(&tr!(
-                            "Checks that do not need python or nc: TCP-probe each --relay URL, verify Windows wintun.dll beside the exe, and run a loopback TCP echo drain. Useful when validating a host before starting the mesh."
-                        )))
-                        .mut_arg(
-                            "no_echo",
-                            |a| helptext::set_help(a, &tr!("Skip the loopback TCP echo drain (relay/wintun checks only).")),
-                        )
-                })
-                .mut_subcommand("serve", |ss| {
-                    ss.disable_help_flag(true)
-                        .arg(help_arg())
-                        .about(tr!("Hub: roster + fallback forward for the virtual IP mesh (foreground)."))
-                        .long_about(helptext::hard_wrap_help(&tr!(
-                            "Hub: accept many concurrent peers, broadcast the VIP↔EndpointId roster, bridge this machine to each at the IP layer, and forward traffic when spokes have no direct path. Prints this node's virtual IP and EndpointId. Equivalent to `tun up --foreground --role hub`."
-                        )))
-                        .mut_arg(
-                            "tun_ip",
-                            |a| helptext::set_help(a, &tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16).")),
-                        )
-                        .mut_arg(
-                            "mtu",
-                            |a| helptext::set_help(a, &tr!("Upper bound for the TUN interface MTU (default 1280). The final MTU is min(this, the negotiated QUIC datagram max); values above 1280 are refused.")),
-                        )
-                        .mut_arg(
-                            "allow",
-                            |a| helptext::set_help(a, &tr!("Only accept TUN mesh connections from these EndpointIds (repeatable). Default: accept anyone who knows this hub's EndpointId. Also LINK_P2P_ALLOW.")),
-                        )
-                })
-                .mut_subcommand("connect", |ss| {
-                    ss.disable_help_flag(true)
-                        .arg(help_arg())
-                        .about(tr!("Dial a hub, join the mesh, and try direct peer links (foreground)."))
-                        .long_about(helptext::hard_wrap_help(&tr!(
-                            "Dial a `tun serve` hub, install 172.24.0.0/16 on the TUN, receive the mesh roster, and attempt direct links to other spokes (packets prefer direct; otherwise via hub). Equivalent to `tun up --foreground --role spoke --to <hub>`."
-                        )))
-                        .mut_arg(
-                            "to",
-                            |a| helptext::set_help(a, &peer_to_help()),
-                        )
-                        .mut_arg(
-                            "tun_ip",
-                            |a| helptext::set_help(a, &tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16).")),
-                        )
-                        .mut_arg(
-                            "mtu",
-                            |a| helptext::set_help(a, &tr!("Upper bound for the TUN interface MTU (default 1280). The final MTU is min(this, the negotiated QUIC datagram max); values above 1280 are refused.")),
-                        )
-                        .mut_arg(
-                            "to_addr",
-                            |a| helptext::set_help(a, &tr!("Direct address hint(s) for the peer (repeatable) — see `connect --to-addr`. Dialed directly, skipping discovery.")),
-                        )
-                        .mut_arg(
-                            "allow",
-                            |a| helptext::set_help(a, &tr!("Only accept inbound direct mesh links from these EndpointIds (repeatable); also gates outbound peer dials. Hub dial is always attempted. Also LINK_P2P_ALLOW.")),
-                        )
-                })
-                .mut_subcommand("service", |ss| {
-                    ss.disable_help_flag(true)
-                        .arg(help_arg())
-                        .about(tr!(
-                            "Install or remove a TUN system service (Linux systemd; macOS LaunchDaemon; Windows SCM)."
-                        ))
-                        .long_about(helptext::hard_wrap_help(&tr!(
-                            "Manage a platform service for `tun up --foreground --system`. Requires root/Administrator. Refuses to install if this binary is under a user-writable path. Identity defaults to /etc/link-p2p/identity.key (Unix) or %ProgramData%/link-p2p/identity.key (Windows). macOS runs as root LaunchDaemon; Linux uses a dedicated service user with CAP_NET_ADMIN; Windows runs as LocalSystem."
-                        )))
-                        .mut_subcommand("install", |sss| {
-                            sss.disable_help_flag(true)
-                                .arg(help_arg())
-                                .about(tr!("Install the TUN system service and start it."))
-                                .mut_arg(
-                                    "role",
-                                    |a| helptext::set_help(a, &tr!("`hub` or `spoke`. Default: spoke if `--to` is set, otherwise hub.")),
-                                )
-                                .mut_arg(
-                                    "to",
-                                    |a| helptext::set_help(a, &peer_to_help()),
-                                )
-                                .mut_arg(
-                                    "identity",
-                                    |a| helptext::set_help(a, &tr!("Service identity key path (default /etc/link-p2p/identity.key).")),
-                                )
-                                .mut_arg(
-                                    "user",
-                                    |a| helptext::set_help(a, &tr!(
-                                        "Linux systemd only: Unix user the service runs as (default link-p2p). Ignored on macOS (root LaunchDaemon)."
-                                    )),
-                                )
-                        })
-                        .mut_subcommand("uninstall", |sss| {
-                            sss.disable_help_flag(true)
-                                .arg(help_arg())
-                                .about(tr!("Disable and remove the TUN system service."))
-                        })
-                })
-        })
-        .mut_subcommand("ping", |s| {
-            s.disable_help_flag(true)
-                .arg(help_arg())
-                .about(tr!("Measure RTT to a remote node over the P2P network."))
-                .mut_arg(
-                    "to",
-                    |a| helptext::set_help(a, &peer_to_help()),
-                )
-                .mut_arg(
-                    "to_addr",
-                    |a| helptext::set_help(a, &tr!("Direct address hint(s) for the peer (repeatable) — see `connect --to-addr`. Dialed directly, skipping discovery.")),
-                )
-                .mut_arg(
-                    "format",
-                    |a| helptext::set_help(a, &tr!("Output format: text (default) or json (for jq).")),
-                )
-        })
-        .mut_subcommand("call", |s| {
-            let s = s
-                .disable_help_flag(true)
-                .arg(help_arg())
-                .about(tr!("Symmetric call: both peers publish and dial (tie-break by EndpointId)."))
-                .long_about(helptext::hard_wrap_help(&tr!(
-                    "Phone-like session: both sides run `call` with the same peer token (contact name, EndpointId, or short code). The peer with the smaller EndpointId dials; the other waits. Use --listen and/or --forward on both ends. Relays from config.toml merge with n0 unless --no-n0-relays."
-                )))
-                .mut_arg("to", |a| {
-                    helptext::set_help(
-                        a,
-                        &tr!("Contact name, EndpointId, or short code from `contact code`."),
-                    )
-                })
-                .mut_arg("listen", |a| {
-                    helptext::set_help(
-                        a,
-                        &tr!("Local TCP address to listen on; connections are forwarded to the peer."),
-                    )
-                })
-                .mut_arg("forward", |a| {
-                    helptext::set_help(
-                        a,
-                        &tr!("Local TCP target for streams the peer opens to us (optional)."),
-                    )
-                })
-                .mut_arg("to_addr", |a| {
-                    helptext::set_help(
-                        a,
-                        &tr!("Direct address hint(s) for the peer (repeatable)."),
-                    )
-                });
-            #[cfg(unix)]
-            let s = s.mut_arg("stdio", |a| {
-                helptext::set_help(
-                    a,
-                    &tr!("Pipe stdin/stdout to one stream (Unix). Conflicts with --listen."),
-                )
-            });
-            s
-        })
-        .mut_subcommand("contact", |s| {
-            s.disable_help_flag(true)
-                .arg(help_arg())
-                .about(tr!("Manage the local contacts book (names → EndpointId)."))
-                .mut_subcommand("add", |ss| {
-                    ss.disable_help_flag(true)
-                        .arg(help_arg())
-                        .about(tr!("Add or update a contact."))
-                        .mut_arg("name", |a| helptext::set_help(a, &tr!("Local nickname.")))
-                        .mut_arg(
-                            "id",
-                            |a| helptext::set_help(a, &tr!("EndpointId hex or short code.")),
-                        )
-                })
-                .mut_subcommand("remove", |ss| {
-                    ss.disable_help_flag(true)
-                        .arg(help_arg())
-                        .about(tr!("Remove a contact."))
-                        .mut_arg("name", |a| helptext::set_help(a, &tr!("Local nickname.")))
-                })
-                .mut_subcommand("list", |ss| {
-                    ss.disable_help_flag(true)
-                        .arg(help_arg())
-                        .about(tr!("List contacts."))
-                })
-                .mut_subcommand("code", |ss| {
-                    ss.disable_help_flag(true)
-                        .arg(help_arg())
-                        .about(tr!("Print this node's short code (and EndpointId)."))
-                })
-        })
-        .mut_subcommand("config", |s| {
-            s.disable_help_flag(true)
-                .arg(help_arg())
-                .about(tr!("Read or write ~/.config/link-p2p/config.toml defaults."))
-                .mut_subcommand("init", |ss| {
-                    ss.disable_help_flag(true)
-                        .arg(help_arg())
-                        .about(tr!(
-                            "Write a default config.toml (refuses to overwrite unless --force)."
-                        ))
-                        .mut_arg(
-                            "force",
-                            |a| helptext::set_help(a, &tr!("Replace an existing config file.")),
-                        )
-                })
-                .mut_subcommand("path", |ss| {
-                    ss.disable_help_flag(true)
-                        .arg(help_arg())
-                        .about(tr!("Print the resolved config file path."))
-                })
-        })
-        .mut_subcommand("completions", |s| {
-            s.disable_help_flag(true)
-                .arg(help_arg())
-                .about(tr!("Print a shell completion script to stdout."))
-                .long_about(helptext::hard_wrap_help(&tr!(
-                    "Print a shell completion script to stdout.\n\nRedirect it to wherever your shell loads completions from, e.g. `link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish`."
-                )))
-                .mut_arg(
-                    "shell",
-                    |a| helptext::set_help(a, &tr!("Which shell to generate a completion script for.")),
-                )
-        })
-        ;
-    #[cfg(unix)]
-    let cmd = cmd.mut_subcommand("man", |s| {
-        s.disable_help_flag(true)
-            .arg(help_arg())
-            .about(tr!("Print a man page (troff) for link-p2p to stdout."))
-    });
-    cmd.mut_subcommand("help", |s| {
-            // Our derived Help variant replaces clap's built-in one (disabled
-            // above); this is the only way to localize its description.
-            s.disable_help_flag(true)
-                .arg(help_arg())
-                .about(tr!("Print this message or the help of the given subcommand(s)"))
-                .mut_arg(
-                    "sub",
-                    |a| helptext::set_help(a, &tr!("Print help for the subcommand(s)")),
-                )
-        })
-        .arg(help_arg())
-        .arg(version_arg())
-}
 
 fn main() {
     // Language selection + catalog load first, before any output; falls
@@ -1148,9 +122,8 @@ fn main() {
 }
 
 async fn real_main(color_mode: ColorMode) -> Result<()> {
-    // God-function by history: worker/service probes, clap, identity, then all
-    // subcommands. Prefer extracting `cli.rs` + `commands/{serve,connect,...}.rs`
-    // when the next large command lands — identity already lives in `identity.rs`.
+    // Dispatch shell: worker probes, clap, identity, then subcommands.
+    // Definitions: `cli`; session helpers: `runtime`; stream cmds: `commands::*`.
 
     // Detached TUN daemon worker (spawned by tun_daemon::spawn_skeleton).
     // Not a user-facing subcommand — gated on env, ahead of clap.
@@ -1311,12 +284,38 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
         cli.relay_only = user_cfg.relays.relay_only;
     }
 
-    // Selftest needs merged --relay but not an identity key file.
-    if let Command::Tun {
-        command: TunCommand::Selftest { no_echo },
-    } = cli.command
-    {
-        return run_tun_selftest(no_echo, &cli.relay, ui, &styler).await;
+    // Selftest / stats need merged --relay (selftest) but not an identity key.
+    match &cli.command {
+        Command::Selftest { no_echo, tun } => {
+            return selftest::run_selftest(
+                &cli.relay,
+                selftest::SelftestOpts {
+                    no_echo: *no_echo,
+                    tun: *tun,
+                },
+                ui,
+                &styler,
+            )
+            .await;
+        }
+        Command::Tun {
+            command: TunCommand::Selftest { no_echo },
+        } => {
+            return selftest::run_selftest(
+                &cli.relay,
+                selftest::SelftestOpts {
+                    no_echo: *no_echo,
+                    tun: true,
+                },
+                ui,
+                &styler,
+            )
+            .await;
+        }
+        Command::Stats { last, format } => {
+            return print_path_stats(*last, *format, ui, &styler);
+        }
+        _ => {}
     }
 
     // Passphrase for the identity file: --identity-passphrase wins over
@@ -1454,6 +453,31 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
         }
         Command::Tun { command } => {
             // TUN hub accepts many peers; --max-conns only applies to stream serve.
+            // `tun join` is sugar for `tun up --role spoke --to …`.
+            let command = match command {
+                TunCommand::Join {
+                    to,
+                    foreground,
+                    system,
+                    tun_ip,
+                    mtu,
+                    allow,
+                    to_addr,
+                    hidden,
+                } => TunCommand::Up {
+                    role: Some("spoke".into()),
+                    to: Some(to),
+                    foreground,
+                    system,
+                    windows_service: false,
+                    tun_ip,
+                    mtu,
+                    allow,
+                    to_addr,
+                    hidden,
+                },
+                other => other,
+            };
             let warn_max_conns = matches!(
                 &command,
                 TunCommand::Serve { .. }
@@ -1476,11 +500,21 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                     mtu,
                     allow,
                     to_addr,
+                    hidden,
                 } => {
                     tun::validate_mtu(mtu)?;
                     let runtime = tun_ctl::RuntimeMode::from_system_flag(system);
                     let role = tun_daemon::resolve_up_role(role.as_deref(), to.as_deref())?;
                     let allow = parse_tun_allow(allow)?;
+                    if hidden && role != "spoke" {
+                        return Err(exit::coded(
+                            exit::USAGE,
+                            anyhow::anyhow!(tr!("`--hidden` is only valid for spoke / `tun join`")),
+                        ));
+                    }
+                    if hidden {
+                        std::env::set_var("LINK_P2P_TUN_HIDDEN", "1");
+                    }
                     if system && !foreground {
                         return Err(exit::coded(
                             exit::USAGE,
@@ -1562,7 +596,27 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                                     )
                                     .await
                                 }
-                                _ => unreachable!("resolve_up_role only returns hub|spoke"),
+                                "phone" => {
+                                    let hooks_state = tun::TunLiveState::new("phone", "fg");
+                                    let (hooks, _ready) = tun::TunHooks::new(hooks_state);
+                                    tun::run_tun_phone(
+                                        secret_key,
+                                        tun_ip,
+                                        mtu,
+                                        &cli.relay,
+                                        cli.relay_only,
+                                        cli.no_n0_relays,
+                                        Duration::from_secs(cli.keepalive),
+                                        Duration::from_secs(cli.idle_timeout),
+                                        tune,
+                                        allow,
+                                        ui,
+                                        styler,
+                                        std::sync::Arc::new(hooks),
+                                    )
+                                    .await
+                                }
+                                _ => unreachable!("resolve_up_role only returns hub|spoke|phone"),
                             }
                         }
                     } else {
@@ -1577,10 +631,43 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                             mtu,
                             tun_ip,
                             &allow_str,
+                            hidden,
                             &styler,
                         )
                         .await
                     }
+                }
+                TunCommand::Join { .. } => unreachable!("rewritten to Up above"),
+                TunCommand::Call {
+                    args,
+                    no_wait,
+                    system,
+                } => {
+                    let mode = tun_ctl::RuntimeMode::from_system_flag(system);
+                    match args.as_slice() {
+                        [] => Err(exit::coded(
+                            exit::USAGE,
+                            anyhow::anyhow!(tr!(
+                                "usage: tun call <peer> | tun call accept <peer> | tun call reject <peer>"
+                            )),
+                        )),
+                        [a, peer] if a == "accept" => {
+                            tun_daemon::cmd_call_accept(mode, peer, &styler).await
+                        }
+                        [a, peer] if a == "reject" => {
+                            tun_daemon::cmd_call_reject(mode, peer, &styler).await
+                        }
+                        [to] => tun_daemon::cmd_call(mode, to, no_wait, &styler).await,
+                        _ => Err(exit::coded(
+                            exit::USAGE,
+                            anyhow::anyhow!(tr!(
+                                "usage: tun call <peer> | tun call accept <peer> | tun call reject <peer>"
+                            )),
+                        )),
+                    }
+                }
+                TunCommand::Ring { system } => {
+                    tun_daemon::cmd_ring(tun_ctl::RuntimeMode::from_system_flag(system)).await
                 }
                 TunCommand::Down { system } => {
                     tun_daemon::cmd_down(tun_ctl::RuntimeMode::from_system_flag(system), &styler)
@@ -1635,10 +722,14 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                     mtu,
                     to_addr,
                     allow,
+                    hidden,
                 } => {
                     tun::validate_mtu(mtu)?;
                     let to = resolve_peer_to(to, false)?;
                     let allow = parse_tun_allow(allow)?;
+                    if hidden {
+                        std::env::set_var("LINK_P2P_TUN_HIDDEN", "1");
+                    }
                     tun::run_tun_connect(
                         secret_key,
                         &to,
@@ -1753,10 +844,15 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                     },
                 );
                 contacts::save(&path, &book)?;
+                let code = contacts::encode_short_code(eid);
                 ui.line(styler.ok(&tr_fmt!(
                     "saved contact {0} → {1}",
                     name,
-                    eid.fmt_short()
+                    code
+                )));
+                ui.line(styler.dim(&tr_fmt!(
+                    "next: link-p2p call --to {0} --listen 127.0.0.1:2222 --forward 127.0.0.1:22",
+                    name
                 )));
                 Ok(())
             }
@@ -1816,105 +912,18 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                 Ok(())
             }
         },
-        Command::Completions { .. } | Command::Help { .. } => {
-            // Completions / help return before identity setup.
-            Err(anyhow::anyhow!(
-                "internal: meta-command should have returned earlier"
-            ))
+        Command::Completions { .. }
+        | Command::Help { .. }
+        | Command::Stats { .. }
+        | Command::Selftest { .. } => {
+            // Completions / help / stats / selftest return before identity setup.
+            unreachable!("handled before identity load")
         }
         #[cfg(unix)]
         Command::Man => {
-            Err(anyhow::anyhow!(
-                "internal: meta-command should have returned earlier"
-            ))
+            unreachable!("handled before identity load")
         }
     }
-}
-
-/// Resolve `--to` / `LINK_P2P_TO`, including `-` = read EndpointId from stdin.
-/// Incompatible with `--stdio` (stdin is the data path).
-fn resolve_peer_to(to: Option<String>, stdio: bool) -> Result<String> {
-    let raw = to
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            exit::coded(
-                exit::USAGE,
-                anyhow::anyhow!(tr!("missing peer EndpointId (--to or LINK_P2P_TO)")),
-            )
-        })?;
-    if raw == "-" {
-        #[cfg(not(unix))]
-        {
-            let _ = stdio;
-            return Err(exit::coded(
-                exit::USAGE,
-                anyhow::anyhow!(tr!("--to - (read EndpointId from stdin) is only available on Unix builds")),
-            ));
-        }
-        #[cfg(unix)]
-        {
-            if stdio {
-                return Err(exit::coded(
-                    exit::USAGE,
-                    anyhow::anyhow!(tr!("--to - cannot be combined with --stdio (stdin conflict)")),
-                ));
-            }
-            let mut line = String::new();
-            std::io::stdin()
-                .read_line(&mut line)
-                .context(tr!("reading EndpointId from stdin"))?;
-            let id = line.trim();
-            if id.is_empty() {
-                return Err(exit::coded(
-                    exit::USAGE,
-                    anyhow::anyhow!(tr!("empty EndpointId on stdin")),
-                ));
-            }
-            if let Some(rest) = id.strip_prefix("ENDPOINT_ID=") {
-                return Ok(rest.trim().to_string());
-            }
-            return Ok(id.to_string());
-        }
-    }
-    Ok(raw)
-}
-
-/// CLI `--allow` wins; otherwise parse comma-separated `LINK_P2P_ALLOW`.
-fn merge_allow_list(cli: Vec<String>) -> Vec<String> {
-    if !cli.is_empty() {
-        return cli;
-    }
-    match std::env::var("LINK_P2P_ALLOW") {
-        Ok(s) if !s.trim().is_empty() => s
-            .split(',')
-            .map(|x| x.trim().to_string())
-            .filter(|x| !x.is_empty())
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// Parse TUN `--allow` / `LINK_P2P_ALLOW` into a set; `None` means open.
-fn parse_tun_allow(cli: Vec<String>) -> Result<Option<HashSet<EndpointId>>> {
-    let allow = merge_allow_list(cli);
-    if allow.is_empty() {
-        return Ok(None);
-    }
-    let mut set = HashSet::new();
-    for s in &allow {
-        let id: EndpointId = s.parse().map_err(|e| {
-            exit::coded(
-                exit::USAGE,
-                anyhow::Error::new(e).context(tr_fmt!(
-                    "'{0}' is not a valid EndpointId in --allow",
-                    s
-                )),
-            )
-        })?;
-        set.insert(id);
-    }
-    Ok(Some(set))
 }
 
 /// `tun service install/uninstall` — no global identity load (service identity
@@ -1957,1372 +966,82 @@ fn run_tun_service_command(command: TunServiceCommand, styler: &Styler) -> Resul
     }
 }
 
-/// Documented bring-up order for a freshly bound endpoint. Kept as a constant
-/// so a unit test can pin the regression that broke custom relays behind n0
-/// (`wait_online` before `install_extra_relays`).
-pub(crate) const ENDPOINT_ONLINE_STEPS: &[&str] = &["install_extra_relays", "wait_online"];
-
-/// Wait up to 30s for the endpoint to establish a network path.
-///
-/// Prefer [`bring_endpoint_online`] after `bind` so custom `--relay` URLs are
-/// installed first when the builder still uses the N0 preset. This standalone
-/// helper remains for callers that already installed relays (or use n0-only).
-///
-/// Quick check: `nc -u -v -w3 8.8.8.8 53` should get a response. If it
-/// hangs or is refused, UDP outbound is blocked.
-#[allow(dead_code)]
-pub(crate) async fn wait_online(endpoint: &Endpoint) -> Result<()> {
-    wait_online_ctx(endpoint, &[], true).await
-}
-
-async fn wait_online_ctx(endpoint: &Endpoint, relay: &[String], no_n0_relays: bool) -> Result<()> {
-    const ONLINE_TIMEOUT: Duration = Duration::from_secs(30);
-    match time::timeout(ONLINE_TIMEOUT, endpoint.online()).await {
-        Ok(()) => Ok(()),
-        Err(_elapsed) => {
-            let custom_hint = if !relay.is_empty() && !no_n0_relays {
-                tr!(
-                    "\n\
-                     You passed --relay without --no-n0-relays: the endpoint still\n\
-                     starts on n0's public relays. If n0 is blocked on this network,\n\
-                     either add --no-n0-relays (custom relay only) or ensure UDP to\n\
-                     n0 works. Custom URLs are installed before this wait; if you\n\
-                     still time out, probe your relay with `link-p2p tun selftest`."
-                )
-            } else if !relay.is_empty() && no_n0_relays {
-                tr!(
-                    "\n\
-                     --no-n0-relays is set: only your --relay URL(s) are used.\n\
-                     Check that the relay is reachable (TCP) and accepts QUIC/UDP.\n\
-                     Try: link-p2p tun selftest"
-                )
-            } else {
-                String::new()
-            };
-            Err(exit::coded(
-                exit::TIMEOUT,
-                anyhow::anyhow!(tr_fmt!(
-                    "endpoint did not come online within {0}.\n\
-                     \n\
-                     The most likely cause: outgoing UDP is blocked by a firewall.\n\
-                     iroh/QUIC relies on UDP for both direct hole-punching and\n\
-                     relay connections. Try:\n\
-                       nc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\n\
-                       RUST_LOG=iroh=debug {1}     # see exactly where it's stuck{2}",
-                    format!("{ONLINE_TIMEOUT:?}"),
-                    std::env::args().next().unwrap_or_else(|| "link-p2p".into()),
-                    custom_hint
-                )),
-            ))
-        }
-    }
-}
-
-/// Install any custom relays (N0-base builds), then wait until the endpoint is online.
-///
-/// **Order is load-bearing.** With `--relay` and without `--no-n0-relays`, the
-/// builder keeps [`presets::N0`] and custom URLs are added only via
-/// [`install_extra_relays`]. Waiting for `online()` *before* that install left
-/// the endpoint racing solely against n0 — hanging when n0 is blocked even
-/// though a self-hosted relay would have worked.
-pub(crate) async fn bring_endpoint_online(
-    endpoint: &Endpoint,
-    relay: &[String],
-    no_n0_relays: bool,
-) -> Result<()> {
-    debug_assert_eq!(ENDPOINT_ONLINE_STEPS[0], "install_extra_relays");
-    debug_assert_eq!(ENDPOINT_ONLINE_STEPS[1], "wait_online");
-    install_extra_relays(endpoint, relay, no_n0_relays).await?;
-    wait_online_ctx(endpoint, relay, no_n0_relays).await
-}
-
-/// Build an endpoint.
-///
-/// - `relay` empty → [`presets::N0`] (public relays + discovery).
-/// - `relay` non-empty and `no_n0_relays` → [`presets::Minimal`] + custom map only.
-/// - `relay` non-empty and not `no_n0_relays` → N0 base (keeps discovery); call
-///   [`bring_endpoint_online`] after `bind` (installs custom URLs, then waits).
-///
-/// `relay_only` clears IP transports (true relay-only baseline).
-pub(crate) fn build_endpoint(
-    secret_key: SecretKey,
-    relay: &[String],
-    keepalive: Duration,
-    idle_timeout: Duration,
-    tune: &TransportTune,
-    relay_only: bool,
-    no_n0_relays: bool,
-) -> Result<iroh::endpoint::Builder> {
-    let transport = transport_config(keepalive, idle_timeout, tune)?;
-    let builder = if relay.is_empty() {
-        Endpoint::builder(presets::N0)
-            .secret_key(secret_key)
-            .transport_config(transport)
-    } else if no_n0_relays {
-        let relay_map = RelayMap::try_from_iter(relay.iter().map(|s| s.as_str()))
-            .with_context(|| {
-                tr_fmt!(
-                    "invalid --relay URL in list: {0}",
-                    relay.join(", ")
-                )
-            })?;
-        Endpoint::builder(presets::Minimal)
-            .secret_key(secret_key)
-            .transport_config(transport)
-            .relay_mode(RelayMode::Custom(relay_map))
-    } else {
-        // Keep n0 discovery + public relays; extras via install_extra_relays.
-        Endpoint::builder(presets::N0)
-            .secret_key(secret_key)
-            .transport_config(transport)
-    };
-    if relay_only {
-        Ok(builder
-            .clear_ip_transports()
-            .addr_filter(iroh::address_lookup::AddrFilter::relay_only()))
-    } else {
-        Ok(builder)
-    }
-}
-
-/// Insert custom relay URLs into a live endpoint that was built with n0 base.
-pub(crate) async fn install_extra_relays(
-    endpoint: &Endpoint,
-    relay: &[String],
-    no_n0_relays: bool,
-) -> Result<()> {
-    if no_n0_relays || relay.is_empty() {
-        return Ok(());
-    }
-    for raw in relay {
-        let url: iroh::RelayUrl = raw
-            .parse()
-            .with_context(|| tr_fmt!("'{0}' is not a valid RelayUrl", raw))?;
-        let cfg = std::sync::Arc::new(iroh::RelayConfig::from(url.clone()));
-        endpoint.insert_relay(url, cfg).await;
-    }
-    Ok(())
-}
-
-pub(crate) fn reject_relay_only_with_to_addr(relay_only: bool, to_addr: &[SocketAddr]) -> Result<()> {
-    if relay_only && !to_addr.is_empty() {
-        return Err(exit::coded(
-            exit::USAGE,
-            anyhow::anyhow!(tr!(
-                "--relay-only cannot be combined with --to-addr (direct IP hints)"
-            )),
-        ));
-    }
-    Ok(())
-}
-
-/// Build the [`EndpointAddr`] used to dial a peer: the peer's EndpointId,
-/// optionally pinned down by a custom relay URL and/or out-of-band direct
-/// address hints (`--to-addr`).
-///
-/// Order of preference is up to iroh: the direct IP hints are tried first
-/// when reachable; the relay (if given) and discovery (if no relay is given)
-/// act as fallbacks for NAT traversal. Passing only direct hints and no
-/// relay means no DNS/pkarr lookup happens at all — the peer is dialed
-/// straight through the given addresses.
-pub(crate) fn build_dial_addr(
-    peer_id: EndpointId,
-    relay: &[String],
-    to_addr: &[SocketAddr],
-) -> Result<EndpointAddr> {
-    let mut addr = EndpointAddr::from(peer_id);
-    for relay_url in relay {
-        let relay_url = relay_url
-            .parse()
-            .with_context(|| tr_fmt!("'{0}' is not a valid RelayUrl", relay_url))?;
-        addr = addr.with_relay_url(relay_url);
-    }
-    // With no custom relays, dial by EndpointId alone and let n0 discovery
-    // (or --to-addr hints below) supply reachability.
-    for a in to_addr {
-        addr = addr.with_ip_addr(*a);
-    }
-    Ok(addr)
-}
-
-/// QUIC transport parameters shared by every mode.
-///
-/// The keepalive interval keeps NAT UDP mappings alive: they typically
-/// expire after 20-30s, so a tunnel idle for longer than that would be
-/// silently dropped by intermediate devices. 5s is also iroh's own default;
-/// it's set here explicitly so the contract is self-documenting.
-///
-/// The idle timeout is relaxed from iroh's 15s default to 30s: a longer
-/// window lets the peer survive brief path switches (iroh connection
-/// migration) and relay hiccups without being declared dead, while still
-/// detecting a genuinely gone peer within a reasonable time.
-///
-/// Both are CLI-tunable (`--keepalive`, `--idle-timeout`) because the right
-/// value depends on the network: aggressive home-router NATs want a shorter
-/// keepalive, high-latency or lossy links want a longer idle timeout.
-fn transport_config(
-    keepalive: Duration,
-    idle_timeout: Duration,
-    tune: &TransportTune,
-) -> Result<QuicTransportConfig> {
-    let mut b = QuicTransportConfig::builder()
-        .keep_alive_interval(keepalive)
-        .max_idle_timeout(Some(idle_timeout.try_into()?));
-    // Defaults are CUBIC + ~100Mbps/100ms windows (noq). Override only when
-    // the operator asked — see docs/architecture/performance.md and the transport matrix.
-    match tune.cc {
-        Some(CongestionControl::Cubic) => {
-            b = b.congestion_controller_factory(Arc::new(CubicConfig::default()));
-        }
-        Some(CongestionControl::Bbr3) => {
-            b = b.congestion_controller_factory(Arc::new(Bbr3Config::default()));
-        }
-        None => {}
-    }
-    if let Some(w) = tune.send_window {
-        b = b.send_window(w);
-    }
-    if let Some(w) = tune.stream_recv_window {
-        b = b.stream_receive_window(VarInt::from_u64(w).map_err(|_| {
-            anyhow::anyhow!(tr!("--stream-recv-window / LINK_P2P_STREAM_RECV_WINDOW out of range"))
-        })?);
-    }
-    Ok(b.build())
-}
-
 // ---------------------------------------------------------------------------
-// serve: accept incoming P2P connections, forward each QUIC stream to a
-// fixed local TCP target.
+// path stats + selftest helpers
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)] // CLI entry point; explicit config beats a grab-bag struct
-async fn run_serve(
-    secret_key: SecretKey,
-    mode: ServeMode,
-    allowed: Vec<EndpointId>,
-    relay: &[String],
-    relay_only: bool,
-    no_n0_relays: bool,
-    max_conns: usize,
-    keepalive: Duration,
-    idle_timeout: Duration,
-    tune: TransportTune,
+fn print_path_stats(
+    last: usize,
+    format: OutputFormat,
     ui: Ui,
-    styler: Styler,
+    styler: &Styler,
 ) -> Result<()> {
-    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune, relay_only, no_n0_relays)?
-        .alpns(vec![ALPN.to_vec(), PING_ALPN.to_vec()])
-        .bind()
-        .await
-        .context(tr!("binding endpoint"))?;
-
-    bring_endpoint_online(&endpoint, relay, no_n0_relays).await?;
-
-    ui.line(styler.banner("link-p2p serve"));
-    match mode {
-        ServeMode::Forward(target) => ui.line(format!(
-            "  {}",
-            tr_fmt!("forwarding P2P connections to: {0}", target)
-        )),
-        ServeMode::Proxy { allow_private } => {
-            ui.line(format!(
-                "  {}",
-                styler.info(&tr!(
-                    "proxy mode: dialing the target address from each stream's header"
-                ))
-            ));
-            if !allow_private {
+    let summary = path_stats::load_summary(Some(last))?;
+    match format {
+        OutputFormat::Json => {
+            let path = path_stats::stats_path();
+            println!(
+                "{{\"file\":{file},\"total\":{total},\"direct\":{direct},\"relay\":{relay},\
+\"relay_candidate\":{cand},\"unknown\":{unknown},\"direct_pct\":{pct:.1}}}",
+                file = serde_json::to_string(&path.display().to_string()).unwrap_or_else(|_| "\"\"".into()),
+                total = summary.total,
+                direct = summary.direct,
+                relay = summary.relay,
+                cand = summary.relay_candidate,
+                unknown = summary.unknown,
+                pct = summary.direct_pct(),
+            );
+        }
+        OutputFormat::Text => {
+            ui.line(styler.banner(&tr!("link-p2p path stats")));
+            ui.line(styler.dim(&tr_fmt!(
+                "file: {0} (last {1} samples)",
+                path_stats::stats_path().display(),
+                last
+            )));
+            if summary.total == 0 {
+                ui.line(styler.warn(&tr!(
+                    "no samples yet — run `ping` or a connect/call session first"
+                )));
+                return Ok(());
+            }
+            ui.line(styler.ok(&tr_fmt!(
+                "direct {0}/{1} ({2:.0}%)  relay {3}  relay+candidate {4}  unknown {5}",
+                summary.direct,
+                summary.total,
+                summary.direct_pct(),
+                summary.relay,
+                summary.relay_candidate,
+                summary.unknown
+            )));
+            // Show a few recent lines for context.
+            for sample in summary.samples.iter().rev().take(5) {
                 ui.line(format!(
-                    "  {}",
-                    styler.warn(&tr!(
-                        "proxy targets in private/loopback ranges are blocked (use --allow-private to permit)"
-                    ))
+                    "  {}  {}  {}  {}{}",
+                    sample.ts,
+                    sample.cmd,
+                    sample.peer_short,
+                    sample.path,
+                    sample
+                        .upgrade_ms
+                        .map(|ms| format!("  upgrade_ms={ms}"))
+                        .unwrap_or_default()
                 ));
             }
         }
     }
-    // The whitelist is an important security property; surface it in the
-    // banner instead of hiding it in --help.
-    if !allowed.is_empty() {
-        ui.line(format!(
-            "  {}",
-            styler.info(&tr_fmt!(
-                "only accepting connections from {0} allowed peer(s)",
-                allowed.len()
-            ))
-        ));
-    }
-    ui.line(format!(
-        "  {}",
-        styler.dim(&tr!(
-            "your EndpointId (give this to peers running `connect --to`):"
-        ))
-    ));
-    let ep_hex = endpoint.id().to_string();
-    ui.line(format!("    {}", styler.highlight(&ep_hex)));
-    // Machine-readable for scripts / e2e — always stdout, even under `-q`.
-    println!("ENDPOINT_ID={ep_hex}");
-    ui.line("");
-    ui.line(styler.dim(&tr!("Press Ctrl+C to stop.")));
-
-    // Every per-stream forwarder is our own spawned task; the router's
-    // accept loop doesn't know about them, so keep the handles here for the
-    // drain on shutdown.
-    let tasks: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
-    let handler = ForwardHandler {
-        mode,
-        allowed: if allowed.is_empty() {
-            None
-        } else {
-            Some(Arc::new(allowed.into_iter().collect()))
-        },
-        // 0 = unlimited. usize::MAX keeps the acquire() call shape uniform.
-        semaphore: conn_semaphore(max_conns),
-        // A second, independent cap on *connections* (not streams): an idle
-        // connection costs memory + an accept task even without any stream,
-        // so bound how many such connections a flood of dials can open.
-        conn_semaphore: conn_semaphore(max_conns),
-        tasks: tasks.clone(),
-        endpoint: endpoint.clone(),
-        relay_only,
-        styler,
-        quiet: ui.quiet,
-    };
-    let router = Router::builder(endpoint.clone())
-        .accept(ALPN, handler)
-        .accept(PING_ALPN, PingHandler)
-        .spawn();
-
-    tokio::signal::ctrl_c().await?;
-    ui.line(styler.warn(&tr!("shutting down...")));
-    router.shutdown().await?;
-    // router.shutdown() only stops the router's own accept loop — the
-    // per-stream forwarders are our tasks, so give them the same bounded
-    // drain window as run_connect.
-    let pending = std::mem::take(&mut *tasks.lock().unwrap_or_else(|e| e.into_inner()));
-    pipe::drain_tasks(pending).await;
     Ok(())
 }
 
-/// Reject a connection with a QUIC close frame instead of silently dropping
-/// it, so the peer sees a decisive error rather than a timeout. Best-effort:
-/// if the connection is already dead, there's nothing to close.
-fn reject_connection(connection: &Connection, peer: EndpointId) {
-    warn!(%peer, "{}", tr!("rejecting connection: peer is not in the --allow list"));
-    connection.close(VarInt::from_u32(0), b"peer not allowed");
-}
-
-#[derive(Debug)]
-struct ForwardHandler {
-    mode: ServeMode,
-    /// Peer whitelist: `None` accepts anyone (`serve` without `--allow`),
-    /// `Some(set)` rejects every connection whose EndpointId is not in it.
-    allowed: Option<Arc<HashSet<EndpointId>>>,
-    /// Bounds the number of concurrently forwarded streams.
-    semaphore: Arc<Semaphore>,
-    /// Bounds the number of concurrently *open connections* (idle ones
-    /// included), independent of the stream cap.
-    conn_semaphore: Arc<Semaphore>,
-    /// Every spawned per-stream forwarder, so Ctrl+C can drain them
-    /// (bounded, see DRAIN_TIMEOUT) instead of cutting them off mid-flush.
-    tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
-    endpoint: Endpoint,
-    relay_only: bool,
-    styler: Styler,
-    quiet: bool,
-}
-
-impl ProtocolHandler for ForwardHandler {
-    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let peer = connection.remote_id();
-        info!(%peer, "{}", tr!("connection opened"));
-
-        // Authorization: with `--allow`, only whitelisted peers get past this
-        // point. iroh's QUIC handshake already authenticated the peer's key
-        // (remote_id is its public identity), so this is a real check, not a
-        // claim. Close the connection so the peer learns immediately.
-        if let Some(allowed) = &self.allowed {
-            if !allowed.contains(&peer) {
-                reject_connection(&connection, peer);
-                return Ok(());
-            }
-        }
-
-        // Bound concurrent *connections* (not just streams): a flood of idle
-        // dials would otherwise each hold an accept task + connection state
-        // forever. Acquired before the accept loop; released when the whole
-        // connection ends.
-        tracing::debug!(%peer, "waiting for connection permit");
-        let _conn_permit = match self.conn_semaphore.clone().acquire_owned().await {
-            Ok(p) => p,
-            Err(_) => return Ok(()), // semaphore closed; shouldn't happen
-        };
-        tracing::debug!(%peer, "connection permit acquired, entering accept_bi loop");
-
-        // One QUIC connection can carry many independent streams. Each stream
-        // here corresponds to one TCP connection on the far side (see
-        // run_connect below), so we keep accepting streams until the peer
-        // closes the whole connection.
-        spawn_path_monitor(
-            connection.clone(),
-            peer,
-            self.endpoint.clone(),
-            self.relay_only,
-            self.styler,
-            self.quiet,
-        );
-        loop {
-            // Bound the number of concurrently forwarded streams. We acquire
-            // the permit *before* accept_bi so a hostile peer flooding streams
-            // can't make us spawn unbounded tasks/sockets: the extra streams
-            // just queue up at the QUIC layer until a slot frees.
-            let permit = match self.semaphore.clone().acquire_owned().await {
-                Ok(p) => p,
-                Err(_) => break, // semaphore closed; shouldn't happen
-            };
-            tracing::debug!(%peer, "waiting for bidi stream (accept_bi)");
-            let (send, recv) = match connection.accept_bi().await {
-                Ok(pair) => {
-                    tracing::debug!(%peer, "bidi stream accepted");
-                    pair
-                }
-                Err(e) => {
-                    // This fires both on a clean shutdown (peer closed the
-                    // connection) and on real transport errors. iroh doesn't
-                    // give us a cheap way to tell those apart here, so log
-                    // unconditionally rather than silently dropping real
-                    // failures — a clean close is just a bit of harmless noise.
-                    warn!(%peer, error = %e, "{}", tr!("connection ended"));
-                    break;
-                }
-            };
-            let mode = self.mode;
-            let task = tokio::spawn(async move {
-                // The permit lives as long as this stream does; dropping it
-                // after handle_forward_stream frees the slot.
-                let _permit = permit;
-                if let Err(e) = handle_forward_stream(mode, send, recv).await {
-                    warn!(%peer, error = %e, "{}", tr!("stream error"));
-                }
-            });
-            push_task(&self.tasks, task);
-        }
-
-        connection.closed().await;
-        info!(%peer, "{}", tr!("connection closed"));
-        Ok(())
-    }
-}
-
-/// Handle `link-p2p ping` probes: echo the 8-byte timestamp back over a
-/// one-shot bidi stream so the caller can measure RTT. `pub(crate)` so TUN
-/// nodes (tun.rs) can answer probes too.
-#[derive(Debug)]
-pub(crate) struct PingHandler;
-
-impl ProtocolHandler for PingHandler {
-    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        loop {
-            let (mut send, mut recv) = match connection.accept_bi().await {
-                Ok(pair) => pair,
-                Err(_) => break, // connection ended
-            };
-            let mut ts = [0u8; 8];
-            if recv.read_exact(&mut ts).await.is_err() {
-                continue;
-            }
-            if send.write_all(&ts).await.is_err() {
-                continue;
-            }
-            let _ = send.finish();
-        }
-        Ok(())
-    }
-}
-
-/// Dial the target and pipe bytes between it and the given QUIC stream.
-pub(crate) async fn handle_forward_stream(
-    mode: ServeMode,
-    send: SendStream,
-    mut recv: RecvStream,
-) -> Result<()> {
-    let target = match mode {
-        ServeMode::Forward(addr) => {
-            // Fixed-forward: consume STREAM_HELLO before dialing so accept_bi
-            // completes as soon as the connect side opens the stream — not
-            // when the local TCP client eventually writes (or FIN)s.
-            pipe::read_stream_hello(&mut recv).await?;
-            addr
-        }
-        ServeMode::Proxy { allow_private } => {
-            // Proxy already has an on-wire header (`write_target` / read_target).
-            let target = socks5::read_target(&mut recv).await?.resolve().await?;
-            check_proxy_target(target, allow_private)?;
-            target
-        }
-    };
-    let tcp = TcpStream::connect(target)
-        .await
-        .with_context(|| tr_fmt!("connecting to {0}", target))?;
-    tracing::debug!("DBG forward: connected to {target}, starting pipe_streams");
-    pipe::pipe_streams(tcp, send, recv).await
-}
-
-/// Path / throughput monitor for a live session.
-///
-/// - Every 30s: debug-log path kind + Quinn counters (path from
-///   [`Connection::paths`], not `udp_tx/rx` heuristics).
-/// - While not on a direct path and not `--relay-only`: every ~45s call
-///   [`Endpoint::network_change`] so magicsock re-STUNs / retries hole-punch
-///   (home NAT mappings drift; a single settle at connect is not enough).
-/// - If traffic is active but stuck under a low ceiling while still on relay,
-///   warn once that public relays rate-limit (self-host / wait for direct).
-pub(crate) fn spawn_path_monitor(
-    connection: Connection,
-    peer: EndpointId,
-    endpoint: Endpoint,
-    relay_only: bool,
-    styler: Styler,
-    quiet: bool,
-) -> tokio::task::JoinHandle<()> {
-    /// Sample window for path stats + slow-relay detection.
-    const STATS_SECS: u64 = 30;
-    /// How often to nudge magicsock while still on relay (and not relay-permanent).
-    const UPGRADE_SECS: u64 = 45;
-    /// After this many pure-relay (no IP candidate) samples, slow upgrades.
-    const RELAY_PERM_STREAK: u8 = 4;
-    /// Backed-off upgrade interval for peers that never show a direct candidate.
-    const UPGRADE_SECS_PERMANENT: u64 = 300;
-    /// Sustained under this (with real traffic) → treat as relay-shaped ceiling.
-    const RELAY_SLOW_BPS: u64 = 128 * 1024;
-    /// Ignore idle windows (keepalive alone).
-    const ACTIVE_MIN_BPS: u64 = 2 * 1024;
-
-    tokio::spawn(async move {
-        let mut stats_tick = time::interval(Duration::from_secs(STATS_SECS));
-        stats_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-        let mut next_upgrade = tokio::time::Instant::now() + Duration::from_secs(UPGRADE_SECS);
-        // Skip the immediate first stats tick.
-        stats_tick.tick().await;
-
-        let mut prev_bytes = {
-            let s = connection.stats();
-            s.udp_tx.bytes.saturating_add(s.udp_rx.bytes)
-        };
-        let mut slow_relay_streak: u8 = 0;
-        let mut no_ip_candidate_streak: u8 = 0;
-        let mut warned_relay_limit = false;
-        let mut warned_relay_permanent = false;
-        let mut was_direct = path_kind::path_kind(&connection).is_direct();
-
-        loop {
-            let upgrade_delay = if no_ip_candidate_streak >= RELAY_PERM_STREAK {
-                Duration::from_secs(UPGRADE_SECS_PERMANENT)
-            } else {
-                Duration::from_secs(UPGRADE_SECS)
-            };
-            tokio::select! {
-                _ = stats_tick.tick() => {
-                    let s = connection.stats();
-                    let kind = path_kind::path_kind(&connection);
-                    let bytes = s.udp_tx.bytes.saturating_add(s.udp_rx.bytes);
-                    let delta = bytes.saturating_sub(prev_bytes);
-                    prev_bytes = bytes;
-                    let bps = delta / STATS_SECS;
-
-                    tracing::debug!(
-                        %peer,
-                        path = kind.as_str(),
-                        paths = connection.paths().len(),
-                        bps,
-                        udp_tx = s.udp_tx.datagrams,
-                        udp_rx = s.udp_rx.datagrams,
-                        lost_packets = s.lost_packets,
-                        lost_bytes = s.lost_bytes,
-                        "path stats (path= from iroh paths(); udp_* are Quinn layer counters)"
-                    );
-
-                    let now_direct = kind.is_direct();
-                    if now_direct && !was_direct {
-                        info!(%peer, "{}", tr!("path upgraded to direct (IP)"));
-                        if !quiet {
-                            eprintln!(
-                                "{}",
-                                styler.ok(&tr!("path upgraded to direct (IP)"))
-                            );
-                        }
-                        warned_relay_limit = false;
-                        warned_relay_permanent = false;
-                        slow_relay_streak = 0;
-                        no_ip_candidate_streak = 0;
-                    }
-                    was_direct = now_direct;
-
-                    match kind {
-                        path_kind::PathKind::Relay => {
-                            no_ip_candidate_streak =
-                                no_ip_candidate_streak.saturating_add(1);
-                        }
-                        path_kind::PathKind::Direct
-                        | path_kind::PathKind::RelayWithDirectCandidate => {
-                            no_ip_candidate_streak = 0;
-                        }
-                        path_kind::PathKind::Unknown => {}
-                    }
-                    if !warned_relay_permanent
-                        && no_ip_candidate_streak >= RELAY_PERM_STREAK
-                    {
-                        warned_relay_permanent = true;
-                        let msg = tr!(
-                            "no direct IP candidate observed — treating peer as relay-permanent (slowing hole-punch retries). CGNAT without global IPv6 often needs a self-hosted --relay"
-                        );
-                        tracing::warn!(%peer, "{}", msg);
-                        if !quiet {
-                            eprintln!("{}", styler.warn(&msg));
-                        }
-                    }
-
-                    if !now_direct && (ACTIVE_MIN_BPS..RELAY_SLOW_BPS).contains(&bps) {
-                        slow_relay_streak = slow_relay_streak.saturating_add(1);
-                    } else {
-                        slow_relay_streak = 0;
-                    }
-                    if !warned_relay_limit && slow_relay_streak >= 2 {
-                        warned_relay_limit = true;
-                        let kbps = bps / 1024;
-                        let msg = tr_fmt!(
-                            "low throughput while on relay (~{0} KB/s) — public relays rate-limit; self-host with --relay (and raise iroh-relay client limits) or wait for direct. See docs/architecture/performance.md",
-                            kbps
-                        );
-                        tracing::warn!(%peer, path = kind.as_str(), bps, "{}", msg);
-                        if !quiet {
-                            eprintln!("{}", styler.warn(&msg));
-                        }
-                    }
-                }
-                _ = tokio::time::sleep_until(next_upgrade), if !relay_only => {
-                    next_upgrade = tokio::time::Instant::now() + upgrade_delay;
-                    // Experiment gates (env, temporary):
-                    // - LINK_P2P_NO_PATH_NUDGE=1  → never call network_change
-                    // - LINK_P2P_FORCE_PATH_NUDGE=1 → nudge even when already
-                    //   direct (stress CID churn / Tailscale re-probe)
-                    let force = std::env::var_os("LINK_P2P_FORCE_PATH_NUDGE").is_some();
-                    let disable = std::env::var_os("LINK_P2P_NO_PATH_NUDGE").is_some();
-                    let should_nudge =
-                        !disable && (force || !path_kind::path_kind(&connection).is_direct());
-                    if should_nudge {
-                        tracing::debug!(
-                            %peer,
-                            secs = upgrade_delay.as_secs(),
-                            force,
-                            "nudging magicsock (network_change) for path upgrade retry"
-                        );
-                        endpoint.network_change().await;
-                    } else if disable {
-                        tracing::debug!(
-                            %peer,
-                            "skipping path nudge (LINK_P2P_NO_PATH_NUDGE set)"
-                        );
-                    }
-                }
-                _ = connection.closed() => break,
-            }
-        }
-    })
-}
-
-// ---------------------------------------------------------------------------
-// connect: dial a remote node once, then for every local TCP connection open
-// a fresh QUIC stream on that same connection and pipe.
+// ping lives in commands::ping.
 // ---------------------------------------------------------------------------
 
-/// Reconnect backoff bounds: 1s, 2s, 4s, ... capped at 30s. Shared with the
-/// TUN reconnect loop (tun.rs).
-pub(crate) const RECONNECT_BASE: Duration = Duration::from_secs(1);
-pub(crate) const RECONNECT_MAX: Duration = Duration::from_secs(30);
-/// A connection must stay up at least this long before a successful dial
-/// counts as "stable" for backoff purposes. Handshake-then-instant-kick
-/// (relay identity conflict, brief path flaps) must *not* reset backoff —
-/// otherwise the watcher redials in a tight loop with no sleep.
-pub(crate) const MIN_STABLE_CONN: Duration = Duration::from_secs(5);
 
-/// Exponential backoff with a cap, shared by the stream-mode reconnect
-/// watcher and the TUN reconnect loop. `next()` returns the delay for the
-/// *next* attempt and then advances (1s, 2s, 4s, ... capped); `reset()`
-/// restarts from the base — call it only after a *stable* session, not
-/// merely after `connect()` returns `Ok`.
-pub(crate) struct Backoff {
-    next_delay: Duration,
-    base: Duration,
-    max: Duration,
-}
-
-impl Backoff {
-    pub(crate) fn new(base: Duration, max: Duration) -> Self {
-        Self {
-            next_delay: base,
-            base,
-            max,
-        }
-    }
-
-    pub(crate) fn next(&mut self) -> Duration {
-        let d = self.next_delay;
-        self.next_delay = std::cmp::min(self.next_delay * 2, self.max);
-        d
-    }
-
-    pub(crate) fn reset(&mut self) {
-        self.next_delay = self.base;
-    }
-
-    /// After a live session ends: reset if it was stable, otherwise advance
-    /// and return the sleep before the next dial. `None` = redial immediately.
-    pub(crate) fn after_session(
-        &mut self,
-        lived: Duration,
-        min_stable: Duration,
-    ) -> Option<Duration> {
-        if lived >= min_stable {
-            self.reset();
-            None
-        } else {
-            Some(self.next())
-        }
-    }
-}
-
-/// The live QUIC connection slot shared between the reconnect watcher (the
-/// only writer) and the per-stream forwarders (readers). `None` means "the
-/// connection is down and we're reconnecting — new streams wait".
-///
-/// A `watch` channel (not a lock + poll): waiters are woken the moment the
-/// watcher swaps in the new connection, so a client that arrives during a
-/// reconnect window is served with zero polling delay instead of up to
-/// RECONNECT_POLL of stale sleep. `watch::Sender::send` requires the value
-/// to be cloneable; `Connection` is cheap to clone (an Arc inside).
-#[derive(Clone)]
-pub(crate) struct ConnSlot(Arc<watch::Sender<Option<Connection>>>);
-
-impl ConnSlot {
-    pub(crate) fn new(initial: Option<Connection>) -> Self {
-        let (tx, _rx) = watch::channel(initial);
-        Self(Arc::new(tx))
-    }
-
-    pub(crate) fn replace(&self, conn: Option<Connection>) {
-        // send() returns Err only when all receivers are dropped — at that
-        // point nobody is waiting for a reconnect anyway.
-        let _ = self.0.send(conn);
-    }
-
-    pub(crate) fn subscribe(&self) -> watch::Receiver<Option<Connection>> {
-        self.0.subscribe()
-    }
-
-    /// Snapshot of the current connection.
-    ///
-    /// The returned `Connection` may become stale immediately if a reconnect
-    /// watcher calls [`Self::replace`] with `None` or a new conn. Prefer
-    /// [`open_stream_wait`] for dialing streams across reconnect windows;
-    /// use this only for best-effort diagnostics (stats, close reason).
-    pub(crate) fn borrow(&self) -> Option<Connection> {
-        self.0.borrow().clone()
-    }
-}
-
-/// Open a bidi stream on the current connection, waiting through reconnect
-/// windows instead of failing the local client.
-///
-/// - Slot empty (reconnecting): wait on the watch channel — the watcher's
-///   `replace(Some(..))` wakes us the instant the new connection lands.
-/// - `open_bi` fails and the connection is closed: same wait — the watcher
-///   will redial and swap the slot.
-/// - `open_bi` fails on a still-alive connection (e.g. stream limit): give
-///   up this stream only.
-/// - `open_bi` hangs past `open_timeout`: log [`Connection::stats`] /
-///   `close_reason` / `paths`, close **only this connection** (not the
-///   endpoint), clear the slot, and wait for a redial. Callers that dial
-///   must run [`spawn_reconnect_watcher`] (or equivalent) or this waits
-///   forever after a hang.
-pub(crate) async fn open_stream_wait(slot: &ConnSlot) -> Result<(SendStream, RecvStream)> {
-    open_stream_wait_deadline(slot, Duration::from_secs(5)).await
-}
-
-/// Like [`open_stream_wait`], but with an explicit `open_bi` deadline.
-pub(crate) async fn open_stream_wait_deadline(
-    slot: &ConnSlot,
-    open_timeout: Duration,
-) -> Result<(SendStream, RecvStream)> {
-    loop {
-        // A fresh receiver per attempt: starts at the current value, so if
-        // a connection is already present we never wait at all.
-        let mut rx = slot.0.subscribe();
-        let conn = (*rx.borrow_and_update()).clone();
-        let Some(conn) = conn else {
-            // Reconnecting: wait for the watcher to swap in a connection.
-            // Err means the sender was dropped (process shutting down) — bail.
-            rx.changed()
-                .await
-                .map_err(|_| anyhow::anyhow!(tr!("connection slot closed")))?;
-            continue;
-        };
-        match time::timeout(open_timeout, conn.open_bi()).await {
-            Ok(Ok(pair)) => return Ok(pair),
-            Ok(Err(e)) if conn.close_reason().is_some() => {
-                warn!(error = %e, "{}", tr!("connection lost; waiting for reconnect"));
-                // The current value is a dead connection; wait until the
-                // watcher replaces it (changed() fires only on a write, so
-                // this can't spin).
-                rx.changed()
-                    .await
-                    .map_err(|_| anyhow::anyhow!(tr!("connection slot closed")))?;
-            }
-            Ok(Err(e)) => return Err(e.into()),
-            Err(_) => {
-                log_open_bi_timeout(&conn);
-                // Force the reconnect watcher (or peer) to install a fresh
-                // connection. Do NOT close the Endpoint — only this conn.
-                conn.close(0u32.into(), b"open_bi timeout");
-                slot.replace(None);
-                warn!("{}", tr!("open_bi timed out; waiting for reconnect"));
-                rx.changed()
-                    .await
-                    .map_err(|_| anyhow::anyhow!(tr!("connection slot closed")))?;
-            }
-        }
-    }
-}
-
-fn log_open_bi_timeout(conn: &Connection) {
-    let stats = conn.stats();
-    let close = conn.close_reason();
-    let kind = path_kind::path_kind(conn);
-    warn!(
-        close = ?close,
-        path = kind.as_str(),
-        paths = conn.paths().len(),
-        udp_tx = stats.udp_tx.bytes,
-        udp_rx = stats.udp_rx.bytes,
-        lost_packets = stats.lost_packets,
-        "{}",
-        tr!("open_bi timed out (connection still open; see stats/paths)")
-    );
-}
-
-/// Reconnect watcher: waits for the current connection to die, then re-dials
-/// with exponential backoff, swapping the slot on success.
-///
-/// Backoff resets only when a session lived at least [`MIN_STABLE_CONN`].
-/// A handshake that succeeds and then dies in milliseconds (relay kick,
-/// path flap) keeps climbing the backoff and sleeps before the next dial —
-/// otherwise `connect()` success alone would reset to zero delay and spin.
-///
-/// Runs for the lifetime of the process. Deliberately NOT tracked in the
-/// shutdown drain (`tasks`): it never finishes on its own, and the process
-/// exits right after the drain anyway.
-///
-/// Scope note: this reconnects the QUIC *connection*; process-level restarts
-/// are the systemd unit's job (contrib/systemd), they don't mix.
-pub(crate) fn spawn_reconnect_watcher(
-    slot: &ConnSlot,
-    endpoint: &Endpoint,
-    dial_addr: EndpointAddr,
-    peer: EndpointId,
-) {
-    let slot = slot.clone();
-    let endpoint = endpoint.clone();
-    tokio::spawn(async move {
-        let mut backoff = Backoff::new(RECONNECT_BASE, RECONNECT_MAX);
-        // Pre-existing slot connection (installed by `run_connect` before we
-        // spawn) is treated as already stable so its first natural death
-        // after a long transfer is not mistaken for a short-lived flap.
-        let mut connected_at = if slot.0.borrow().is_some() {
-            // Pre-existing connection is treated as already past the stability
-            // floor so its first natural death after a long transfer is not
-            // mistaken for a short-lived flap.
-            Some(
-                std::time::Instant::now()
-                    .checked_sub(MIN_STABLE_CONN)
-                    .expect("MIN_STABLE_CONN fits in Instant clock"),
-            )
-        } else {
-            None
-        };
-        loop {
-            let current = (*slot.0.subscribe().borrow_and_update()).clone();
-            if let Some(conn) = current {
-                conn.closed().await;
-                slot.replace(None);
-                let lived = connected_at
-                    .map(|t| t.elapsed())
-                    .unwrap_or(Duration::ZERO);
-                connected_at = None;
-                if let Some(delay) = backoff.after_session(lived, MIN_STABLE_CONN) {
-                    warn!(
-                        %peer,
-                        lived_ms = lived.as_millis() as u64,
-                        "{}",
-                        tr_fmt!(
-                            "connection died quickly; backing off {0} before redial",
-                            format!("{delay:?}")
-                        )
-                    );
-                    tokio::time::sleep(delay).await;
-                }
-            }
-
-            match endpoint.connect(dial_addr.clone(), ALPN).await {
-                Ok(conn) => {
-                    connected_at = Some(std::time::Instant::now());
-                    slot.replace(Some(conn));
-                    info!(%peer, "{}", tr!("reconnected to peer"));
-                }
-                Err(e) => {
-                    let delay = backoff.next();
-                    // DBG-TEMP
-                    tracing::debug!(%peer, error = %e, "W1 connect failed");
-                    warn!(%peer, error = %e, "{}", tr_fmt!(
-                        "reconnect failed; retrying in {0}",
-                        format!("{delay:?}")
-                    ));
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
-    });
-}
-
-#[allow(clippy::too_many_arguments)] // CLI entry point; explicit config beats a grab-bag struct
-async fn run_connect(
-    secret_key: SecretKey,
-    to: &str,
-    mode: ConnectMode,
-    relay: &[String],
-    relay_only: bool,
-    no_n0_relays: bool,
-    to_addr: Vec<SocketAddr>,
-    max_conns: usize,
-    keepalive: Duration,
-    idle_timeout: Duration,
-    tune: TransportTune,
-    ui: Ui,
-    styler: Styler,
-) -> Result<()> {
-    reject_relay_only_with_to_addr(relay_only, &to_addr)?;
-    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune, relay_only, no_n0_relays)?
-        .bind()
-        .await
-        .map_err(|e| exit::coded(exit::CONNECT, anyhow::Error::new(e).context(tr!("binding endpoint"))))?;
-    bring_endpoint_online(&endpoint, relay, no_n0_relays).await?;
-
-    let remote_id: EndpointId = to.parse().map_err(|e| {
-        exit::coded(
-            exit::USAGE,
-            anyhow::Error::new(e).context(tr_fmt!("'{0}' is not a valid EndpointId", to)),
-        )
-    })?;
-
-    let dial_addr = build_dial_addr(remote_id, relay, &to_addr)?;
-    if !to_addr.is_empty() {
-        ui.line(styler.dim(&tr_fmt!(
-            "dialing the peer's direct address hint(s): {0}",
-            to_addr
-                .iter()
-                .map(|a| a.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
-    }
-
-    ui.line(styler.info(&tr_fmt!("dialing {0}...", remote_id)));
-    let start = std::time::Instant::now();
-    let connection = endpoint
-        .connect(dial_addr.clone(), ALPN)
-        .await
-        .map_err(|e| exit::coded(exit::CONNECT, anyhow::Error::new(e).context(tr!("connecting to remote endpoint"))))?;
-    tracing::debug!(
-        peer = %remote_id,
-        elapsed_ms = start.elapsed().as_millis() as u64,
-        "dial completed"
-    );
-
-    #[cfg(unix)]
-    if matches!(mode, ConnectMode::Stdio) {
-        ui.line(styler.ok(&tr!("connected. piping stdin/stdout to the remote peer.")));
-        let (mut send, recv) = connection
-            .open_bi()
-            .await
-            .context(tr!("opening stream"))?;
-        // Same hello as --listen: serve --forward must see a STREAM frame
-        // before accept_bi returns (stdio may stay silent until the remote
-        // banner arrives — classic download-first hang without this).
-        pipe::write_stream_hello(&mut send).await?;
-        let result = pipe::pipe_stdio(send, recv).await;
-        endpoint.close().await;
-        return result;
-    }
-
-    let (local_addr, is_socks5) = match mode {
-        ConnectMode::Listen(a) => (a, false),
-        ConnectMode::Socks5(a) => (a, true),
-        #[cfg(unix)]
-        ConnectMode::Stdio => {
-            // Stdio returns above after open_bi; this arm is unreachable by
-            // construction. Keep a typed error instead of panic.
-            return Err(anyhow::anyhow!(
-                "internal: ConnectMode::Stdio should have returned earlier"
-            ));
-        }
-    };
-
-    let slot = ConnSlot::new(Some(connection.clone()));
-    spawn_reconnect_watcher(&slot, &endpoint, dial_addr, remote_id);
-    spawn_path_monitor(
-        connection,
-        remote_id,
-        endpoint.clone(),
-        relay_only,
-        styler,
-        ui.quiet,
-    );
-
-    let tcp_listener = TcpListener::bind(local_addr)
-        .await
-        .with_context(|| tr_fmt!("binding local listener on {0}", local_addr))?;
-    ui.line(styler.ok(&tr_fmt!(
-        "connected. local TCP listener on {0} now forwards to the remote peer.",
-        local_addr
-    )));
-
-    let semaphore = conn_semaphore(max_conns);
-
-    let mut tasks = Vec::new();
-
-    loop {
-        tokio::select! {
-            accepted = tcp_listener.accept() => {
-                let (mut tcp_stream, client_addr) = accepted?;
-                // Without this, a healthy QUIC session with nobody dialing the
-                // local listen port looks identical to a "stuck" serve from
-                // the far side (keepalive alone never opens a bidi stream).
-                tracing::debug!(%client_addr, %local_addr, "local TCP client accepted");
-                let slot = slot.clone();
-                let semaphore = semaphore.clone();
-                tasks.push(tokio::spawn(async move {
-                    let result = async {
-                        if is_socks5 {
-                            let target = socks5::accept_handshake(&mut tcp_stream).await?;
-                            let _permit = semaphore.acquire_owned().await?;
-                            tracing::debug!(%client_addr, "opening QUIC stream for local client");
-                            let (mut send, recv) = open_stream_wait(&slot).await?;
-                            socks5::write_target(&mut send, &target).await?;
-                            pipe::pipe_streams(tcp_stream, send, recv).await
-                        } else {
-                            let _permit = semaphore.acquire_owned().await?;
-                            tracing::debug!(%client_addr, "opening QUIC stream for local client");
-                            let (mut send, recv) = open_stream_wait(&slot).await?;
-                            // Announce the stream on the wire immediately
-                            // (QUIC has no open-stream control frame).
-                            pipe::write_stream_hello(&mut send).await?;
-                            pipe::pipe_streams(tcp_stream, send, recv).await
-                        }
-                    }
-                    .await;
-                    if let Err(e) = result {
-                        warn!(%client_addr, error = %e, "{}", tr!("stream error"));
-                    }
-                }));
-            }
-            _ = tokio::signal::ctrl_c() => {
-                ui.line(styler.warn(&tr!("shutting down...")));
-                break;
-            }
-        }
-    }
-
-    pipe::drain_tasks(tasks).await;
-    endpoint.close().await;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// tun selftest: host checks without python / nc
-// ---------------------------------------------------------------------------
-
-async fn run_tun_selftest(
-    no_echo: bool,
-    relays: &[String],
-    ui: Ui,
-    styler: &Styler,
-) -> Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::{TcpListener, TcpStream};
-
-    let mut failed = 0u32;
-    ui.line(styler.banner("link-p2p tun selftest"));
-
-    ui.line(styler.dim(&tr!("bring-up order (custom relay before online wait):")));
-    ui.line(format!("  {}", ENDPOINT_ONLINE_STEPS.join(" → ")));
-
-    if relays.is_empty() {
-        ui.line(format!(
-            "  {}",
-            styler.warn(&tr!(
-                "no --relay URLs configured (will use n0 public relays only)"
-            ))
-        ));
-    } else {
-        ui.line(styler.dim(&tr!("probing --relay URL(s) over TCP (2s timeout):")));
-        for (url, rtt) in relay_probe::probe_report(relays).await {
-            match rtt {
-                Some(d) => ui.line(format!(
-                    "  {} {url}  ({d:?})",
-                    styler.ok("ok")
-                )),
-                None => {
-                    failed += 1;
-                    ui.line(format!(
-                        "  {} {url}",
-                        styler.err(&tr!("FAIL"))
-                    ));
-                }
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        match tun::wintun_dll_selftest_path() {
-            Ok(p) => ui.line(format!(
-                "  {} wintun.dll → {}",
-                styler.ok("ok"),
-                p.display()
-            )),
-            Err(e) => {
-                failed += 1;
-                ui.line(format!("  {}: {e:#}", styler.err(&tr!("FAIL"))));
-            }
-        }
-    }
-
-    if let Err(e) = tun_ctl::verify_identity_parent_writable(&tun_ctl::default_system_identity_path())
-    {
-        // Not fatal for ad-hoc users — warn only.
-        ui.line(format!(
-            "  {}: {e:#}",
-            styler.warn(&tr!(
-                "system identity directory not writable (ok for ad-hoc; needed for tun service install)"
-            ))
-        ));
-    } else {
-        ui.line(format!(
-            "  {} {}",
-            styler.ok("ok"),
-            tr!("system identity directory writable")
-        ));
-    }
-
-    if !no_echo {
-        ui.line(styler.dim(&tr!("loopback TCP echo drain:")));
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .context(tr!("binding selftest echo listener"))?;
-        let addr = listener.local_addr()?;
-        let server = tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await?;
-            let mut buf = [0u8; 64];
-            let n = sock.read(&mut buf).await?;
-            sock.write_all(&buf[..n]).await?;
-            sock.shutdown().await?;
-            Ok::<_, std::io::Error>(())
-        });
-        let payload = b"link-p2p-selftest";
-        let mut client = TcpStream::connect(addr)
-            .await
-            .context(tr!("connecting to selftest echo listener"))?;
-        client.write_all(payload).await?;
-        let mut got = vec![0u8; payload.len()];
-        client.read_exact(&mut got).await?;
-        server.await.context("selftest echo join")??;
-        if got.as_slice() == payload {
-            ui.line(format!(
-                "  {} {}",
-                styler.ok("ok"),
-                tr_fmt!("echo {0} bytes via {1}", payload.len(), addr)
-            ));
-        } else {
-            failed += 1;
-            ui.line(format!(
-                "  {}",
-                styler.err(&tr!("FAIL echo mismatch"))
-            ));
-        }
-    }
-
-    if failed > 0 {
-        bail!(exit::coded(
-            exit::CONNECT,
-            anyhow::anyhow!(tr_fmt!(
-                "selftest reported {0} failure(s)",
-                failed
-            )),
-        ));
-    }
-    ui.line(styler.ok(&tr!("selftest passed")));
-    Ok(())
-}
-
-// ping: measure RTT to a remote node and report the path (direct or relay).
-// ---------------------------------------------------------------------------
-
-/// One ping exchange: open a bi stream, write an 8-byte timestamp, read echo.
-async fn ping_exchange(connection: &iroh::endpoint::Connection) -> Result<u64> {
-    let start = std::time::Instant::now();
-    let (mut send, mut recv) = connection.open_bi().await?;
-    let ts_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    send.write_all(&ts_ms.to_be_bytes()).await?;
-    send.finish()?;
-    let mut echo = [0u8; 8];
-    recv.read_exact(&mut echo).await?;
-    let rtt_us = start.elapsed().as_micros() as u64;
-    if i64::from_be_bytes(echo) != ts_ms {
-        bail!(tr!("peer echoed a mismatched ping timestamp"));
-    }
-    Ok(rtt_us)
-}
-
-fn path_kind_human(kind: path_kind::PathKind) -> String {
-    match kind {
-        path_kind::PathKind::Direct => tr!("path: direct (IP)"),
-        path_kind::PathKind::Relay => tr!("path: relay"),
-        path_kind::PathKind::RelayWithDirectCandidate => {
-            tr!("path: relay (direct IP candidate open, not selected)")
-        }
-        path_kind::PathKind::Unknown => tr!("path: unknown"),
-    }
-}
-
-/// `link-p2p ping`: dial with the ping ALPN, exchange timestamps over one-shot
-/// streams, and report RTT plus path.
-///
-/// Magicsock often finishes the handshake on relay first and upgrades to
-/// direct in the background. Measuring RTT *before* that upgrade (then
-/// labeling the path after `settle_path_kind`) produced contradictory
-/// "direct but 600ms+" readings. We therefore report **both**:
-/// - **initial**: RTT + path snapshot right after connect (often still relay)
-/// - **settled**: wait up to 2s for a direct upgrade, then measure again
-///
-/// JSON keeps `rtt_us` / `path` as the settled values (the ones to trust for
-/// "how good is the path now?") and adds `initial_*` for diagnosis.
-async fn run_ping(
-    secret_key: SecretKey,
-    to: &str,
-    relay: &[String],
-    relay_only: bool,
-    no_n0_relays: bool,
-    to_addr: Vec<SocketAddr>,
-    keepalive: Duration,
-    idle_timeout: Duration,
-    tune: TransportTune,
-    format: OutputFormat,
-    ui: Ui,
-    styler: Styler,
-) -> Result<()> {
-    reject_relay_only_with_to_addr(relay_only, &to_addr)?;
-    let endpoint = build_endpoint(secret_key, relay, keepalive, idle_timeout, &tune, relay_only, no_n0_relays)?
-        .bind()
-        .await
-        .map_err(|e| exit::coded(exit::CONNECT, anyhow::Error::new(e).context(tr!("binding endpoint"))))?;
-    bring_endpoint_online(&endpoint, relay, no_n0_relays).await?;
-
-    let remote_id: EndpointId = to.parse().map_err(|e| {
-        exit::coded(
-            exit::USAGE,
-            anyhow::Error::new(e).context(tr_fmt!("'{0}' is not a valid EndpointId", to)),
-        )
-    })?;
-
-    let dial_addr = build_dial_addr(remote_id, relay, &to_addr)?;
-
-    if format == OutputFormat::Text {
-        ui.line(styler.info(&tr_fmt!("pinging {0}...", remote_id)));
-    }
-    let connection = endpoint
-        .connect(dial_addr, PING_ALPN)
-        .await
-        .map_err(|e| exit::coded(exit::CONNECT, anyhow::Error::new(e).context(tr!("connecting to remote endpoint"))))?;
-
-    // Snapshot + measure immediately (handshake path — often still relay).
-    let initial_kind = path_kind::path_kind(&connection);
-    let initial_rtt_us = ping_exchange(&connection).await?;
-
-    // Wait for magicsock relay→direct upgrade when IP transports are enabled.
-    // With --relay-only there is nothing to wait for.
-    let settle_budget = if relay_only {
-        Duration::ZERO
-    } else {
-        Duration::from_secs(2)
-    };
-    let settled_kind = path_kind::settle_path_kind(&connection, settle_budget).await;
-    let settled_rtt_us = ping_exchange(&connection).await?;
-
-    let stats = connection.stats();
-    let initial_path = initial_kind.as_str();
-    let settled_path = settled_kind.as_str();
-
-    match format {
-        OutputFormat::Json => {
-            // Always stdout — machine output for jq, even under -q.
-            // `rtt_us` / `path` are settled (trust these); `initial_*` diagnose
-            // the post-handshake race.
-            println!(
-                "{{\"peer\":\"{peer}\",\"rtt_us\":{rtt},\"path\":\"{path}\",\
-\"initial_rtt_us\":{init_rtt},\"initial_path\":\"{init_path}\",\
-\"settled_rtt_us\":{rtt},\"settled_path\":\"{path}\"}}",
-                peer = remote_id,
-                rtt = settled_rtt_us,
-                path = settled_path,
-                init_rtt = initial_rtt_us,
-                init_path = initial_path,
-            );
-        }
-        OutputFormat::Text => {
-            ui.line(styler.ok(&tr_fmt!(
-                "pong from {0}",
-                remote_id.fmt_short()
-            )));
-            ui.line(styler.dim(&tr_fmt!(
-                "initial: RTT {0}µs, {1}",
-                initial_rtt_us,
-                path_kind_human(initial_kind)
-            )));
-            ui.line(styler.dim(&tr_fmt!(
-                "settled: RTT {0}µs, {1}",
-                settled_rtt_us,
-                path_kind_human(settled_kind)
-            )));
-            tracing::debug!(
-                initial_path = initial_path,
-                settled_path = settled_path,
-                initial_rtt_us,
-                settled_rtt_us,
-                udp_tx = stats.udp_tx.datagrams,
-                udp_rx = stats.udp_rx.datagrams,
-                "ping path from iroh paths(); udp_* are not used for classification"
-            );
-        }
-    }
-    endpoint.close().await;
-    Ok(())
-}
-
-#[cfg(test)]
 mod tests {
-    use super::*;
+    use std::time::Duration;
+
+    use super::{Backoff, ENDPOINT_ONLINE_STEPS};
+    use crate::cli::localized_command;
 
     /// Every help/about text that clap derives must be overridden by
     /// `localized_command()` — otherwise the affected arg/subcommand shows

@@ -30,7 +30,7 @@ Full TUN design: [subsystems/tun.md](subsystems/tun.md).
 
 | phase | scope | effort |
 |---|---|---|
-| **0 — Verify** | NAT-matrix on iroh 1.0; real-hardware relay benchmark; confirm noq/MagicSocket behaviour | days |
+| **0 — Verify** | NAT-matrix on iroh 1.0; real-hardware relay benchmark; confirm noq/MagicSocket behaviour. Prefer collecting field data via `link-p2p stats` / `path-stats.jsonl` over a one-off lab matrix. | days |
 | **1 — Migration + relay redundancy** | WiFi↔4G migration test; multiple relay URLs with failover | 1–2 weeks |
 | **2 — Discovery (no server)** | `iroh-gossip` announce/lookup from shared network secret | 2–4 weeks |
 | **3 — Local ACL** | TOML policy: peer → allowed ports/CIDRs, default-deny | 1–2 weeks |

@@ -37,6 +37,41 @@ pub fn contacts_path() -> PathBuf {
     config::config_dir().join("contacts.toml")
 }
 
+/// Always-stdout pairing lines for scripts / the other human (ignore `-q`).
+pub fn print_machine_identity(id: EndpointId) {
+    println!("ENDPOINT_ID={id}");
+    println!("SHORT_CODE={}", encode_short_code(id));
+}
+
+/// Look up a saved nickname for this EndpointId, if any.
+pub fn name_for_id(book: &ContactBook, id: EndpointId) -> Option<String> {
+    let hex = id.to_string();
+    book.contacts
+        .iter()
+        .find(|(_, c)| c.id == hex || c.id.eq_ignore_ascii_case(&hex))
+        .map(|(n, _)| n.clone())
+}
+
+/// Human tip after a successful first session with an unsaved peer.
+pub fn hint_save_contact(ui: crate::runtime::Ui, styler: &crate::style::Styler, peer: &ResolvedPeer) {
+    if peer.name.is_some() {
+        return;
+    }
+    let code = encode_short_code(peer.id);
+    ui.line(styler.info(&tr_fmt!(
+        "tip: save them so next time is just a name:\n  link-p2p contact add <nickname> {0}",
+        code
+    )));
+}
+
+/// Prompt the user to paste their identity to the peer (first-time call path).
+pub fn hint_share_identity(ui: crate::runtime::Ui, styler: &crate::style::Styler, id: EndpointId) {
+    ui.line(styler.dim(&tr!(
+        "give the other peer your SHORT_CODE (or ENDPOINT_ID); both sides run the same `call`:"
+    )));
+    ui.line(format!("  {}", styler.highlight(&encode_short_code(id))));
+}
+
 pub fn load(path: &Path) -> Result<ContactBook> {
     if !path.exists() {
         return Ok(ContactBook::default());
@@ -252,6 +287,24 @@ fn decode_crockford(s: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use iroh::SecretKey;
+
+    #[test]
+    fn name_for_id_finds_saved_contact() {
+        let sk = SecretKey::from_bytes(&[3u8; 32]);
+        let id = sk.public();
+        let mut book = ContactBook::default();
+        book.contacts.insert(
+            "alice".into(),
+            Contact {
+                id: id.to_string(),
+                relays: Vec::new(),
+                addrs: Vec::new(),
+            },
+        );
+        assert_eq!(name_for_id(&book, id).as_deref(), Some("alice"));
+        let other = SecretKey::from_bytes(&[4u8; 32]).public();
+        assert!(name_for_id(&book, other).is_none());
+    }
 
     #[test]
     fn short_code_round_trip() {

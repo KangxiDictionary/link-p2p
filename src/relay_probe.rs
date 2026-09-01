@@ -3,6 +3,10 @@
 //! Used before dial so the dial `EndpointAddr` lists the fastest responding
 //! relay first. Magicsock may still pick by its own metrics; this only biases
 //! the initial candidate order.
+//!
+//! **Limitation:** probes use TCP connect RTT. Hole-punch / QUIC traffic is
+//! UDP — a host can pass TCP and still block UDP (or the reverse). Treat the
+//! ranking as a soft hint; confirm real paths with `ping` / `stats`.
 
 use std::net::ToSocketAddrs;
 use std::time::{Duration, Instant};
