@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   foreground debug aliases of `tun up --foreground --role …`.
 - **Windows TUN system service**: SCM + named-pipe control, Event Log, firewall
   rule on install (verify on real Windows).
+- **Library target** (`link_p2p`) so ctl frame decode can be fuzzed; opt-in
+  `cargo +nightly fuzz run ctl_frame` (see `docs/testing.md`).
+- **Relay RTT cache** (`~/.config/link-p2p/relay-rtt.json`): fresh samples
+  (<24h) skip a blocking TCP probe on startup; background refresh keeps the
+  file warm.
 
 ### Fixed
 

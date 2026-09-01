@@ -4,6 +4,11 @@
 //! relay first. Magicsock may still pick by its own metrics; this only biases
 //! the initial candidate order.
 //!
+//! Fresh samples are persisted under [`crate::relay_rtt`] (`relay-rtt.json`).
+//! When every URL has a cache entry younger than [`relay_rtt::CACHE_TTL`], this
+//! returns the cached order immediately and refreshes in the background so the
+//! first dial is not blocked on TCP probes.
+//!
 //! **Limitation:** probes use TCP connect RTT. Hole-punch / QUIC traffic is
 //! UDP — a host can pass TCP and still block UDP (or the reverse). Treat the
 //! ranking as a soft hint; confirm real paths with `ping` / `stats`.
@@ -11,10 +16,12 @@
 use std::net::ToSocketAddrs;
 use std::time::{Duration, Instant};
 
-use tracing::warn;
+use tracing::{debug, warn};
 
 use tokio::net::TcpStream;
 use tokio::time::timeout;
+
+use crate::relay_rtt;
 
 /// Sort relay URLs by TCP connect RTT (fastest first). Unreachable URLs keep
 /// their relative order at the end and emit a warning so operators notice a
@@ -23,21 +30,38 @@ pub async fn order_by_connect_latency(urls: &[String]) -> Vec<String> {
     if urls.is_empty() {
         return Vec::new();
     }
+
+    if let Some(cached) = relay_rtt::order_from_fresh_cache(urls) {
+        debug!(n = cached.len(), "using fresh relay RTT cache (background refresh)");
+        let urls_bg = urls.to_vec();
+        tokio::spawn(async move {
+            let _ = probe_and_record(&urls_bg).await;
+        });
+        return cached;
+    }
+
+    probe_and_record(urls).await
+}
+
+async fn probe_and_record(urls: &[String]) -> Vec<String> {
     if urls.len() == 1 {
         let u = &urls[0];
-        if probe_one(u).await.is_none() {
+        let d = probe_one(u).await;
+        if d.is_none() {
             warn!(
                 relay = %u,
                 "custom relay TCP probe failed (unreachable or timed out within 2s)"
             );
         }
+        relay_rtt::record_probe_results(&[(u.clone(), d)]);
         return urls.to_vec();
     }
+
     let mut join = tokio::task::JoinSet::new();
     for (i, u) in urls.iter().cloned().enumerate() {
         join.spawn(async move {
             let d = probe_one(&u).await;
-            (d.unwrap_or(Duration::from_secs(60)), i, u)
+            (d, i, u)
         });
     }
     let mut scored = Vec::with_capacity(urls.len());
@@ -46,9 +70,20 @@ pub async fn order_by_connect_latency(urls: &[String]) -> Vec<String> {
             scored.push(row);
         }
     }
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    scored.sort_by(|a, b| {
+        let da = a.0.unwrap_or(Duration::from_secs(60));
+        let db = b.0.unwrap_or(Duration::from_secs(60));
+        da.cmp(&db).then(a.1.cmp(&b.1))
+    });
+
+    let results: Vec<(String, Option<Duration>)> = scored
+        .iter()
+        .map(|(d, _, u)| (u.clone(), *d))
+        .collect();
+    relay_rtt::record_probe_results(&results);
+
     for (d, _, u) in &scored {
-        if *d >= Duration::from_secs(60) {
+        if d.is_none() {
             warn!(
                 relay = %u,
                 "custom relay TCP probe failed (unreachable or timed out within 2s)"
@@ -64,6 +99,7 @@ pub async fn probe_report(urls: &[String]) -> Vec<(String, Option<Duration>)> {
     for u in urls {
         out.push((u.clone(), probe_one(u).await));
     }
+    relay_rtt::record_probe_results(&out);
     out
 }
 
@@ -113,4 +149,3 @@ mod tests {
         assert!(a.ip().is_ipv6());
     }
 }
-

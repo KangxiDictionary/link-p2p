@@ -829,6 +829,42 @@ mod tests {
         assert!(decode_request_frame(&frame).is_err());
     }
 
+    /// Garbage / truncated inputs must return Err, never panic (CI corpus for
+    /// fuzz parity without nightly libfuzzer).
+    #[test]
+    fn decode_garbage_never_panics() {
+        let huge_claimed_len = {
+            let mut f = vec![b'L', b'P', b'C', b'1', CTL_VERSION, 0xFF, 0xFF, 0xFF, 0x00];
+            f.extend_from_slice(b"short body");
+            f
+        };
+        let bad_magic = {
+            let mut f = encode_request(&CtlRequest::Status).unwrap();
+            f[0] = b'X';
+            f
+        };
+        let cases: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![0],
+            vec![0; 8],
+            vec![0; 9],
+            huge_claimed_len,
+            bad_magic,
+        ];
+        for frame in cases {
+            assert!(
+                decode_request_frame(&frame).is_err(),
+                "request decode should fail for len={}",
+                frame.len()
+            );
+            assert!(
+                decode_response_frame(&frame).is_err(),
+                "response decode should fail for len={}",
+                frame.len()
+            );
+        }
+    }
+
     #[test]
     fn err_response_maps_exit_code() {
         let resp = CtlResponse::Err {

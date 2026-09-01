@@ -1,0 +1,23 @@
+[package]
+name = "link-p2p-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+link_p2p = { package = "link-p2p", path = ".." }
+libfuzzer-sys = "0.4"
+
+# Prevent this from interfering with anyone's existing .cargo/config.toml
+[profile.release]
+debug = true
+
+[[bin]]
+name = "ctl_frame"
+path = "fuzz_targets/ctl_frame.rs"
+test = false
+doc = false
+bench = false
