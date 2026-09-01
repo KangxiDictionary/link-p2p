@@ -4,6 +4,20 @@
 //! cannot set a custom DACL. System mode therefore creates the pipe with
 //! `CreateNamedPipeW` + SDDL, then hands the handle to tokio via
 //! [`NamedPipeServer::from_raw_handle`].
+//!
+//! ## Why not `interprocess`?
+//!
+//! We keep this hand-rolled module instead of switching to the `interprocess`
+//! crate because system-mode ctl needs a **tight Win32 surface** that crate
+//! does not expose as a stable, reviewable unit:
+//!
+//! - Custom **SDDL** on `CreateNamedPipeW` (`WINDOWS_SYSTEM_PIPE_SDDL`)
+//! - **`ImpersonateNamedPipeClient` / `RevertToSelf`** for privileged ctl
+//! - **`TokenElevation`** admin checks (not deprecated `IsUserAnAdmin`)
+//!
+//! Replacing it would mostly re-wrap the same FFI while losing the local
+//! audit trail next to `tun_ctl` / SCM. Revisit only if `interprocess` grows
+//! first-class SDDL + impersonation APIs we can pin and fuzz.
 
 #![allow(unsafe_code)]
 

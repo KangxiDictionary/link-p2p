@@ -291,6 +291,7 @@ pub async fn run_tun_serve(
     };
     if let Some(h) = &hooks {
         h.state.set_vips(own).await;
+        h.state.apply_phase(PhaseEvent::Connected).await;
         h.signal_ready(Ok(()));
     }
     let (tun_io, from_tun) = spawn_tun_io(tun, mtu);
@@ -394,26 +395,30 @@ pub async fn run_tun_serve(
                     "tun",
                 );
                 let quiet = ui.quiet;
-                tokio::spawn(async move {
-                    if let Err(e) = hub_run_spoke(
-                        tun_io,
-                        tun_name,
-                        own_id,
-                        own,
-                        peers,
-                        fans,
-                        peer_id,
-                        conn,
-                        user_mtu,
-                        raise_gate,
-                        quiet,
-                        hooks_s,
-                    )
-                    .await
-                    {
-                        warn!(peer = %peer_id, error = format!("{e:#}"), "{}", tr!("TUN session error"));
+                let span = tracing::info_span!("hub_spoke", %peer_id);
+                tokio::spawn(
+                    async move {
+                        if let Err(e) = hub_run_spoke(
+                            tun_io,
+                            tun_name,
+                            own_id,
+                            own,
+                            peers,
+                            fans,
+                            peer_id,
+                            conn,
+                            user_mtu,
+                            raise_gate,
+                            quiet,
+                            hooks_s,
+                        )
+                        .await
+                        {
+                            warn!(peer = %peer_id, error = format!("{e:#}"), "{}", tr!("TUN session error"));
+                        }
                     }
-                });
+                    .instrument(span),
+                );
             }
             _ = tokio::signal::ctrl_c(), if hooks.is_none() => {
                 ui.line(styler.warn(&tr!("shutting down...")));
@@ -543,6 +548,7 @@ async fn hub_run_spoke(
 
     if let Some(h) = &hooks {
         h.state.set_path_kind(path_label(&conn)).await;
+        h.state.apply_phase(PhaseEvent::Connected).await;
         refresh_hub_peers_state(&h.state, &peers).await;
     }
 

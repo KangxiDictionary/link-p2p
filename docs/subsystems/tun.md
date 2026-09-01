@@ -31,7 +31,7 @@ other spokes cannot learn your VIP↔id to dial you directly.
 
 1. Hub accepts multiple sessions; demuxes TUN traffic by destination VIP.
 2. After VIP handshake, hub broadcasts roster on a reliable control stream
-   (ALPN `link-p2p/tun/2`; `/1` had VIP exchange only, no roster).
+   (ALPN `link-p2p/tun/3`; `/2` was IPv4-only roster `LPR2`, `/1` had VIP exchange only).
 3. Spokes dial new peers with `endpoint.connect(..., TUN_ALPN)`; use direct path
    when available, else send via hub.
 4. Hub keeps spoke↔spoke forwarding as **fallback** (symmetric NAT, etc.).
@@ -281,6 +281,12 @@ Tokio's safe `ServerOptions` cannot set custom `SECURITY_ATTRIBUTES`; use
 raw FFI surface for pipe creation. Use `PIPE_UNLIMITED_INSTANCES` (or a pool)
 so accepting one client immediately arms the next instance — same head-of-line
 pattern as the Unix accept loop.
+
+**Keep `src/win_pipe.rs` (do not swap for `interprocess`):** system ctl needs
+custom SDDL, `ImpersonateNamedPipeClient`, and `TokenElevation` checks in one
+auditable module beside `tun_ctl` / SCM. `interprocess` does not give us that
+as a stable unit today; revisit only if it grows first-class SDDL +
+impersonation we can pin and fuzz. See the module docs on `win_pipe`.
 
 **Separate SCM entry path (not `--foreground` reuse):**
 

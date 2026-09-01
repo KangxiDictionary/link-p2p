@@ -18,7 +18,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time;
-use tracing::{info, warn};
+use tracing::{info, warn, Instrument};
 
 use crate::cli::CongestionControl;
 use crate::exit;
@@ -497,11 +497,23 @@ pub(crate) fn spawn_path_monitor(
     /// Ignore idle windows (keepalive alone).
     const ACTIVE_MIN_BPS: u64 = 2 * 1024;
 
+    // Soft preference from path_stats: we cannot pick candidates (iroh owns
+    // that); we only modulate how aggressively we call network_change().
+    let hist = crate::path_stats::peer_direct_rates(None)
+        .get(&peer.to_string())
+        .copied();
+    let (upgrade_secs, perm_streak, upgrade_secs_perm) = match hist {
+        Some(r) if r >= 0.5 => (30_u64, 6_u8, UPGRADE_SECS_PERMANENT),
+        Some(r) if r < 0.2 => (90_u64, 2_u8, UPGRADE_SECS_PERMANENT),
+        _ => (UPGRADE_SECS, RELAY_PERM_STREAK, UPGRADE_SECS_PERMANENT),
+    };
+
+    let span = tracing::info_span!("path_monitor", %peer, cmd);
     tokio::spawn(async move {
         let started = std::time::Instant::now();
         let mut stats_tick = time::interval(Duration::from_secs(STATS_SECS));
         stats_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-        let mut next_upgrade = tokio::time::Instant::now() + Duration::from_secs(UPGRADE_SECS);
+        let mut next_upgrade = tokio::time::Instant::now() + Duration::from_secs(upgrade_secs);
         // Skip the immediate first stats tick.
         stats_tick.tick().await;
 
@@ -517,10 +529,10 @@ pub(crate) fn spawn_path_monitor(
         let mut first_direct_at = was_direct.then_some(Duration::ZERO);
 
         loop {
-            let upgrade_delay = if no_ip_candidate_streak >= RELAY_PERM_STREAK {
-                Duration::from_secs(UPGRADE_SECS_PERMANENT)
+            let upgrade_delay = if no_ip_candidate_streak >= perm_streak {
+                Duration::from_secs(upgrade_secs_perm)
             } else {
-                Duration::from_secs(UPGRADE_SECS)
+                Duration::from_secs(upgrade_secs)
             };
             tokio::select! {
                 _ = stats_tick.tick() => {
@@ -574,7 +586,7 @@ pub(crate) fn spawn_path_monitor(
                         path_kind::PathKind::Unknown => {}
                     }
                     if !warned_relay_permanent
-                        && no_ip_candidate_streak >= RELAY_PERM_STREAK
+                        && no_ip_candidate_streak >= perm_streak
                     {
                         warned_relay_permanent = true;
                         let msg = tr!(
@@ -642,7 +654,7 @@ pub(crate) fn spawn_path_monitor(
                 }
             }
         }
-    })
+    }.instrument(span))
 }
 
 // ---------------------------------------------------------------------------

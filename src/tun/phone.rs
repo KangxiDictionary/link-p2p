@@ -147,7 +147,7 @@ pub async fn run_tun_phone(
     };
     let (tun_io, mut from_tun) = spawn_tun_io(tun, mtu);
     hooks.state.set_vips(own).await;
-    hooks.state.set_path_kind("idle").await;
+    hooks.state.apply_phase(PhaseEvent::Ready).await;
     hooks.signal_ready(Ok(()));
 
     if !ui.quiet {
@@ -258,6 +258,7 @@ pub async fn run_tun_phone(
                         mtu,
                         Arc::clone(&raise_gate),
                         Arc::clone(&peers),
+                        Arc::clone(&ringing),
                         Arc::clone(&hooks),
                         ui.quiet,
                         styler,
@@ -272,6 +273,7 @@ pub async fn run_tun_phone(
                         since: Instant::now(),
                         since_unix_ms: now_unix_ms(),
                     });
+                    hooks.state.apply_phase(PhaseEvent::Ring).await;
                     publish_pending(&hooks.state, &ringing).await;
                 }
             }
@@ -305,9 +307,11 @@ pub async fn run_tun_phone(
                                         continue;
                                     }
                                 };
+                                hooks.state.apply_phase(PhaseEvent::BeginDial).await;
                                 let tun_io = tun_io.clone();
                                 let tun_name = tun_name.clone();
                                 let peers = Arc::clone(&peers);
+                                let ringing = Arc::clone(&ringing);
                                 let hooks = Arc::clone(&hooks);
                                 let raise_gate = Arc::clone(&raise_gate);
                                 let endpoint = endpoint.clone();
@@ -325,6 +329,7 @@ pub async fn run_tun_phone(
                                                 mtu,
                                                 raise_gate,
                                                 peers,
+                                                ringing,
                                                 hooks,
                                                 quiet,
                                                 styler,
@@ -339,6 +344,10 @@ pub async fn run_tun_phone(
                                                 "{}",
                                                 tr!("TUN call dial failed")
                                             );
+                                            phone_reconcile_phase_after_ring(
+                                                &hooks.state, &peers, &ringing,
+                                            )
+                                            .await;
                                         }
                                     }
                                 });
@@ -369,6 +378,7 @@ pub async fn run_tun_phone(
                                     mtu,
                                     Arc::clone(&raise_gate),
                                     Arc::clone(&peers),
+                                    Arc::clone(&ringing),
                                     Arc::clone(&hooks),
                                     ui.quiet,
                                     styler,
@@ -397,6 +407,7 @@ pub async fn run_tun_phone(
                         if let Some(r) = taken {
                             r.conn.close(0u32.into(), b"rejected");
                             info!(peer = %r.peer, "{}", tr!("rejected TUN call"));
+                            phone_reconcile_phase_after_ring(&hooks.state, &peers, &ringing).await;
                         } else {
                             warn!(
                                 peer = %peer,
@@ -421,10 +432,12 @@ pub async fn run_tun_phone(
                 if list.len() != before {
                     drop(list);
                     publish_pending(&hooks.state, &ringing).await;
+                    phone_reconcile_phase_after_ring(&hooks.state, &peers, &ringing).await;
                 }
             }
             _ = hooks.cancel.notified() => {
                 info!("{}", tr!("TUN daemon Shutdown requested"));
+                hooks.state.apply_phase(PhaseEvent::Reset).await;
                 break;
             }
         }
@@ -445,6 +458,7 @@ fn spawn_phone_session(
     mtu: u16,
     raise_gate: MtuRaiseGate,
     peers: ActivePeers,
+    ringing: RingingList,
     hooks: Arc<TunHooks>,
     quiet: bool,
     styler: Styler,
@@ -460,25 +474,30 @@ fn spawn_phone_session(
         quiet,
         "tun",
     );
-    tokio::spawn(async move {
-        if let Err(e) = phone_run_peer(
-            tun_io,
-            tun_name,
-            own,
-            peer_id,
-            conn,
-            dialer,
-            mtu,
-            raise_gate,
-            peers,
-            hooks,
-            quiet,
-        )
-        .await
-        {
-            warn!(peer = %peer_id, error = format!("{e:#}"), "{}", tr!("TUN session error"));
+    tokio::spawn(
+        async move {
+            if let Err(e) = phone_run_peer(
+                tun_io,
+                tun_name,
+                own,
+                peer_id,
+                conn,
+                dialer,
+                mtu,
+                raise_gate,
+                Arc::clone(&peers),
+                Arc::clone(&ringing),
+                Arc::clone(&hooks),
+                quiet,
+            )
+            .await
+            {
+                warn!(peer = %peer_id, error = format!("{e:#}"), "{}", tr!("TUN session error"));
+                phone_reconcile_phase_after_ring(&hooks.state, &peers, &ringing).await;
+            }
         }
-    });
+        .instrument(tracing::info_span!("phone_peer", %peer_id)),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -492,6 +511,7 @@ async fn phone_run_peer(
     user_mtu: u16,
     raise_gate: MtuRaiseGate,
     peers: ActivePeers,
+    ringing: RingingList,
     hooks: Arc<TunHooks>,
     quiet: bool,
 ) -> Result<()> {
@@ -566,6 +586,7 @@ async fn phone_run_peer(
     let _session_mtu = choose_mtu(user_mtu, &conn).unwrap_or(user_mtu);
     info!(%peer_id, vip = %peer.v4, vip6 = %peer.v6, path = path_label(&conn), "{}", tr!("TUN session established"));
     hooks.state.set_path_kind(path_label(&conn)).await;
+    hooks.state.apply_phase(PhaseEvent::Connected).await;
     refresh_active_peers(&hooks.state, &peers).await;
     if !quiet {
         println!(
@@ -611,9 +632,25 @@ async fn phone_run_peer(
         next
     });
     refresh_active_peers(&hooks.state, &peers).await;
+    phone_reconcile_phase_after_ring(&hooks.state, &peers, &ringing).await;
     if let Err(e) = del_peer_route(&tun_name, peer.v4, peer.v6) {
         warn!(%peer_id, error = %e, "{}", tr!("could not remove peer route"));
     }
     info!(%peer_id, vip = %peer.v4, vip6 = %peer.v6, "{}", tr!("peer left the mesh"));
     Ok(())
+}
+
+/// After reject / ring timeout / dial fail / peer gone: Idle if nothing live.
+async fn phone_reconcile_phase_after_ring(
+    state: &TunLiveState,
+    peers: &ActivePeers,
+    ringing: &RingingList,
+) {
+    if !peers.load().is_empty() {
+        state.apply_phase(PhaseEvent::Connected).await;
+    } else if !ringing.read().await.is_empty() {
+        state.apply_phase(PhaseEvent::Ring).await;
+    } else {
+        state.apply_phase(PhaseEvent::PeerLeft).await;
+    }
 }

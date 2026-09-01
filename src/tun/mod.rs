@@ -78,6 +78,81 @@ pub struct OwnVips {
     pub v6: Ipv6Addr,
 }
 
+/// High-level TUN session phase (daemon Status), distinct from QUIC [`crate::path_kind::PathKind`].
+///
+/// Illegal transitions return `Err` so call sites cannot silently invent
+/// impossible combinations (e.g. `Ringing` → `Dialing` without going Idle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionPhase {
+    /// Worker started; TUN device not ready yet.
+    Starting,
+    /// Phone: waiting for dial / inbound ring. Hub/spoke skip this.
+    Idle,
+    /// Outbound dial in progress (phone).
+    Dialing,
+    /// Inbound stranger waiting for accept/reject (phone).
+    Ringing,
+    /// At least one live peer path (or hub serving).
+    Connected,
+}
+
+/// Events that drive [`SessionPhase::transition`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseEvent {
+    /// TUN device up (phone → Idle; hub/spoke may go straight to Connected).
+    Ready,
+    /// Phone begins an outbound call.
+    BeginDial,
+    /// Inbound unknown peer is ringing.
+    Ring,
+    /// Accept / VIP exchange finished → live path.
+    Connected,
+    /// Peer left / reject / dial failed → back to Idle (phone) or stay Connected (mesh).
+    PeerLeft,
+    /// Force Idle (shutdown of the active call without tearing the daemon).
+    Reset,
+}
+
+impl SessionPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Idle => "idle",
+            Self::Dialing => "dialing",
+            Self::Ringing => "ringing",
+            Self::Connected => "connected",
+        }
+    }
+
+    /// Apply `ev` or return `(current, ev)` when the edge is not allowed.
+    pub fn transition(self, ev: PhaseEvent) -> Result<Self, (Self, PhaseEvent)> {
+        use PhaseEvent as E;
+        use SessionPhase as P;
+        let next = match (self, ev) {
+            (P::Starting, E::Ready) => P::Idle,
+            (P::Starting, E::Connected) => P::Connected,
+            (P::Idle, E::BeginDial) => P::Dialing,
+            (P::Idle, E::Ring) => P::Ringing,
+            (P::Idle, E::Connected) => P::Connected,
+            (P::Dialing, E::Connected) => P::Connected,
+            (P::Dialing, E::PeerLeft | E::Reset) => P::Idle,
+            (P::Dialing, E::Ring) => P::Ringing, // dial aborted while another inbound waits
+            (P::Ringing, E::Connected) => P::Connected,
+            (P::Ringing, E::PeerLeft | E::Reset) => P::Idle,
+            (P::Ringing, E::Ring) => P::Ringing, // another inbound while already ringing
+            (P::Connected, E::PeerLeft | E::Reset) => P::Idle,
+            (P::Connected, E::BeginDial) => P::Dialing,
+            (P::Connected, E::Ring) => P::Ringing,
+            // Idempotent no-ops (duplicate Ready / Connected).
+            (p, E::Ready) if p != P::Starting => p,
+            (P::Connected, E::Connected) => P::Connected,
+            (P::Idle, E::Reset | E::PeerLeft) => P::Idle,
+            _ => return Err((self, ev)),
+        };
+        Ok(next)
+    }
+}
+
 /// Live snapshot for the daemon control plane (`Status` / `Peers`).
 #[derive(Debug)]
 pub struct TunLiveState {
@@ -86,6 +161,9 @@ pub struct TunLiveState {
     started: Instant,
     vip: RwLock<Option<Ipv4Addr>>,
     vip6: RwLock<Option<Ipv6Addr>>,
+    /// Session lifecycle ([`SessionPhase`]), not the QUIC path label.
+    phase: RwLock<SessionPhase>,
+    /// QUIC path token (`direct` / `relay` / …) while [`SessionPhase::Connected`].
     path_kind: RwLock<String>,
     peers: RwLock<Vec<CtlPeer>>,
     pending_calls: RwLock<Vec<crate::tun_ctl::PendingCall>>,
@@ -107,6 +185,7 @@ impl TunLiveState {
             started: Instant::now(),
             vip: RwLock::new(None),
             vip6: RwLock::new(None),
+            phase: RwLock::new(SessionPhase::Starting),
             path_kind: RwLock::new("unknown".into()),
             peers: RwLock::new(Vec::new()),
             pending_calls: RwLock::new(Vec::new()),
@@ -122,6 +201,22 @@ impl TunLiveState {
         *self.vip6.write().await = Some(vips.v6);
     }
 
+    /// Apply a phase event. Illegal edges are logged and ignored (fail soft so
+    /// a buggy caller cannot wedgie the daemon); tests assert the matrix.
+    pub async fn apply_phase(&self, ev: PhaseEvent) {
+        let mut g = self.phase.write().await;
+        match g.transition(ev) {
+            Ok(next) => *g = next,
+            Err((cur, ev)) => {
+                warn!(
+                    from = cur.as_str(),
+                    event = ?ev,
+                    "ignored illegal SessionPhase transition"
+                );
+            }
+        }
+    }
+
     pub async fn set_path_kind(&self, kind: &str) {
         *self.path_kind.write().await = kind.to_string();
     }
@@ -135,12 +230,20 @@ impl TunLiveState {
     }
 
     pub async fn status_response(&self) -> CtlResponse {
+        let phase = *self.phase.read().await;
+        // Keep `path_kind` as the human Status field: phase token when not
+        // Connected, else the QUIC path label (preserves existing CLI/JSON).
+        let path_kind = if phase == SessionPhase::Connected {
+            self.path_kind.read().await.clone()
+        } else {
+            phase.as_str().to_string()
+        };
         CtlResponse::Status {
             role: self.role.clone(),
             uptime_secs: self.started.elapsed().as_secs(),
             vip: self.vip.read().await.unwrap_or(Ipv4Addr::UNSPECIFIED),
             vip6: self.vip6.read().await.unwrap_or(Ipv6Addr::UNSPECIFIED),
-            path_kind: self.path_kind.read().await.clone(),
+            path_kind,
             session: self.session.clone(),
             pending_calls: self.pending_calls.read().await.clone(),
         }
@@ -1237,5 +1340,36 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("manual 172.24.1.1"));
         assert!(msg.contains("taken"));
+    }
+
+    #[test]
+    fn session_phase_happy_paths() {
+        use PhaseEvent as E;
+        use SessionPhase as P;
+        assert_eq!(P::Starting.transition(E::Ready).unwrap(), P::Idle);
+        assert_eq!(P::Starting.transition(E::Connected).unwrap(), P::Connected);
+        assert_eq!(P::Idle.transition(E::BeginDial).unwrap(), P::Dialing);
+        assert_eq!(P::Idle.transition(E::Ring).unwrap(), P::Ringing);
+        assert_eq!(P::Dialing.transition(E::Connected).unwrap(), P::Connected);
+        assert_eq!(P::Dialing.transition(E::PeerLeft).unwrap(), P::Idle);
+        assert_eq!(P::Dialing.transition(E::Ring).unwrap(), P::Ringing);
+        assert_eq!(P::Ringing.transition(E::Connected).unwrap(), P::Connected);
+        assert_eq!(P::Ringing.transition(E::Ring).unwrap(), P::Ringing);
+        assert_eq!(P::Connected.transition(E::PeerLeft).unwrap(), P::Idle);
+        assert_eq!(P::Connected.transition(E::BeginDial).unwrap(), P::Dialing);
+        assert_eq!(P::Connected.transition(E::Ring).unwrap(), P::Ringing);
+        // Idempotent
+        assert_eq!(P::Idle.transition(E::Ready).unwrap(), P::Idle);
+        assert_eq!(P::Connected.transition(E::Connected).unwrap(), P::Connected);
+    }
+
+    #[test]
+    fn session_phase_rejects_illegal() {
+        use PhaseEvent as E;
+        use SessionPhase as P;
+        assert!(P::Starting.transition(E::BeginDial).is_err());
+        assert!(P::Starting.transition(E::Ring).is_err());
+        assert!(P::Idle.transition(E::PeerLeft).is_ok()); // no-op
+        assert!(P::Ringing.transition(E::BeginDial).is_err());
     }
 }

@@ -40,7 +40,7 @@ Shared helpers live in `scripts/lib.sh` (`pass`/`fail`, `wait_endpoint_id`, loca
 | `./scripts/bench-transport-matrix.sh` | Transport config matrix — see [architecture/performance.md](architecture/performance.md) |
 | `./scripts/bench.sh` / `bench-multi.sh` | Throughput benches — see [architecture/performance.md](architecture/performance.md) |
 | `./scripts/phase0-*.sh` / `phase1-*.sh` | Two-machine NAT / relay / migration — see below |
-| `cargo +nightly fuzz run ctl_frame` | TUN LPC1 frame decode (needs cargo-fuzz) |
+| `cargo +nightly fuzz run ctl_frame` | TUN LPC1 frame decode (needs cargo-fuzz; lives in repo-root `fuzz/`, not under `src/` — a src-only zip will not include it) |
 
 ### Always-on integration (runs under `cargo test` / `./scripts/test.sh unit`)
 

@@ -5,6 +5,7 @@
 //! we get direct?" without standing up a NAT lab. Best-effort: disk errors
 //! never fail the session.
 
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -59,6 +60,49 @@ impl PathSummary {
             100.0 * (self.direct as f64) / (self.total as f64)
         }
     }
+}
+
+/// Per-peer direct hit rate in `[0.0, 1.0]` from the rolling path log.
+///
+/// Peers with no samples are omitted (callers treat missing as "unknown").
+pub fn peer_direct_rates(limit: Option<usize>) -> HashMap<String, f64> {
+    let Ok(summary) = load_summary(limit) else {
+        return HashMap::new();
+    };
+    let mut tallies: HashMap<String, (usize, usize)> = HashMap::new();
+    for s in &summary.samples {
+        if s.relay_only {
+            continue;
+        }
+        let e = tallies.entry(s.peer.clone()).or_default();
+        e.1 += 1;
+        if s.path == "direct" {
+            e.0 += 1;
+        }
+    }
+    tallies
+        .into_iter()
+        .filter(|(_, (_, total))| *total > 0)
+        .map(|(peer, (direct, total))| (peer, direct as f64 / total as f64))
+        .collect()
+}
+
+/// Soft preference: higher historical direct rate first; unknown peers last.
+///
+/// Does not change dial success — only the order of concurrent mesh dials after
+/// a roster snapshot so peers that usually punch through get a head start.
+pub fn sort_by_direct_history<T>(items: &mut [T], peer_hex: impl Fn(&T) -> String) {
+    let rates = peer_direct_rates(None);
+    items.sort_by(|a, b| {
+        let ra = rates.get(&peer_hex(a)).copied();
+        let rb = rates.get(&peer_hex(b)).copied();
+        match (ra, rb) {
+            (Some(a), Some(b)) => b.partial_cmp(&a).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
 }
 
 pub fn stats_path() -> PathBuf {
@@ -229,5 +273,33 @@ mod tests {
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains("\"ts\":7"));
         assert!(lines[2].contains("\"ts\":9"));
+    }
+
+    #[test]
+    fn sort_by_direct_history_orders_known_first() {
+        let mut peers = vec![
+            ("unknown".to_string(), 0u8),
+            ("aaaa".to_string(), 1u8),
+            ("bbbb".to_string(), 2u8),
+        ];
+        let rates = {
+            let mut m = HashMap::new();
+            m.insert("bbbb".to_string(), 0.9);
+            m.insert("aaaa".to_string(), 0.2);
+            m
+        };
+        peers.sort_by(|a, b| {
+            let ra = rates.get(&a.0).copied();
+            let rb = rates.get(&b.0).copied();
+            match (ra, rb) {
+                (Some(x), Some(y)) => y.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+        });
+        assert_eq!(peers[0].0, "bbbb");
+        assert_eq!(peers[1].0, "aaaa");
+        assert_eq!(peers[2].0, "unknown");
     }
 }

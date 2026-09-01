@@ -122,34 +122,61 @@ async fn spoke_install_direct(
     // Read datagrams from this direct link into TUN.
     let mesh_drop = Arc::clone(mesh);
     let peer_c = peer;
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = conn.closed() => break,
-                r = conn.read_datagram() => {
-                    match r {
-                        Ok(data) => {
-                            let ok = ipv4_src(&data).map(|s| s == peer_c.v4).unwrap_or(false)
-                                || ipv6_src(&data).map(|s| s == peer_c.v6).unwrap_or(false);
-                            if !ok {
-                                continue;
+    let span = tracing::info_span!("spoke_direct_recv", %peer_id);
+    tokio::spawn(
+        async move {
+            loop {
+                tokio::select! {
+                    _ = conn.closed() => break,
+                    r = conn.read_datagram() => {
+                        match r {
+                            Ok(data) => {
+                                let ok = ipv4_src(&data).map(|s| s == peer_c.v4).unwrap_or(false)
+                                    || ipv6_src(&data).map(|s| s == peer_c.v6).unwrap_or(false);
+                                if !ok {
+                                    continue;
+                                }
+                                tun.send(data).await;
                             }
-                            tun.send(data).await;
+                            Err(_) => break,
                         }
-                        Err(_) => break,
                     }
                 }
             }
+            mesh_update(&mesh_drop, |g| {
+                g.direct.remove(&peer_c.v4);
+                g.direct6.remove(&peer_c.v6);
+            });
+            info!(%peer_id, vip = %peer_c.v4, "{}", tr!("direct mesh link closed"));
         }
-        mesh_update(&mesh_drop, |g| {
-            g.direct.remove(&peer_c.v4);
-            g.direct6.remove(&peer_c.v6);
-        });
-        info!(%peer_id, vip = %peer_c.v4, "{}", tr!("direct mesh link closed"));
-    });
+        .instrument(span),
+    );
 }
 
 async fn spoke_try_dial_peer(
+    endpoint: Endpoint,
+    mesh: SharedSpokeMesh,
+    tun: TunIo,
+    tun_name: String,
+    own_id: EndpointId,
+    own: OwnVips,
+    entry: RosterEntry,
+    user_mtu: u16,
+    allow: Option<HashSet<EndpointId>>,
+    raise_gate: MtuRaiseGate,
+) {
+    let peer = entry.id;
+    async move {
+        spoke_try_dial_peer_inner(
+            endpoint, mesh, tun, tun_name, own_id, own, entry, user_mtu, allow, raise_gate,
+        )
+        .await;
+    }
+    .instrument(tracing::info_span!("spoke_try_dial", %peer))
+    .await;
+}
+
+async fn spoke_try_dial_peer_inner(
     endpoint: Endpoint,
     mesh: SharedSpokeMesh,
     tun: TunIo,
@@ -230,6 +257,10 @@ async fn spoke_apply_roster_msg(
 ) {
     match msg {
         RosterMsg::Snapshot(entries) => {
+            let mut entries = entries;
+            // Prefer peers that historically punched through before unknown /
+            // relay-heavy ones (soft order only; hub fallback still works).
+            crate::path_stats::sort_by_direct_history(&mut entries, |e| e.id.to_string());
             for e in entries {
                 if e.id == own_id {
                     continue;
@@ -463,6 +494,7 @@ async fn run_tun_connect_inner(
     if let Some(h) = &hooks {
         h.state.set_vips(own).await;
         // Spoke ready after TUN exists; hub dial may still be in progress.
+        h.state.apply_phase(PhaseEvent::Ready).await;
         h.signal_ready(Ok(()));
     }
     let (tun_io, mut from_tun) = spawn_tun_io(tun, mtu);
@@ -610,6 +642,7 @@ async fn run_tun_connect_inner(
 
             if let Some(h) = &hooks {
                 h.state.set_path_kind(path_label(&conn)).await;
+                h.state.apply_phase(PhaseEvent::Connected).await;
             }
 
             let (hub_tx, hub_rx) = mpsc::channel::<Bytes>(TUN_PKT_QUEUE);
