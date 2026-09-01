@@ -219,6 +219,7 @@ fn parse_service_up_opts() -> Result<SupervisedUpOpts> {
         role,
         to,
         tun_ip: None,
+        tun_ip6: None,
         mtu,
         allow: None,
         to_addr: vec![],

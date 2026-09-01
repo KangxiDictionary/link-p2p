@@ -94,14 +94,19 @@ sudo link-p2p tun serve
 sudo link-p2p tun connect --to <hub EndpointId>
 ```
 
-Each node gets a VIP in `172.24.0.0/16` (IPv4 only). Mesh spokes prefer direct
-paths; hub forwards as fallback. Privileged mode — see
-[platforms.md](platforms.md) and [subsystems/tun.md](../subsystems/tun.md).
+Each node gets dual-stack VIPs: IPv4 in `172.24.0.0/16` and IPv6 ULA in
+`fd24:ac18::/64`. Omit `--tun-ip` / `--tun-ip6` to auto-pick free addresses on
+collision; pass them only when you need a fixed VIP (then a still-busy address
+fails with a short error). Mesh spokes prefer direct paths; hub forwards as
+fallback. Outer transport is QUIC datagrams (apps may use TCP/UDP *inside* the
+tunnel). Privileged mode — see [platforms.md](platforms.md) and
+[subsystems/tun.md](../subsystems/tun.md).
 
 `tun connect` / spoke reconnects automatically (same backoff as stream mode).
-The TUN interface and `/16` route survive across sessions. `link-p2p ping` works
+The TUN interface and mesh routes survive across sessions. `link-p2p ping` works
 against `tun serve`. `--max-conns` does **not** apply to TUN. Diagnose failures
-in the daemon log (`tun.log`), not the short CLI remote.
+via the short CLI error first; details live in the daemon log (`tun.log`) or, for
+the system service, `systemctl status` / `journalctl -u link-p2p-tun.service`.
 
 ---
 

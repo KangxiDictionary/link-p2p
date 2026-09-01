@@ -26,7 +26,7 @@ use crate::i18n::{tr, tr_fmt};
 use crate::path_kind;
 use crate::pipe;
 use crate::socks5;
-use crate::ssrf::check_proxy_target;
+use crate::ssrf::{check_proxy_target, dial_checked};
 use crate::style::Styler;
 
 pub(crate) const ALPN: &[u8] = b"link-p2p/tcp-forward/1";
@@ -440,26 +440,30 @@ pub(crate) async fn handle_forward_stream(
     send: SendStream,
     mut recv: RecvStream,
 ) -> Result<()> {
-    let target = match mode {
+    match mode {
         ServeMode::Forward(addr) => {
             // Fixed-forward: consume STREAM_HELLO before dialing so accept_bi
             // completes as soon as the connect side opens the stream — not
             // when the local TCP client eventually writes (or FIN)s.
             pipe::read_stream_hello(&mut recv).await?;
-            addr
+            let tcp = TcpStream::connect(addr)
+                .await
+                .with_context(|| tr_fmt!("connecting to {0}", addr))?;
+            tracing::debug!("DBG forward: connected to {addr}, starting pipe_streams");
+            pipe::pipe_streams(tcp, send, recv).await
         }
         ServeMode::Proxy { allow_private } => {
             // Proxy already has an on-wire header (`write_target` / read_target).
-            let target = socks5::read_target(&mut recv).await?.resolve().await?;
-            check_proxy_target(target, allow_private)?;
-            target
+            // Resolve once → SSRF check → dial the same CheckedTarget (no
+            // second lookup — type system blocks reconnecting a fresh resolve).
+            let raw = socks5::read_target(&mut recv).await?.resolve().await?;
+            let checked = check_proxy_target(raw, allow_private)?;
+            let addr = checked.addr();
+            let tcp = dial_checked(checked).await?;
+            tracing::debug!("DBG forward: connected to {addr}, starting pipe_streams");
+            pipe::pipe_streams(tcp, send, recv).await
         }
-    };
-    let tcp = TcpStream::connect(target)
-        .await
-        .with_context(|| tr_fmt!("connecting to {0}", target))?;
-    tracing::debug!("DBG forward: connected to {target}, starting pipe_streams");
-    pipe::pipe_streams(tcp, send, recv).await
+    }
 }
 
 /// Path / throughput monitor for a live session.

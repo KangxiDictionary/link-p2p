@@ -100,6 +100,7 @@ pub struct SpawnOpts {
     pub to: Option<String>,
     pub mtu: Option<u16>,
     pub tun_ip: Option<Ipv4Addr>,
+    pub tun_ip6: Option<std::net::Ipv6Addr>,
     pub allow: Vec<String>,
     /// Spoke: omit self from hub roster broadcasts to other spokes.
     pub hidden: bool,
@@ -110,6 +111,7 @@ pub struct SupervisedUpOpts {
     pub role: String,
     pub to: Option<String>,
     pub tun_ip: Option<Ipv4Addr>,
+    pub tun_ip6: Option<std::net::Ipv6Addr>,
     pub mtu: u16,
     pub allow: Option<std::collections::HashSet<iroh::EndpointId>>,
     pub to_addr: Vec<std::net::SocketAddr>,
@@ -265,7 +267,13 @@ pub enum Liveness {
 
 pub fn random_session() -> String {
     let mut buf = [0u8; 16];
-    getrandom::fill(&mut buf).expect("getrandom");
+    // Local ephemeral token (ready nonce / pid-file session). Unlike identity
+    // KDF salt — where we surface a recoverable `anyhow` — a weak or missing
+    // session id would look "valid" to the parent and undermine spawn auth.
+    // If the host has no CSPRNG, dying here is the honest failure mode.
+    getrandom::fill(&mut buf).expect(
+        "getrandom failed while minting a TUN session token (no CSPRNG?)",
+    );
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -755,6 +763,9 @@ async fn spawn_daemon_unix(opts: &SpawnOpts, skeleton: bool) -> Result<PidRecord
     if let Some(ip) = opts.tun_ip {
         cmd.env("LINK_P2P_TUN_IP", ip.to_string());
     }
+    if let Some(ip) = opts.tun_ip6 {
+        cmd.env("LINK_P2P_TUN_IP6", ip.to_string());
+    }
     if !opts.allow.is_empty() {
         cmd.env("LINK_P2P_ALLOW", opts.allow.join(","));
     }
@@ -803,7 +814,8 @@ async fn spawn_daemon_unix(opts: &SpawnOpts, skeleton: bool) -> Result<PidRecord
             bail!(exit::coded(
                 exit::TIMEOUT,
                 anyhow::anyhow!(tr_fmt!(
-                    "timed out waiting for tun daemon to become ready; check {0}",
+                    "timed out waiting for tun daemon to become ready; check {0}\n\
+                     Tip: for the system service use `systemctl status link-p2p-tun.service` and `journalctl -u link-p2p-tun.service -f`.",
                     log_path.display().to_string()
                 )),
             ));
@@ -818,7 +830,12 @@ async fn spawn_daemon_unix(opts: &SpawnOpts, skeleton: bool) -> Result<PidRecord
         cleanup_residuals_if_dead(mode).await;
         bail!(exit::coded(
             exit::CONNECT,
-            anyhow::anyhow!(tr_fmt!("TUN daemon failed to start: {0}", err.trim())),
+            anyhow::anyhow!(tr_fmt!(
+                "TUN daemon failed to start: {0}\n\
+                 See {1} (system service: `systemctl status link-p2p-tun.service` / `journalctl -u link-p2p-tun.service -e`).",
+                err.trim(),
+                log_path.display().to_string()
+            )),
         ));
     }
     if line != "OK" {
@@ -889,6 +906,7 @@ pub async fn cmd_up_background(
     to: Option<&str>,
     mtu: u16,
     tun_ip: Option<Ipv4Addr>,
+    tun_ip6: Option<std::net::Ipv6Addr>,
     allow: &[String],
     hidden: bool,
     styler: &Styler,
@@ -903,7 +921,7 @@ pub async fn cmd_up_background(
     }
     #[cfg(not(unix))]
     {
-        let _ = (role, to, mtu, tun_ip, allow, hidden, styler);
+        let _ = (role, to, mtu, tun_ip, tun_ip6, allow, hidden, styler);
         bail!(exit::coded(
             exit::USAGE,
             anyhow::anyhow!(tr!(
@@ -918,6 +936,7 @@ pub async fn cmd_up_background(
             to: to.map(|s| s.to_string()),
             mtu: Some(mtu),
             tun_ip,
+            tun_ip6,
             allow: allow.to_vec(),
             hidden,
         };
@@ -932,6 +951,12 @@ pub async fn cmd_up_background(
         );
         println!("  {}", tr!("use `link-p2p tun status` to check state"));
         println!("  {}", tr!("use `link-p2p tun down` to stop it"));
+        if let Some(log) = tun_ctl::log_path(RuntimeMode::AdHoc) {
+            println!(
+                "  {}",
+                tr_fmt!("logs: {0} (or `journalctl` / `systemctl status` when using the system service)", log.display().to_string())
+            );
+        }
         if let Liveness::Running { status, .. } = probe(RuntimeMode::AdHoc).await? {
             print_status_text(&status);
         }
@@ -1049,9 +1074,14 @@ pub async fn cmd_peers(mode: RuntimeMode, format: CliFormat) -> Result<()> {
                 if peers.is_empty() {
                     println!("{}", tr!("(no peers)"));
                 } else {
-                    println!("{:<15} SHORT", "VIP");
+                    println!("{:<40} {:<15} SHORT", "VIP6", "VIP");
                     for p in peers {
-                        println!("{:<15} {}", p.vip, peer_short_code(&p));
+                        let v6 = if p.vip6.is_unspecified() {
+                            "-".to_string()
+                        } else {
+                            p.vip6.to_string()
+                        };
+                        println!("{:<40} {:<15} {}", v6, p.vip, peer_short_code(&p));
                     }
                 }
             }
@@ -1076,7 +1106,7 @@ pub async fn cmd_call(
             if mode == RuntimeMode::System {
                 return Err(tun_ctl::not_running(mode));
             }
-            cmd_up_background(mode, "phone", None, 1280, None, &[], false, styler).await?;
+            cmd_up_background(mode, "phone", None, 1280, None, None, &[], false, styler).await?;
         }
         Liveness::Running {
             status: CtlResponse::Status { role, .. },
@@ -1200,6 +1230,7 @@ fn print_status_text(status: &CtlResponse) {
         role,
         uptime_secs,
         vip,
+        vip6,
         path_kind,
         pending_calls,
         ..
@@ -1207,6 +1238,9 @@ fn print_status_text(status: &CtlResponse) {
     {
         println!("role:     {role}");
         println!("vip:      {vip}");
+        if !vip6.is_unspecified() {
+            println!("vip6:     {vip6}");
+        }
         println!("path:     {path_kind}");
         println!("uptime:   {}", format_uptime(*uptime_secs));
         if !pending_calls.is_empty() {
@@ -1819,6 +1853,9 @@ async fn run_live_data_plane(role: &str, hooks: Arc<crate::tun::TunHooks>) -> Re
     let tun_ip: Option<Ipv4Addr> = std::env::var("LINK_P2P_TUN_IP")
         .ok()
         .and_then(|s| s.parse().ok());
+    let tun_ip6: Option<std::net::Ipv6Addr> = std::env::var("LINK_P2P_TUN_IP6")
+        .ok()
+        .and_then(|s| s.parse().ok());
     let allow = parse_allow_env()?;
 
     let tune = crate::TransportTune::default();
@@ -1830,6 +1867,7 @@ async fn run_live_data_plane(role: &str, hooks: Arc<crate::tun::TunHooks>) -> Re
             crate::tun::run_tun_serve(
                 secret_key,
                 tun_ip,
+                tun_ip6,
                 mtu,
                 &relays,
                 relay_only,
@@ -1854,6 +1892,7 @@ async fn run_live_data_plane(role: &str, hooks: Arc<crate::tun::TunHooks>) -> Re
                 secret_key,
                 &to,
                 tun_ip,
+                tun_ip6,
                 mtu,
                 &relays,
                 relay_only,
@@ -1873,6 +1912,7 @@ async fn run_live_data_plane(role: &str, hooks: Arc<crate::tun::TunHooks>) -> Re
             crate::tun::run_tun_phone(
                 secret_key,
                 tun_ip,
+                tun_ip6,
                 mtu,
                 &relays,
                 relay_only,
@@ -1897,17 +1937,45 @@ async fn run_live_data_plane(role: &str, hooks: Arc<crate::tun::TunHooks>) -> Re
 
 #[cfg(any(unix, windows))]
 async fn run_live_data_plane_explicit(
-    role: &str,
+    _role: &str,
     hooks: Arc<crate::tun::TunHooks>,
     opts: SupervisedUpOpts,
     ui: crate::Ui,
     styler: Styler,
 ) -> Result<()> {
-    match role {
+    dispatch_data_plane(opts, ui, styler, Some(hooks)).await
+}
+
+/// Ad-hoc foreground TUN: `tun serve` / `tun connect` /
+/// `tun up --foreground` (without `--system`).
+///
+/// Same [`SupervisedUpOpts`] as the supervised path so those CLI aliases
+/// cannot drift apart when `run_tun_*` signatures change.
+pub async fn run_adhoc_foreground(
+    opts: SupervisedUpOpts,
+    ui: crate::Ui,
+    styler: Styler,
+) -> Result<()> {
+    dispatch_data_plane(opts, ui, styler, None).await
+}
+
+/// Shared hub/spoke/phone dial into `tun::run_tun_*`.
+///
+/// `hooks = None` is ad-hoc CLI (no ctl ready signal). Daemon workers pass
+/// `Some` so the ready nonce / status path stays wired.
+async fn dispatch_data_plane(
+    opts: SupervisedUpOpts,
+    ui: crate::Ui,
+    styler: Styler,
+    hooks: Option<Arc<crate::tun::TunHooks>>,
+) -> Result<()> {
+    let role = opts.role.clone();
+    match role.as_str() {
         "hub" | "serve" => {
             crate::tun::run_tun_serve(
                 opts.secret_key,
                 opts.tun_ip,
+                opts.tun_ip6,
                 opts.mtu,
                 &opts.relays,
                 opts.relay_only,
@@ -1918,18 +1986,17 @@ async fn run_live_data_plane_explicit(
                 opts.allow,
                 ui,
                 styler,
-                Some(hooks),
+                hooks,
             )
             .await
         }
         "spoke" | "connect" => {
-            let to = opts
-                .to
-                .context(tr!("spoke daemon requires --to <hub EndpointId>"))?;
+            let to = opts.to.context(tr!("spoke requires --to <hub EndpointId>"))?;
             crate::tun::run_tun_connect(
                 opts.secret_key,
                 &to,
                 opts.tun_ip,
+                opts.tun_ip6,
                 opts.mtu,
                 &opts.relays,
                 opts.relay_only,
@@ -1941,14 +2008,23 @@ async fn run_live_data_plane_explicit(
                 opts.allow,
                 ui,
                 styler,
-                Some(hooks),
+                hooks,
             )
             .await
         }
         "phone" | "call" => {
+            let hooks = match hooks {
+                Some(h) => h,
+                None => {
+                    let state = crate::tun::TunLiveState::new("phone", "fg");
+                    let (h, _ready) = crate::tun::TunHooks::new(state);
+                    Arc::new(h)
+                }
+            };
             crate::tun::run_tun_phone(
                 opts.secret_key,
                 opts.tun_ip,
+                opts.tun_ip6,
                 opts.mtu,
                 &opts.relays,
                 opts.relay_only,
@@ -1965,7 +2041,9 @@ async fn run_live_data_plane_explicit(
         }
         other => {
             let err = anyhow::anyhow!(tr_fmt!("unknown TUN daemon role {0}", other));
-            hooks.signal_ready(Err(anyhow::anyhow!("{err:#}")));
+            if let Some(hooks) = hooks {
+                hooks.signal_ready(Err(anyhow::anyhow!("{err:#}")));
+            }
             Err(err)
         }
     }
@@ -2098,9 +2176,7 @@ mod tests {
                 RuntimeMode::System,
                 "hub",
                 None,
-                1280,
-                None,
-                &[],
+                1280, None, None, &[],
                 false,
                 &styler,
             ))
@@ -2311,7 +2387,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        let err = cmd_up_background(MODE, "hub", None, 1280, None, &[], false, &styler)
+        let err = cmd_up_background(MODE, "hub", None, 1280, None, None, &[], false, &styler)
             .await
             .unwrap_err();
         assert_eq!(exit::code_from(&err), exit::USAGE);
@@ -2489,6 +2565,7 @@ mod tests {
                 role: "hub".into(),
                 uptime_secs: 1,
                 vip: Ipv4Addr::new(172, 24, 0, 1),
+                vip6: std::net::Ipv6Addr::UNSPECIFIED,
                 path_kind: "unknown".into(),
                 session: "x".into(),
                 pending_calls: vec![],

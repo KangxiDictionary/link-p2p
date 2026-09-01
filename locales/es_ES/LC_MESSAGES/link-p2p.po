@@ -116,14 +116,12 @@ msgid ""
 "nc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\n"
 "RUST_LOG=iroh=debug {1}     # see exactly where it's stuck"
 msgstr ""
-"el endpoint no se puso en línea en {0}.\n"
+"el endpoint no estuvo en línea en {0}.\n"
 "\n"
-"La causa más probable: el firewall bloquea el UDP saliente.\n"
-"iroh/QUIC depende de UDP tanto para el hole-punching directo como para las conexiones "
-"de relay. Prueba:\n"
-"  nc -u -v -w3 8.8.8.8 53    # ¿funciona el envío de UDP?\n"
-"  RUST_LOG=iroh=debug {1}     # mira exactamente dónde se atasca"
-
+"Causa más probable: UDP saliente bloqueado por un cortafuegos.\n"
+"iroh/QUIC necesita UDP para hole-punch y relay. Prueba:\n"
+"nc -u -v -w3 8.8.8.8 53    # ¿funciona el UDP de salida?\n"
+"RUST_LOG=iroh=debug {1}     # ver dónde se atasca"
 msgid "'{0}' is not a valid --relay URL"
 msgstr "'{0}' no es una URL --relay válida"
 
@@ -1598,9 +1596,17 @@ msgstr "无需 python/nc 的检查：对每个 --relay 做 TCP 探测、确认 W
 msgid "Skip the loopback TCP echo drain (relay/wintun checks only)."
 msgstr "跳过回环 TCP echo drain（仅做中继/wintun 检查）。"
 
-msgid "\nYou passed --relay without --no-n0-relays: the endpoint still\nstarts on n0's public relays. If n0 is blocked on this network,\neither add --no-n0-relays (custom relay only) or ensure UDP to\nn0 works. Custom URLs are installed before this wait; if you\nstill time out, probe your relay with `link-p2p tun selftest`."
-msgstr "\n你传了 --relay 但未加 --no-n0-relays：端点仍从 n0 公共中继起步。若本网络封禁 n0，请加 --no-n0-relays（仅用自建中继）或确保到 n0 的 UDP 可用。自定义 URL 会在等待上线前安装；若仍超时，用 `link-p2p tun selftest` 探测中继。"
-
+msgid ""
+"\n"
+"You passed --relay without --no-n0-relays: the endpoint still\n"
+"starts on n0's public relays. If n0 is blocked on this network,\n"
+"either add --no-n0-relays (custom relay only) or ensure UDP to\n"
+"n0 works. Custom URLs are installed before this wait; if you\n"
+"still time out, probe your relay with `link-p2p tun selftest`."
+msgstr ""
+"\n"
+"Pasaste --relay sin --no-n0-relays: el endpoint sigue arrancando en los relays públicos n0.\n"
+"Si n0 está bloqueado en esta red, añade --no-n0-relays (solo relay propio) o asegúrate de UDP hacia n0."
 msgid "\n--no-n0-relays is set: only your --relay URL(s) are used.\nCheck that the relay is reachable (TCP) and accepts QUIC/UDP.\nTry: link-p2p tun selftest"
 msgstr "\n已设置 --no-n0-relays：仅使用你的 --relay。请确认中继 TCP 可达且接受 QUIC/UDP。\n尝试：link-p2p tun selftest"
 
@@ -1793,3 +1799,281 @@ msgstr ""
 msgid "`<peer>` to dial, or `accept|reject <peer>` for a ringing call."
 msgstr "`<peer>` to dial, or `accept|reject <peer>` for a ringing call."
 
+
+# --- auto-added TUN dual-stack / UX strings ---
+
+msgid ""
+"\n"
+"--no-n0-relays is set: only your --relay URL(s) are used.\n"
+"Check that the relay is reachable (TCP) and accepts QUIC/UDP.\n"
+"Try: link-p2p selftest"
+msgstr ""
+"\n"
+"--no-n0-relays activo: solo se usan tus URL --relay.\n"
+"Comprueba que el relay sea alcanzable (TCP) y acepte QUIC/UDP.\n"
+"Prueba: link-p2p selftest"
+
+msgid ""
+"\n"
+"You passed --relay without --no-n0-relays: the endpoint still\n"
+"starts on n0's public relays. If n0 is blocked on this network,\n"
+"either add --no-n0-relays (custom relay only) or ensure UDP to\n"
+"n0 works. Custom URLs are installed before this wait; if you\n"
+"still time out, probe your relay with `link-p2p selftest`."
+msgstr ""
+"\n"
+"Pasaste --relay sin --no-n0-relays: el endpoint sigue usando los relays públicos n0.\n"
+"Si n0 está bloqueado, añade --no-n0-relays (solo relay propio) o asegúrate de UDP hacia n0."
+
+msgid "(no ringing calls)"
+msgstr "(no hay llamadas entrantes)"
+
+msgid "EndpointId {0} — dial with `tun call <contact>`"
+msgstr "EndpointId {0} — marca con `tun call <contacto>`"
+
+msgid "OWASP interactive-login Argon2 params rejected by argon2 crate (please file a bug)"
+msgstr "el crate argon2 rechazó los parámetros OWASP interactive-login (abre un bug)"
+
+msgid "TUN call dial failed"
+msgstr "falló el marcado de llamada TUN"
+
+msgid "TUN control request timed out"
+msgstr "agotó el tiempo de la petición de control TUN"
+
+msgid ""
+"TUN daemon failed to start: {0}\n"
+"See {1} (system service: `systemctl status link-p2p-tun.service` / `journalctl -u link-p2p-tun.service -e`)."
+msgstr ""
+"el demonio TUN no arrancó: {0}\n"
+"Ver {1} (servicio: `systemctl status link-p2p-tun.service` / `journalctl -u link-p2p-tun.service -e`)."
+
+msgid "TUN daemon is not in phone mode (start with `tun up --role phone` or `tun call`)"
+msgstr "el demonio TUN no está en modo teléfono (inicia con `tun up --role phone` o `tun call`)"
+
+msgid "TUN daemon is role {0}; `tun call` needs phone mode (`tun down` then `tun call`, or `tun up --role phone`)"
+msgstr "el demonio TUN es rol {0}; `tun call` necesita modo teléfono (`tun down` luego `tun call`, o `tun up --role phone`)"
+
+msgid "TUN phone call queue is full; try again"
+msgstr "cola de llamadas TUN llena; reintenta"
+
+msgid "`--hidden` is only valid for spoke / `tun join`"
+msgstr "`--hidden` solo vale para spoke / `tun join`"
+
+msgid "`--role phone` cannot be combined with `--to` (use `tun call <peer>` after up)"
+msgstr "`--role phone` no se combina con `--to` (usa `tun call <par>` después)"
+
+msgid "`hub` or `spoke`. Default: spoke if `--to` is set, otherwise hub."
+msgstr "`hub` o `spoke`. Por defecto: spoke si hay `--to`, si no hub."
+
+msgid "accepted {0}"
+msgstr "aceptado {0}"
+
+msgid "already connected"
+msgstr "ya conectado"
+
+msgid "auto-selected alternate IPv4 VIP after a local collision"
+msgstr "se seleccionó automáticamente una VIP IPv4 alternativa tras un conflicto local"
+
+msgid "auto-selected alternate IPv6 VIP after a local collision"
+msgstr "se seleccionó automáticamente una VIP IPv6 alternativa tras un conflicto local"
+
+msgid "bad TUN VIP exchange magic"
+msgstr "magia de intercambio VIP TUN incorrecta"
+
+msgid "cannot call yourself"
+msgstr "no puedes llamarte a ti mismo"
+
+msgid "checking local interfaces for the virtual IPv6"
+msgstr "comprobando interfaces locales por la IPv6 virtual"
+
+msgid "connected"
+msgstr "conectado"
+
+msgid "connected to {0} at {1} / {2}"
+msgstr "conectado a {0} en {1} / {2}"
+
+msgid "connected. your virtual IPs: {0} / {1}"
+msgstr "conectado. tus IPs virtuales: {0} / {1}"
+
+msgid "could not find a free IPv4 VIP in 172.24.0.0/16 on this machine; free one or pass --tun-ip"
+msgstr "no hay VIP IPv4 libre en 172.24.0.0/16 en esta máquina; libera una o pasa --tun-ip"
+
+msgid "could not find a free IPv6 VIP in fd24:ac18::/64 on this machine; free one or pass --tun-ip6"
+msgstr "no hay VIP IPv6 libre en fd24:ac18::/64 en esta máquina; libera una o pasa --tun-ip6"
+
+msgid "dialing {0}"
+msgstr "marcando {0}"
+
+msgid ""
+"endpoint did not come online within {0}.\n"
+"\n"
+"The most likely cause: outgoing UDP is blocked by a firewall.\n"
+"iroh/QUIC relies on UDP for both direct hole-punching and\n"
+"relay connections. Try:\n"
+"link-p2p selftest               # relay TCP probe + loopback\n"
+"nc -u -v -w3 8.8.8.8 53         # does UDP egress work at all?\n"
+"RUST_LOG=iroh=debug {1}          # see exactly where it's stuck{2}"
+msgstr ""
+"el endpoint no estuvo en línea en {0}.\n"
+"\n"
+"Causa más probable: UDP saliente bloqueado.\n"
+"iroh/QUIC necesita UDP para hole-punch y relay. Prueba:\n"
+"link-p2p selftest"
+
+msgid "expected roster HELLO, got type {0}"
+msgstr "se esperaba HELLO de roster, se recibió tipo {0}"
+
+msgid "failed to load config; using defaults"
+msgstr "no se pudo cargar la config; usando valores por defecto"
+
+msgid "forwarder error"
+msgstr "error del reenviador"
+
+msgid "gathering entropy for identity nonce (Unix: check /dev/urandom; containers/embedded may lack a CSPRNG)"
+msgstr "recogiendo entropía para el nonce de identidad (Unix: revisa /dev/urandom; contenedores/embebidos pueden carecer de CSPRNG)"
+
+msgid "gathering entropy for identity salt (Unix: check /dev/urandom; containers/embedded may lack a CSPRNG)"
+msgstr "recogiendo entropía para la salt de identidad (Unix: revisa /dev/urandom; contenedores/embebidos pueden carecer de CSPRNG)"
+
+msgid "hub {0} is at {1} / {2} (path {3}); peers may connect directly"
+msgstr "hub {0} está en {1} / {2} (ruta {3}); los pares pueden conectar directo"
+
+msgid "incoming TUN call ringing"
+msgstr "llamada TUN entrante sonando"
+
+msgid "invalid `--role {0}` (expected hub, spoke, or phone)"
+msgstr "`--role {0}` inválido (hub, spoke o phone)"
+
+msgid "link-p2p tun selftest"
+msgstr "autoprueba link-p2p tun"
+
+msgid "logs: systemctl status {0}; journalctl -u {0} -f"
+msgstr "registros: systemctl status {0}; journalctl -u {0} -f"
+
+msgid "logs: {0} (or `journalctl` / `systemctl status` when using the system service)"
+msgstr "registros: {0} (o `journalctl` / `systemctl status` con el servicio del sistema)"
+
+msgid "mesh peer {0} at {1} / {2}"
+msgstr "par de malla {0} en {1} / {2}"
+
+msgid "no pending call matching that peer"
+msgstr "no hay llamada pendiente para ese par"
+
+msgid "opening path stats {0}"
+msgstr "abriendo estadísticas de ruta {0}"
+
+msgid "passphrase is too long (max {0} UTF-8 bytes, you have {1})"
+msgstr "la frase es demasiado larga (máx {0} bytes UTF-8, tienes {1})"
+
+msgid "passphrase must be at least {0} characters (Unicode scalar values; you have {1})"
+msgstr "la frase debe tener al menos {0} caracteres (escalares Unicode; tienes {1})"
+
+msgid "peer announced an unusable virtual IP {0} / {1}"
+msgstr "el par anunció una IP virtual inutilizable {0} / {1}"
+
+msgid "peer announced an unusable virtual IPv6 {0}"
+msgstr "el par anunció una IPv6 virtual inutilizable {0}"
+
+msgid "peer {0} joined at {1} / {2}"
+msgstr "par {0} se unió en {1} / {2}"
+
+msgid "permission denied: elevated privileges required for this TUN control operation"
+msgstr "permiso denegado: se requieren privilegios elevados para esta operación TUN"
+
+msgid "phone mode up. your virtual IPs: {0} / {1}"
+msgstr "modo teléfono activo. tus IPs virtuales: {0} / {1}"
+
+msgid "reading path stats {0}"
+msgstr "leyendo estadísticas de ruta {0}"
+
+msgid "rejected TUN call"
+msgstr "llamada TUN rechazada"
+
+msgid "rejected {0}"
+msgstr "rechazado {0}"
+
+msgid "replacing path stats {0}"
+msgstr "reemplazando estadísticas de ruta {0}"
+
+msgid "rewriting path stats {0}"
+msgstr "reescribiendo estadísticas de ruta {0}"
+
+msgid "serializing path sample"
+msgstr "serializando muestra de ruta"
+
+msgid "timed out resolving {0} after {1} seconds"
+msgstr "agotó el tiempo al resolver {0} tras {1} s"
+
+msgid ""
+"timed out waiting for tun daemon to become ready; check {0}\n"
+"Tip: for the system service use `systemctl status link-p2p-tun.service` and `journalctl -u link-p2p-tun.service -f`."
+msgstr ""
+"tiempo de espera agotado esperando al demonio TUN; revisa {0}\n"
+"Consejo: con el servicio usa `systemctl status link-p2p-tun.service` y `journalctl -u link-p2p-tun.service -f`."
+
+msgid "transport: QUIC datagrams (apps may use TCP/UDP inside the tunnel)"
+msgstr "transporte: datagramas QUIC (las apps pueden usar TCP/UDP dentro del túnel)"
+
+msgid "unexpected control response: {0}"
+msgstr "respuesta de control inesperada: {0}"
+
+msgid "usage: tun call <peer> | tun call accept <peer> | tun call reject <peer>"
+msgstr "uso: tun call <par> | tun call accept <par> | tun call reject <par>"
+
+msgid "virtual IP {0} / {1} is already claimed by another peer"
+msgstr "la IP virtual {0} / {1} ya está reclamada por otro par"
+
+msgid "virtual IP {0} is already assigned to a local interface"
+msgstr "la IP virtual {0} ya está asignada a una interfaz local"
+
+msgid ""
+"virtual IP {0} is already on a local interface (you passed --tun-ip).\n"
+"Pick a free address with --tun-ip, or omit --tun-ip to auto-select.\n"
+"Detail: {1}"
+msgstr ""
+"la IP virtual {0} ya está en una interfaz local (pasaste --tun-ip).\n"
+"Elige una dirección libre con --tun-ip, u omite --tun-ip para auto-selección.\n"
+"Detalle: {1}"
+
+msgid "virtual IPv6 {0} is already assigned to a local interface"
+msgstr "la IPv6 virtual {0} ya está asignada a una interfaz local"
+
+msgid ""
+"virtual IPv6 {0} is already on a local interface (you passed --tun-ip6).\n"
+"Pick a free address with --tun-ip6, or omit --tun-ip6 to auto-select.\n"
+"Detail: {1}"
+msgstr ""
+"la IPv6 virtual {0} ya está en una interfaz local (pasaste --tun-ip6).\n"
+"Elige una dirección libre con --tun-ip6, u omite --tun-ip6 para auto-selección.\n"
+"Detalle: {1}"
+
+msgid "waiting for peer to dial (EndpointId tie-break)"
+msgstr "esperando que el par marque (desempate EndpointId)"
+
+msgid "waiting for peer — check `tun status` / `tun peers` (daemon keeps dialing)"
+msgstr "esperando al par — mira `tun status` / `tun peers` (el demonio sigue marcando)"
+
+msgid "your virtual IPs (the peer reaches you here):"
+msgstr "tus IPs virtuales (el par te alcanza aquí):"
+
+msgid ""
+"Make machines reachable at the IP layer over QUIC datagrams.\n"
+"\n"
+"Creates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). Preferred day-to-day commands: `tun call` (1:1 phone), `tun join <hub>` (mesh channel), `tun status` / `tun peers` / `tun down`. Also `tun up --role phone|hub|spoke`. Foreground aliases: `tun serve` / `tun connect`. Prefer `--cc bbr3` on lossy paths. Dual-stack VIPs: 172.24.0.0/16 and fd24:ac18::/64 (omit --tun-ip/--tun-ip6 to auto-pick on collision) — see docs/subsystems/tun.md."
+msgstr ""
+"Haz que las máquinas se alcancen en capa IP sobre datagramas QUIC.\n"
+"\n"
+"Crea una interfaz TUN (root / CAP_NET_ADMIN en Linux y macOS, o Administrador + wintun.dll en Windows). Comandos habituales: `tun call` (teléfono 1:1), `tun join <hub>` (canal mesh), `tun status` / `tun peers` / `tun down`. También `tun up --role phone|hub|spoke`. Alias en primer plano: `tun serve` / `tun connect`. Prefiere `--cc bbr3` en rutas con pérdida. VIP dual-stack: 172.24.0.0/16 y fd24:ac18::/64 (omite --tun-ip/--tun-ip6 para autoelegir si hay conflicto) — ver docs/subsystems/tun.md."
+
+# --- tun-ip6 help ---
+msgid "Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16). Omit to auto-pick a free address."
+msgstr "Anula la IP virtual de este nodo (por defecto derivada del EndpointId, en 172.24.0.0/16). Omítelo para autoelegir si hay conflicto."
+
+msgid "Override this node's IPv6 VIP (default: derived in fd24:ac18::/64). Omit to auto-pick a free address."
+msgstr "Anula la VIP IPv6 de este nodo (por defecto en fd24:ac18::/64). Omítelo para autoelegir si hay conflicto."
+
+msgid "Dial a `tun serve` hub, install 172.24.0.0/16 and fd24:ac18::/64 on the TUN, receive the mesh roster, and attempt direct links to other spokes (packets prefer direct; otherwise via hub). Equivalent to `tun up --foreground --role spoke --to <hub>`."
+msgstr "Marca un hub `tun serve`, instala 172.24.0.0/16 y fd24:ac18::/64 en el TUN, recibe el roster y prueba enlaces directos a otros spokes (preferencia directa; si no, vía hub). Equivale a `tun up --foreground --role spoke --to <hub>`."
+
+msgid "`--identity-passphrase` is visible in `ps` and shell history; prefer LINK_P2P_PASSPHRASE"
+msgstr "`--identity-passphrase` es visible en `ps` y el historial del shell; prefer LINK_P2P_PASSPHRASE"

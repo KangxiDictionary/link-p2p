@@ -113,13 +113,12 @@ msgid ""
 "nc -u -v -w3 8.8.8.8 53    # does UDP egress work at all?\n"
 "RUST_LOG=iroh=debug {1}     # see exactly where it's stuck"
 msgstr ""
-"端点在 {0} 内未能上线。\n"
+"端点在 {0} 内未上线。\n"
 "\n"
-"最常见原因：出站 UDP 被防火墙拦截。\n"
-"iroh/QUIC 依赖 UDP 进行直连打洞与 relay 连接。可尝试：\n"
-"  nc -u -v -w3 8.8.8.8 53    # 测试 UDP 出站是否正常\n"
-"  RUST_LOG=iroh=debug {1}     # 查看具体卡在哪一步"
-
+"最可能原因：出站 UDP 被防火墙拦截。\n"
+"iroh/QUIC 的直连打洞与中继都依赖 UDP。可试：\n"
+"nc -u -v -w3 8.8.8.8 53    # UDP 出站是否可用？\n"
+"RUST_LOG=iroh=debug {1}     # 看卡在哪里"
 msgid "'{0}' is not a valid --relay URL"
 msgstr "'{0}' 不是合法的 --relay URL"
 
@@ -1609,9 +1608,17 @@ msgstr "无需 python/nc 的检查：对每个 --relay 做 TCP 探测、确认 W
 msgid "Skip the loopback TCP echo drain (relay/wintun checks only)."
 msgstr "跳过回环 TCP echo drain（仅做中继/wintun 检查）。"
 
-msgid "\nYou passed --relay without --no-n0-relays: the endpoint still\nstarts on n0's public relays. If n0 is blocked on this network,\neither add --no-n0-relays (custom relay only) or ensure UDP to\nn0 works. Custom URLs are installed before this wait; if you\nstill time out, probe your relay with `link-p2p tun selftest`."
-msgstr "\n你传了 --relay 但未加 --no-n0-relays：端点仍从 n0 公共中继起步。若本网络封禁 n0，请加 --no-n0-relays（仅用自建中继）或确保到 n0 的 UDP 可用。自定义 URL 会在等待上线前安装；若仍超时，用 `link-p2p tun selftest` 探测中继。"
-
+msgid ""
+"\n"
+"You passed --relay without --no-n0-relays: the endpoint still\n"
+"starts on n0's public relays. If n0 is blocked on this network,\n"
+"either add --no-n0-relays (custom relay only) or ensure UDP to\n"
+"n0 works. Custom URLs are installed before this wait; if you\n"
+"still time out, probe your relay with `link-p2p tun selftest`."
+msgstr ""
+"\n"
+"你传了 --relay 但未加 --no-n0-relays：端点仍会从 n0 公共中继启动。\n"
+"若本网屏蔽了 n0，请加上 --no-n0-relays（仅用自定义中继），或确保到 n0 的 UDP 畅通。"
 msgid "\n--no-n0-relays is set: only your --relay URL(s) are used.\nCheck that the relay is reachable (TCP) and accepts QUIC/UDP.\nTry: link-p2p tun selftest"
 msgstr "\n已设置 --no-n0-relays：仅使用你的 --relay。请确认中继 TCP 可达且接受 QUIC/UDP。\n尝试：link-p2p tun selftest"
 
@@ -1806,3 +1813,278 @@ msgstr "`<peer>` 拨号，或对响铃来电使用 `accept|reject <peer>`。"
 
 msgid "`hub` or `spoke`. Default: spoke if `--to` is set, otherwise hub."
 msgstr "`hub` 或 `spoke`。默认：若设置了 `--to` 则为 spoke，否则为 hub。"
+
+# --- auto-added TUN dual-stack / UX strings ---
+
+msgid ""
+"\n"
+"--no-n0-relays is set: only your --relay URL(s) are used.\n"
+"Check that the relay is reachable (TCP) and accepts QUIC/UDP.\n"
+"Try: link-p2p selftest"
+msgstr ""
+"\n"
+"已设置 --no-n0-relays：仅使用你的 --relay URL。\n"
+"请确认中继可达（TCP）并接受 QUIC/UDP。\n"
+"可试：link-p2p selftest"
+
+msgid ""
+"\n"
+"You passed --relay without --no-n0-relays: the endpoint still\n"
+"starts on n0's public relays. If n0 is blocked on this network,\n"
+"either add --no-n0-relays (custom relay only) or ensure UDP to\n"
+"n0 works. Custom URLs are installed before this wait; if you\n"
+"still time out, probe your relay with `link-p2p selftest`."
+msgstr ""
+"\n"
+"你传了 --relay 但未加 --no-n0-relays：端点仍会启动 n0 公共中继。\n"
+"若本网屏蔽 n0，请加 --no-n0-relays（仅自定义中继），或确保到 n0 的 UDP 畅通。"
+
+msgid "(no ringing calls)"
+msgstr "（无来电）"
+
+msgid "EndpointId {0} — dial with `tun call <contact>`"
+msgstr "EndpointId {0} — 用 `tun call <联系人>` 拨号"
+
+msgid "OWASP interactive-login Argon2 params rejected by argon2 crate (please file a bug)"
+msgstr "argon2 crate 拒绝了 OWASP interactive-login Argon2 参数（请提 bug）"
+
+msgid "TUN call dial failed"
+msgstr "TUN 呼叫拨号失败"
+
+msgid "TUN control request timed out"
+msgstr "TUN 控制请求超时"
+
+msgid ""
+"TUN daemon failed to start: {0}\n"
+"See {1} (system service: `systemctl status link-p2p-tun.service` / `journalctl -u link-p2p-tun.service -e`)."
+msgstr ""
+"TUN 守护进程启动失败：{0}\n"
+"详见 {1}（系统服务：`systemctl status link-p2p-tun.service` / `journalctl -u link-p2p-tun.service -e`）。"
+
+msgid "TUN daemon is not in phone mode (start with `tun up --role phone` or `tun call`)"
+msgstr "TUN 守护进程不在电话模式（用 `tun up --role phone` 或 `tun call` 启动）"
+
+msgid "TUN daemon is role {0}; `tun call` needs phone mode (`tun down` then `tun call`, or `tun up --role phone`)"
+msgstr "TUN 守护进程角色为 {0}；`tun call` 需要电话模式（先 `tun down` 再 `tun call`，或 `tun up --role phone`）"
+
+msgid "TUN phone call queue is full; try again"
+msgstr "TUN 电话呼叫队列已满；请重试"
+
+msgid "`--hidden` is only valid for spoke / `tun join`"
+msgstr "`--hidden` 仅适用于 spoke / `tun join`"
+
+msgid "`--role phone` cannot be combined with `--to` (use `tun call <peer>` after up)"
+msgstr "`--role phone` 不能与 `--to` 同时使用（启动后用 `tun call <对端>`）"
+
+msgid "accepted {0}"
+msgstr "已接受 {0}"
+
+msgid "already connected"
+msgstr "已连接"
+
+msgid "auto-selected alternate IPv4 VIP after a local collision"
+msgstr "本地地址冲突后自动选用了备用 IPv4 虚拟 IP"
+
+msgid "auto-selected alternate IPv6 VIP after a local collision"
+msgstr "本地地址冲突后自动选用了备用 IPv6 虚拟 IP"
+
+msgid "bad TUN VIP exchange magic"
+msgstr "TUN 虚拟 IP 交换魔数无效"
+
+msgid "cannot call yourself"
+msgstr "不能呼叫自己"
+
+msgid "checking local interfaces for the virtual IPv6"
+msgstr "正在检查本地接口上的虚拟 IPv6"
+
+msgid "connected"
+msgstr "已连接"
+
+msgid "connected to {0} at {1} / {2}"
+msgstr "已连接到 {0}，地址 {1} / {2}"
+
+msgid "connected. your virtual IPs: {0} / {1}"
+msgstr "已连接。你的虚拟 IP：{0} / {1}"
+
+msgid "could not find a free IPv4 VIP in 172.24.0.0/16 on this machine; free one or pass --tun-ip"
+msgstr "本机在 172.24.0.0/16 中找不到空闲 IPv4 虚拟 IP；请释放一个或传入 --tun-ip"
+
+msgid "could not find a free IPv6 VIP in fd24:ac18::/64 on this machine; free one or pass --tun-ip6"
+msgstr "本机在 fd24:ac18::/64 中找不到空闲 IPv6 虚拟 IP；请释放一个或传入 --tun-ip6"
+
+msgid "dialing {0}"
+msgstr "正在拨号 {0}"
+
+msgid ""
+"endpoint did not come online within {0}.\n"
+"\n"
+"The most likely cause: outgoing UDP is blocked by a firewall.\n"
+"iroh/QUIC relies on UDP for both direct hole-punching and\n"
+"relay connections. Try:\n"
+"link-p2p selftest               # relay TCP probe + loopback\n"
+"nc -u -v -w3 8.8.8.8 53         # does UDP egress work at all?\n"
+"RUST_LOG=iroh=debug {1}          # see exactly where it's stuck{2}"
+msgstr ""
+"端点在 {0} 内未上线。\n"
+"\n"
+"最可能原因：出站 UDP 被防火墙拦截。\n"
+"iroh/QUIC 的直连打洞与中继都依赖 UDP。可试：\n"
+"link-p2p selftest"
+
+msgid "expected roster HELLO, got type {0}"
+msgstr "期望成员表 HELLO，收到类型 {0}"
+
+msgid "failed to load config; using defaults"
+msgstr "加载配置失败；使用默认值"
+
+msgid "forwarder error"
+msgstr "转发错误"
+
+msgid "gathering entropy for identity nonce (Unix: check /dev/urandom; containers/embedded may lack a CSPRNG)"
+msgstr "正在为身份 nonce 采集熵（Unix：检查 /dev/urandom；容器/嵌入式可能缺少 CSPRNG）"
+
+msgid "gathering entropy for identity salt (Unix: check /dev/urandom; containers/embedded may lack a CSPRNG)"
+msgstr "正在为身份 salt 采集熵（Unix：检查 /dev/urandom；容器/嵌入式可能缺少 CSPRNG）"
+
+msgid "hub {0} is at {1} / {2} (path {3}); peers may connect directly"
+msgstr "中枢 {0} 位于 {1} / {2}（路径 {3}）；对端可直连"
+
+msgid "incoming TUN call ringing"
+msgstr "收到 TUN 来电，正在振铃"
+
+msgid "invalid `--role {0}` (expected hub, spoke, or phone)"
+msgstr "无效的 `--role {0}`（应为 hub、spoke 或 phone）"
+
+msgid "link-p2p tun selftest"
+msgstr "link-p2p tun 自检"
+
+msgid "logs: systemctl status {0}; journalctl -u {0} -f"
+msgstr "日志：systemctl status {0}；journalctl -u {0} -f"
+
+msgid "logs: {0} (or `journalctl` / `systemctl status` when using the system service)"
+msgstr "日志：{0}（系统服务则用 `journalctl` / `systemctl status`）"
+
+msgid "mesh peer {0} at {1} / {2}"
+msgstr "网状对端 {0}：{1} / {2}"
+
+msgid "no pending call matching that peer"
+msgstr "没有匹配该对端的待处理呼叫"
+
+msgid "opening path stats {0}"
+msgstr "正在打开路径统计 {0}"
+
+msgid "passphrase is too long (max {0} UTF-8 bytes, you have {1})"
+msgstr "口令过长（最多 {0} 字节 UTF-8，当前 {1}）"
+
+msgid "passphrase must be at least {0} characters (Unicode scalar values; you have {1})"
+msgstr "口令至少 {0} 个字符（Unicode 标量；当前 {1}）"
+
+msgid "peer announced an unusable virtual IP {0} / {1}"
+msgstr "对端通告了不可用的虚拟 IP {0} / {1}"
+
+msgid "peer announced an unusable virtual IPv6 {0}"
+msgstr "对端通告了不可用的虚拟 IPv6 {0}"
+
+msgid "peer {0} joined at {1} / {2}"
+msgstr "对端 {0} 已加入，地址 {1} / {2}"
+
+msgid "permission denied: elevated privileges required for this TUN control operation"
+msgstr "权限不足：此 TUN 控制操作需要提升权限"
+
+msgid "phone mode up. your virtual IPs: {0} / {1}"
+msgstr "电话模式已启动。你的虚拟 IP：{0} / {1}"
+
+msgid "reading path stats {0}"
+msgstr "正在读取路径统计 {0}"
+
+msgid "rejected TUN call"
+msgstr "已拒绝 TUN 呼叫"
+
+msgid "rejected {0}"
+msgstr "已拒绝 {0}"
+
+msgid "replacing path stats {0}"
+msgstr "正在替换路径统计 {0}"
+
+msgid "rewriting path stats {0}"
+msgstr "正在重写路径统计 {0}"
+
+msgid "serializing path sample"
+msgstr "正在序列化路径采样"
+
+msgid "timed out resolving {0} after {1} seconds"
+msgstr "解析 {0} 在 {1} 秒后超时"
+
+msgid ""
+"timed out waiting for tun daemon to become ready; check {0}\n"
+"Tip: for the system service use `systemctl status link-p2p-tun.service` and `journalctl -u link-p2p-tun.service -f`."
+msgstr ""
+"等待 TUN 守护进程就绪超时；请检查 {0}\n"
+"提示：系统服务可用 `systemctl status link-p2p-tun.service` 与 `journalctl -u link-p2p-tun.service -f`。"
+
+msgid "transport: QUIC datagrams (apps may use TCP/UDP inside the tunnel)"
+msgstr "传输：QUIC 数据报（隧道内应用仍可使用 TCP/UDP）"
+
+msgid "unexpected control response: {0}"
+msgstr "意外的控制响应：{0}"
+
+msgid "usage: tun call <peer> | tun call accept <peer> | tun call reject <peer>"
+msgstr "用法：tun call <对端> | tun call accept <对端> | tun call reject <对端>"
+
+msgid "virtual IP {0} / {1} is already claimed by another peer"
+msgstr "虚拟 IP {0} / {1} 已被另一对端占用"
+
+msgid "virtual IP {0} is already assigned to a local interface"
+msgstr "虚拟 IP {0} 已分配给本地接口"
+
+msgid ""
+"virtual IP {0} is already on a local interface (you passed --tun-ip).\n"
+"Pick a free address with --tun-ip, or omit --tun-ip to auto-select.\n"
+"Detail: {1}"
+msgstr ""
+"虚拟 IP {0} 已在本地接口上（你传入了 --tun-ip）。\n"
+"请用 --tun-ip 换一个空闲地址，或省略 --tun-ip 以自动选择。\n"
+"详情：{1}"
+
+msgid "virtual IPv6 {0} is already assigned to a local interface"
+msgstr "虚拟 IPv6 {0} 已分配给本地接口"
+
+msgid ""
+"virtual IPv6 {0} is already on a local interface (you passed --tun-ip6).\n"
+"Pick a free address with --tun-ip6, or omit --tun-ip6 to auto-select.\n"
+"Detail: {1}"
+msgstr ""
+"虚拟 IPv6 {0} 已在本地接口上（你传入了 --tun-ip6）。\n"
+"请用 --tun-ip6 换一个空闲地址，或省略 --tun-ip6 以自动选择。\n"
+"详情：{1}"
+
+msgid "waiting for peer to dial (EndpointId tie-break)"
+msgstr "等待对端拨入（EndpointId 决胜）"
+
+msgid "waiting for peer — check `tun status` / `tun peers` (daemon keeps dialing)"
+msgstr "等待对端 — 查看 `tun status` / `tun peers`（守护进程会继续拨号）"
+
+msgid "your virtual IPs (the peer reaches you here):"
+msgstr "你的虚拟 IP（对端通过这些地址访问你）："
+
+msgid ""
+"Make machines reachable at the IP layer over QUIC datagrams.\n"
+"\n"
+"Creates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). Preferred day-to-day commands: `tun call` (1:1 phone), `tun join <hub>` (mesh channel), `tun status` / `tun peers` / `tun down`. Also `tun up --role phone|hub|spoke`. Foreground aliases: `tun serve` / `tun connect`. Prefer `--cc bbr3` on lossy paths. Dual-stack VIPs: 172.24.0.0/16 and fd24:ac18::/64 (omit --tun-ip/--tun-ip6 to auto-pick on collision) — see docs/subsystems/tun.md."
+msgstr ""
+"在 IP 层通过 QUIC 数据报实现整机互通。\n"
+"\n"
+"创建 TUN 接口（Linux/macOS 需 root / CAP_NET_ADMIN；Windows 需管理员 + wintun.dll）。日常推荐：`tun call`（1:1 电话）、`tun join <hub>`（网状频道）、`tun status` / `tun peers` / `tun down`。也可用 `tun up --role phone|hub|spoke`。前台别名：`tun serve` / `tun connect`。丢包路径建议 `--cc bbr3`。双栈虚拟 IP：172.24.0.0/16 与 fd24:ac18::/64（省略 --tun-ip/--tun-ip6 时冲突则自动换址）— 见 docs/subsystems/tun.md。"
+
+# --- tun-ip6 help ---
+msgid "Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16). Omit to auto-pick a free address."
+msgstr "覆盖本节点虚拟 IP（默认由 EndpointId 派生，落在 172.24.0.0/16）。省略则冲突时自动换址。"
+
+msgid "Override this node's IPv6 VIP (default: derived in fd24:ac18::/64). Omit to auto-pick a free address."
+msgstr "覆盖本节点 IPv6 虚拟 IP（默认派生在 fd24:ac18::/64）。省略则冲突时自动换址。"
+
+msgid "Dial a `tun serve` hub, install 172.24.0.0/16 and fd24:ac18::/64 on the TUN, receive the mesh roster, and attempt direct links to other spokes (packets prefer direct; otherwise via hub). Equivalent to `tun up --foreground --role spoke --to <hub>`."
+msgstr "拨号到 `tun serve` 中枢，在 TUN 上安装 172.24.0.0/16 与 fd24:ac18::/64，接收成员表，并尝试与其他 spoke 直连（优先直连，否则经中枢）。等同于 `tun up --foreground --role spoke --to <hub>`。"
+
+msgid "`--identity-passphrase` is visible in `ps` and shell history; prefer LINK_P2P_PASSPHRASE"
+msgstr "`--identity-passphrase` 会出现在 `ps` 与 shell 历史中；请优先使用 LINK_P2P_PASSPHRASE"

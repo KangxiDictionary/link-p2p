@@ -32,6 +32,7 @@ Shared helpers live in `scripts/lib.sh` (`pass`/`fail`, `wait_endpoint_id`, loca
 | `cargo test -- --ignored` (bin) | Live TUN daemon status (needs `CAP_NET_ADMIN`) |
 | `cargo test --test e2e -- --ignored` | Stream forward round-trip + clean shutdown (release + relay) |
 | `cargo test --test integration_call -- --ignored` | `call` persistent-identity kill/restart reconnect |
+| `cargo test --test windows_tun_system -- --ignored --nocapture` | Windows TUN `--system` smoke (Admin + `wintun.dll`; no-op on non-Windows) |
 | `link-p2p tun selftest` | Relay TCP probe + loopback echo drain (no python/nc) |
 | `sudo ./scripts/tun-loopback-test.sh` | TUN startup / MTU / route cleanup (same-host; not the datagram path) |
 | `./scripts/long-stability-test.sh {serve\|client}` | Long-lived stream samples (HTTP + ping); set `PEER=` / `DURATION=` |
@@ -39,6 +40,12 @@ Shared helpers live in `scripts/lib.sh` (`pass`/`fail`, `wait_endpoint_id`, loca
 | `./scripts/bench-transport-matrix.sh` | Transport config matrix — see [architecture/performance.md](architecture/performance.md) |
 | `./scripts/bench.sh` / `bench-multi.sh` | Throughput benches — see [architecture/performance.md](architecture/performance.md) |
 | `./scripts/phase0-*.sh` / `phase1-*.sh` | Two-machine NAT / relay / migration — see below |
+
+### Always-on integration (runs under `cargo test` / `./scripts/test.sh unit`)
+
+| Test file | Purpose | Notes |
+|---|---|---|
+| `tests/tun_daemon_spawn.rs` | Daemon lock / ready / concurrent-spawn mutex | Unix only; spawns the real binary into a temp `XDG_CONFIG_HOME` (no root / no TUN device) |
 
 TUN ICMP PMTUD and ops clamp (`--mtu 1162`): [subsystems/tun.md](subsystems/tun.md).
 

@@ -30,6 +30,13 @@ impl Target {
     /// Uses the first address `lookup_host` returns (no multi-A retry). DNS
     /// is capped at [`DNS_RESOLVE_TIMEOUT`] so a hung resolver cannot stall
     /// the whole proxy accept loop.
+    ///
+    /// # DNS rebinding (callers must not resolve twice)
+    ///
+    /// SSRF safety for `serve --proxy` is enforced by types: resolve once,
+    /// then [`crate::ssrf::check_proxy_target`] yields a [`crate::ssrf::CheckedTarget`]
+    /// that [`crate::ssrf::dial_checked`] alone will connect. Prefer that path
+    /// over calling `resolve` again between check and connect.
     pub async fn resolve(&self) -> Result<SocketAddr> {
         match self {
             Target::Addr(a) => Ok(*a),
@@ -145,6 +152,12 @@ pub async fn read_target<R: AsyncRead + Unpin>(r: &mut R) -> Result<Target> {
 /// SECURITY NOTE: no-auth means anything that can reach `--socks5-listen`
 /// can proxy through it. Fine bound to 127.0.0.1; do not bind this to
 /// 0.0.0.0 without adding username/password auth (SOCKS5 method 0x02) first.
+///
+/// No [`crate::ssrf`] check here on purpose: this is the *local* SOCKS5
+/// entry (browser / tun2socks talking to `connect --socks5-listen`). The
+/// SSRF guard applies on the `serve --proxy` side when the remote asks us
+/// to dial (see `runtime::forward_one`). Filtering private ranges at this
+/// local handshake would break the common "SOCKS into my LAN via P2P" case.
 pub async fn accept_handshake(tcp: &mut TcpStream) -> Result<Target> {
     let mut hdr = [0u8; 2];
     tcp.read_exact(&mut hdr)

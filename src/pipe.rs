@@ -71,6 +71,17 @@ pub(crate) async fn read_stream_hello<R: AsyncRead + Unpin>(r: &mut R) -> Result
     Ok(())
 }
 
+/// Byte counts plus overall result from a bidirectional pipe.
+///
+/// Named fields so callers cannot swap sent/recvd by position when recording
+/// span fields or merging half-failures.
+#[derive(Debug)]
+pub(crate) struct PipeOutcome {
+    pub(crate) sent: u64,
+    pub(crate) recvd: u64,
+    pub(crate) result: Result<()>,
+}
+
 /// TCP ↔ QUIC bidi stream.
 pub(crate) async fn pipe_streams(tcp: TcpStream, send: SendStream, recv: RecvStream) -> Result<()> {
     let span = tracing::debug_span!(
@@ -81,17 +92,19 @@ pub(crate) async fn pipe_streams(tcp: TcpStream, send: SendStream, recv: RecvStr
     let record_span = span.clone();
     let fut = async move {
         let (mut tcp_read, mut tcp_write) = tcp.into_split();
-        let (sent, recvd) = pipe_halves(
+        let outcome = pipe_halves(
             &mut tcp_read,
             &mut tcp_write,
             send,
             recv,
             /*shutdown_local=*/ true,
         )
-        .await?;
-        record_span.record("sent_bytes", sent);
-        record_span.record("recv_bytes", recvd);
-        Ok(())
+        .await;
+        // Always record — including when one direction failed after the other
+        // completed (otherwise GB of transfer vanish from the span on error).
+        record_span.record("sent_bytes", outcome.sent);
+        record_span.record("recv_bytes", outcome.recvd);
+        outcome.result
     };
     fut.instrument(span).await
 }
@@ -101,16 +114,16 @@ pub(crate) async fn pipe_streams(tcp: TcpStream, send: SendStream, recv: RecvStr
 pub(crate) async fn pipe_stdio(send: SendStream, recv: RecvStream) -> Result<()> {
     let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
-    let (_sent, _recvd) = pipe_halves(
+    let outcome = pipe_halves(
         &mut stdin,
         &mut stdout,
         send,
         recv,
         /*shutdown_local=*/ false,
     )
-    .await?;
+    .await;
     let _ = stdout.flush().await;
-    Ok(())
+    outcome.result
 }
 
 /// Shared two-direction copy. `shutdown_local` runs `AsyncWriteExt::shutdown`
@@ -121,7 +134,7 @@ async fn pipe_halves<R, W>(
     mut send: SendStream,
     mut recv: RecvStream,
     shutdown_local: bool,
-) -> Result<(u64, u64)>
+) -> PipeOutcome
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -165,21 +178,63 @@ where
     drop(remote_to_client);
 
     match (res_client, res_remote) {
-        (Some(a), Some(b)) => Ok((a?, b?)),
+        (Some(a), Some(b)) => merge_pipe_results(a, b),
         (Some(a), None) => {
             let _ = recv.stop(STREAM_ABORT_CODE);
-            a.map(|n| (n, 0))
+            match a {
+                Ok(n) => PipeOutcome {
+                    sent: n,
+                    recvd: 0,
+                    result: Ok(()),
+                },
+                Err(e) => PipeOutcome {
+                    sent: 0,
+                    recvd: 0,
+                    result: Err(e),
+                },
+            }
         }
         (None, Some(b)) => {
             let _ = send.reset(STREAM_ABORT_CODE);
-            b.map(|n| (0, n))
+            match b {
+                Ok(n) => PipeOutcome {
+                    sent: 0,
+                    recvd: n,
+                    result: Ok(()),
+                },
+                Err(e) => PipeOutcome {
+                    sent: 0,
+                    recvd: 0,
+                    result: Err(e),
+                },
+            }
         }
         (None, None) => {
             // Invariant: the select loop always records at least one side
             // before exiting; treat as no-op transfer rather than panic.
             debug_assert!(false, "pipe loop exited with neither side finished");
-            Ok((0, 0))
+            PipeOutcome {
+                sent: 0,
+                recvd: 0,
+                result: Ok(()),
+            }
         }
+    }
+}
+
+/// Prefer keeping completed-direction byte counts when the other half errs
+/// (`(Ok(sent), Err(_))` must not discard `sent` via `?`).
+fn merge_pipe_results(a: Result<u64>, b: Result<u64>) -> PipeOutcome {
+    let sent = a.as_ref().copied().unwrap_or(0);
+    let recvd = b.as_ref().copied().unwrap_or(0);
+    let result = match (a, b) {
+        (Ok(_), Ok(_)) => Ok(()),
+        (Err(e), _) | (_, Err(e)) => Err(e),
+    };
+    PipeOutcome {
+        sent,
+        recvd,
+        result,
     }
 }
 
@@ -244,5 +299,22 @@ mod tests {
             msg.contains("reading stream hello"),
             "unexpected error: {msg}"
         );
+    }
+
+    #[test]
+    fn merge_pipe_results_keeps_completed_direction_bytes() {
+        let o = merge_pipe_results(Ok(1_000_000), Err(anyhow::anyhow!("peer reset")));
+        assert_eq!(o.sent, 1_000_000);
+        assert_eq!(o.recvd, 0);
+        assert!(o.result.is_err());
+
+        let o = merge_pipe_results(Err(anyhow::anyhow!("local write")), Ok(42));
+        assert_eq!(o.sent, 0);
+        assert_eq!(o.recvd, 42);
+        assert!(o.result.is_err());
+
+        let o = merge_pipe_results(Ok(7), Ok(9));
+        assert_eq!((o.sent, o.recvd), (7, 9));
+        assert!(o.result.is_ok());
     }
 }

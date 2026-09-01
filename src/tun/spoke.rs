@@ -8,38 +8,55 @@ struct SpokeMesh {
     #[allow(dead_code)]
     own_id: EndpointId,
     #[allow(dead_code)]
-    own_vip: Ipv4Addr,
+    own: OwnVips,
     hub_vip: Option<Ipv4Addr>,
+    hub_vip6: Option<Ipv6Addr>,
     hub_out: Option<mpsc::Sender<Bytes>>,
-    /// Direct links keyed by VIP.
+    /// Direct links keyed by IPv4 VIP.
     direct: HashMap<Ipv4Addr, mpsc::Sender<Bytes>>,
-    /// Known EndpointId → VIP (from roster); used to decide dial vs wait.
-    roster: HashMap<EndpointId, Ipv4Addr>,
+    /// Direct links keyed by IPv6 VIP.
+    direct6: HashMap<Ipv6Addr, mpsc::Sender<Bytes>>,
+    /// Known EndpointId → VIPs (from roster); used to decide dial vs wait.
+    roster: HashMap<EndpointId, OwnVips>,
 }
 
 impl SpokeMesh {
-    fn new(own_id: EndpointId, own_vip: Ipv4Addr) -> Self {
+    fn new(own_id: EndpointId, own: OwnVips) -> Self {
         Self {
             own_id,
-            own_vip,
+            own,
             hub_vip: None,
+            hub_vip6: None,
             hub_out: None,
             direct: HashMap::new(),
+            direct6: HashMap::new(),
             roster: HashMap::new(),
         }
     }
 
     fn clear_hub(&mut self) {
         self.hub_vip = None;
+        self.hub_vip6 = None;
         self.hub_out = None;
     }
 
-    fn lookup_out(&self, dst: Ipv4Addr) -> Option<mpsc::Sender<Bytes>> {
-        if let Some(tx) = self.direct.get(&dst) {
-            return Some(tx.clone());
+    fn lookup_out(&self, pkt: &[u8]) -> Option<mpsc::Sender<Bytes>> {
+        if let Some(dst) = ipv4_dst(pkt) {
+            if let Some(tx) = self.direct.get(&dst) {
+                return Some(tx.clone());
+            }
+            if self.hub_vip == Some(dst) || vip_in_mesh(dst) {
+                return self.hub_out.clone();
+            }
+            return None;
         }
-        if self.hub_vip == Some(dst) || vip_in_mesh(dst) {
-            return self.hub_out.clone();
+        if let Some(dst) = ipv6_dst(pkt) {
+            if let Some(tx) = self.direct6.get(&dst) {
+                return Some(tx.clone());
+            }
+            if self.hub_vip6 == Some(dst) || vip6_in_mesh(dst) {
+                return self.hub_out.clone();
+            }
         }
         None
     }
@@ -58,35 +75,35 @@ fn mesh_update(mesh: &SharedSpokeMesh, f: impl FnOnce(&mut SpokeMesh)) {
 fn spawn_conn_sender(
     tun: TunIo,
     tun_name: String,
-    own_vip: Ipv4Addr,
+    own: OwnVips,
     peer: EndpointId,
     conn: Connection,
     rx: mpsc::Receiver<Bytes>,
     user_mtu: u16,
     raise_gate: MtuRaiseGate,
 ) {
-    spawn_peer_sender(tun, tun_name, own_vip, peer, conn, rx, user_mtu, raise_gate);
+    spawn_peer_sender(tun, tun_name, own, peer, conn, rx, user_mtu, raise_gate);
 }
 
 async fn spoke_install_direct(
     mesh: &SharedSpokeMesh,
     tun: TunIo,
     tun_name: &str,
-    own_vip: Ipv4Addr,
+    own: OwnVips,
     peer_id: EndpointId,
-    peer_vip: Ipv4Addr,
+    peer: OwnVips,
     conn: Connection,
     user_mtu: u16,
     raise_gate: MtuRaiseGate,
 ) {
-    if peer_vip == own_vip {
+    if peer.v4 == own.v4 || peer.v6 == own.v6 {
         return;
     }
     let (tx, rx) = mpsc::channel::<Bytes>(256);
     spawn_conn_sender(
         tun.clone(),
         tun_name.to_string(),
-        own_vip,
+        own,
         peer_id,
         conn.clone(),
         rx,
@@ -94,15 +111,17 @@ async fn spoke_install_direct(
         raise_gate,
     );
     {
+        let tx4 = tx.clone();
         mesh_update(mesh, |g| {
-            g.roster.insert(peer_id, peer_vip);
-            g.direct.insert(peer_vip, tx);
+            g.roster.insert(peer_id, peer);
+            g.direct.insert(peer.v4, tx4);
+            g.direct6.insert(peer.v6, tx);
         });
     }
-    info!(%peer_id, %peer_vip, path = path_label(&conn), "{}", tr!("direct mesh link ready"));
+    info!(%peer_id, vip = %peer.v4, vip6 = %peer.v6, path = path_label(&conn), "{}", tr!("direct mesh link ready"));
     // Read datagrams from this direct link into TUN.
     let mesh_drop = Arc::clone(mesh);
-    let peer_vip_c = peer_vip;
+    let peer_c = peer;
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -110,8 +129,9 @@ async fn spoke_install_direct(
                 r = conn.read_datagram() => {
                     match r {
                         Ok(data) => {
-                            let Some(src) = ipv4_src(&data) else { continue };
-                            if src != peer_vip_c {
+                            let ok = ipv4_src(&data).map(|s| s == peer_c.v4).unwrap_or(false)
+                                || ipv6_src(&data).map(|s| s == peer_c.v6).unwrap_or(false);
+                            if !ok {
                                 continue;
                             }
                             tun.send(data).await;
@@ -122,9 +142,10 @@ async fn spoke_install_direct(
             }
         }
         mesh_update(&mesh_drop, |g| {
-            g.direct.remove(&peer_vip_c);
+            g.direct.remove(&peer_c.v4);
+            g.direct6.remove(&peer_c.v6);
         });
-        info!(%peer_id, %peer_vip_c, "{}", tr!("direct mesh link closed"));
+        info!(%peer_id, vip = %peer_c.v4, "{}", tr!("direct mesh link closed"));
     });
 }
 
@@ -134,13 +155,13 @@ async fn spoke_try_dial_peer(
     tun: TunIo,
     tun_name: String,
     own_id: EndpointId,
-    own_vip: Ipv4Addr,
+    own: OwnVips,
     entry: RosterEntry,
     user_mtu: u16,
     allow: Option<HashSet<EndpointId>>,
     raise_gate: MtuRaiseGate,
 ) {
-    if entry.id == own_id || entry.vip == own_vip {
+    if entry.id == own_id || entry.vip == own.v4 || entry.vip6 == own.v6 {
         return;
     }
     if let Err(e) = check_allow(allow.as_ref(), entry.id) {
@@ -156,14 +177,14 @@ async fn spoke_try_dial_peer(
     let dial = EndpointAddr::from(entry.id);
     match endpoint.connect(dial, TUN_ALPN).await {
         Ok(conn) => {
-            match exchange_peer_vip(&conn, own_vip, true).await {
-                Ok(vip) if vip == entry.vip => {
+            match exchange_peer_vips(&conn, own, true).await {
+                Ok(vip) if vip.v4 == entry.vip && vip.v6 == entry.vip6 => {
                     // Spokes do not open a roster control stream on direct links.
                     spoke_install_direct(
                         &mesh,
                         tun,
                         &tun_name,
-                        own_vip,
+                        own,
                         entry.id,
                         vip,
                         conn,
@@ -175,8 +196,10 @@ async fn spoke_try_dial_peer(
                 Ok(vip) => {
                     warn!(
                         peer = %entry.id,
-                        expected = %entry.vip,
-                        got = %vip,
+                        expected_v4 = %entry.vip,
+                        expected_v6 = %entry.vip6,
+                        got_v4 = %vip.v4,
+                        got_v6 = %vip.v6,
                         "{}",
                         tr!("direct mesh VIP mismatch; closing")
                     );
@@ -198,7 +221,7 @@ async fn spoke_apply_roster_msg(
     tun: TunIo,
     tun_name: String,
     own_id: EndpointId,
-    own_vip: Ipv4Addr,
+    own: OwnVips,
     msg: RosterMsg,
     user_mtu: u16,
     allow: Option<HashSet<EndpointId>>,
@@ -212,7 +235,13 @@ async fn spoke_apply_roster_msg(
                     continue;
                 }
                 mesh_update(&mesh, |g| {
-                    g.roster.insert(e.id, e.vip);
+                    g.roster.insert(
+                        e.id,
+                        OwnVips {
+                            v4: e.vip,
+                            v6: e.vip6,
+                        },
+                    );
                 });
                 let ep = endpoint.clone();
                 let mesh = Arc::clone(&mesh);
@@ -227,7 +256,7 @@ async fn spoke_apply_roster_msg(
                         tun,
                         tun_name,
                         own_id,
-                        own_vip,
+                        own,
                         e,
                         user_mtu,
                         allow,
@@ -242,12 +271,23 @@ async fn spoke_apply_roster_msg(
                 return;
             }
             mesh_update(&mesh, |g| {
-                g.roster.insert(e.id, e.vip);
+                g.roster.insert(
+                    e.id,
+                    OwnVips {
+                        v4: e.vip,
+                        v6: e.vip6,
+                    },
+                );
             });
             if !quiet {
                 println!(
                     "{}",
-                    tr_fmt!("mesh peer {0} at {1}", e.id.fmt_short(), e.vip)
+                    tr_fmt!(
+                        "mesh peer {0} at {1} / {2}",
+                        e.id.fmt_short(),
+                        e.vip,
+                        e.vip6
+                    )
                 );
             }
             tokio::spawn(spoke_try_dial_peer(
@@ -256,7 +296,7 @@ async fn spoke_apply_roster_msg(
                 tun,
                 tun_name,
                 own_id,
-                own_vip,
+                own,
                 e,
                 user_mtu,
                 allow,
@@ -267,8 +307,9 @@ async fn spoke_apply_roster_msg(
             mesh_update(&mesh, |g| {
                 g.roster.remove(&e.id);
                 g.direct.remove(&e.vip);
+                g.direct6.remove(&e.vip6);
             });
-            info!(peer = %e.id, vip = %e.vip, "{}", tr!("mesh peer left"));
+            info!(peer = %e.id, vip = %e.vip, vip6 = %e.vip6, "{}", tr!("mesh peer left"));
         }
     }
 }
@@ -280,6 +321,7 @@ pub async fn run_tun_connect(
     secret_key: SecretKey,
     to: &str,
     tun_ip: Option<Ipv4Addr>,
+    tun_ip6: Option<Ipv6Addr>,
     mtu: u16,
     relay: &[String],
     relay_only: bool,
@@ -298,6 +340,7 @@ pub async fn run_tun_connect(
         secret_key,
         to,
         tun_ip,
+        tun_ip6,
         mtu,
         relay,
         relay_only,
@@ -321,6 +364,7 @@ async fn run_tun_connect_inner(
     secret_key: SecretKey,
     to: &str,
     tun_ip: Option<Ipv4Addr>,
+    tun_ip6: Option<Ipv6Addr>,
     mtu: u16,
     relay: &[String],
     relay_only: bool,
@@ -345,21 +389,20 @@ async fn run_tun_connect_inner(
         relay_only,
         no_n0_relays,
     )?
-        .alpns(vec![TUN_ALPN.to_vec(), crate::PING_ALPN.to_vec()])
-        .bind()
-        .await
-        .map_err(|e| {
-            crate::exit::coded(
-                crate::exit::CONNECT,
-                anyhow::Error::new(e).context(tr!("binding endpoint")),
-            )
-        })?;
+    .alpns(vec![TUN_ALPN.to_vec(), crate::PING_ALPN.to_vec()])
+    .bind()
+    .await
+    .map_err(|e| {
+        crate::exit::coded(
+            crate::exit::CONNECT,
+            anyhow::Error::new(e).context(tr!("binding endpoint")),
+        )
+    })?;
 
     let hub_id: EndpointId = match to.parse() {
         Ok(id) => id,
         Err(e) => {
-            let err = anyhow::Error::new(e)
-                .context(tr_fmt!("'{0}' is not a valid EndpointId", to));
+            let err = anyhow::Error::new(e).context(tr_fmt!("'{0}' is not a valid EndpointId", to));
             if let Some(h) = &hooks {
                 h.signal_ready(Err(anyhow::anyhow!("{err:#}")));
             }
@@ -368,17 +411,19 @@ async fn run_tun_connect_inner(
         }
     };
     let own_id = endpoint.id();
-    let own_vip = tun_ip.unwrap_or_else(|| derive_vip(own_id));
     let signal_err = |e: &anyhow::Error| {
         if let Some(h) = &hooks {
             h.signal_ready(Err(anyhow::anyhow!("{e:#}")));
         }
     };
-    if let Err(e) = ensure_vip_free(own_vip) {
-        signal_err(&e);
-        endpoint.close().await;
-        return Err(e);
-    }
+    let own = match allocate_own_vips(tun_ip, tun_ip6, own_id) {
+        Ok(v) => v,
+        Err(e) => {
+            signal_err(&e);
+            endpoint.close().await;
+            return Err(e);
+        }
+    };
     if let Err(e) = crate::bring_endpoint_online(&endpoint, relay, no_n0_relays).await {
         signal_err(&e);
         endpoint.close().await;
@@ -407,7 +452,7 @@ async fn run_tun_connect_inner(
         ));
     }
 
-    let (tun, tun_name) = match create_tun_device(own_vip, mtu) {
+    let (tun, tun_name) = match create_tun_device(own, mtu) {
         Ok(x) => x,
         Err(e) => {
             signal_err(&e);
@@ -416,26 +461,25 @@ async fn run_tun_connect_inner(
         }
     };
     if let Some(h) = &hooks {
-        h.state.set_vip(own_vip).await;
+        h.state.set_vips(own).await;
         // Spoke ready after TUN exists; hub dial may still be in progress.
         h.signal_ready(Ok(()));
     }
     let (tun_io, mut from_tun) = spawn_tun_io(tun, mtu);
     let raise_gate = new_mtu_raise_gate();
-    let mesh: SharedSpokeMesh = Arc::new(arc_swap::ArcSwap::from_pointee(SpokeMesh::new(
-        own_id, own_vip,
-    )));
+    let mesh: SharedSpokeMesh =
+        Arc::new(arc_swap::ArcSwap::from_pointee(SpokeMesh::new(own_id, own)));
 
     // Long-lived TUN → mesh demux (hub and direct outs live in SpokeMesh).
     {
         let mesh_d = Arc::clone(&mesh);
+        let own_c = own;
         tokio::spawn(async move {
             while let Some(pkt) = from_tun.recv().await {
-                let Some(dst) = ipv4_dst(&pkt) else { continue };
-                if dst == own_vip {
+                if packet_is_own(&pkt, own_c) {
                     continue;
                 }
-                let out = mesh_d.load().lookup_out(dst);
+                let out = mesh_d.load().lookup_out(&pkt);
                 if let Some(tx) = out {
                     let _ = tx.try_send(pkt);
                 }
@@ -453,8 +497,12 @@ async fn run_tun_connect_inner(
         let raise_gate_acc = Arc::clone(&raise_gate);
         tokio::spawn(async move {
             while let Some(incoming) = endpoint_acc.accept().await {
-                let Ok(accepting) = incoming.accept() else { continue };
-                let Ok(conn) = accepting.await else { continue };
+                let Ok(accepting) = incoming.accept() else {
+                    continue;
+                };
+                let Ok(conn) = accepting.await else {
+                    continue;
+                };
                 if conn.alpn() == crate::PING_ALPN {
                     handle_ping_probe(conn);
                     continue;
@@ -478,18 +526,10 @@ async fn run_tun_connect_inner(
                 let tun_name = tun_name_acc.clone();
                 let raise_gate = Arc::clone(&raise_gate_acc);
                 tokio::spawn(async move {
-                    match exchange_peer_vip(&conn, own_vip, false).await {
+                    match exchange_peer_vips(&conn, own, false).await {
                         Ok(vip) => {
                             spoke_install_direct(
-                                &mesh,
-                                tun,
-                                &tun_name,
-                                own_vip,
-                                peer,
-                                vip,
-                                conn,
-                                mtu,
-                                raise_gate,
+                                &mesh, tun, &tun_name, own, peer, vip, conn, mtu, raise_gate,
                             )
                             .await;
                         }
@@ -539,7 +579,7 @@ async fn run_tun_connect_inner(
                         anyhow::Error::new(e).context(tr!("connecting to remote endpoint")),
                     )
                 })?;
-            let hub_vip = exchange_peer_vip(&conn, own_vip, true).await?;
+            let hub = exchange_peer_vips(&conn, own, true).await?;
 
             // Control stream for roster (we are dialer → open_bi).
             let (mut ctrl_send, mut ctrl_recv) = conn
@@ -576,7 +616,7 @@ async fn run_tun_connect_inner(
             spawn_conn_sender(
                 tun_io.clone(),
                 tun_name.clone(),
-                own_vip,
+                own,
                 hub_id,
                 conn.clone(),
                 hub_rx,
@@ -585,21 +625,30 @@ async fn run_tun_connect_inner(
             );
             {
                 mesh_update(&mesh, |g| {
-                    g.hub_vip = Some(hub_vip);
+                    g.hub_vip = Some(hub.v4);
+                    g.hub_vip6 = Some(hub.v6);
                     g.hub_out = Some(hub_tx);
-                    g.roster.insert(hub_id, hub_vip);
+                    g.roster.insert(hub_id, hub);
                 });
             }
 
             if !connected_once {
                 connected_once = true;
                 if hooks.is_none() {
-                    ui.line(styler.ok(&tr_fmt!("connected. your virtual IP: {0}", own_vip)));
+                    ui.line(styler.ok(&tr_fmt!(
+                        "connected. your virtual IPs: {0} / {1}",
+                        own.v4,
+                        own.v6
+                    )));
                     ui.line(styler.dim(&tr_fmt!(
-                        "hub {0} is at {1} (path {2}); peers may connect directly",
+                        "hub {0} is at {1} / {2} (path {3}); peers may connect directly",
                         hub_id.fmt_short(),
-                        hub_vip,
+                        hub.v4,
+                        hub.v6,
                         path_label(&conn)
+                    )));
+                    ui.line(styler.dim(&tr!(
+                        "transport: QUIC datagrams (apps may use TCP/UDP inside the tunnel)"
                     )));
                     ui.line(styler.dim(&tr!("Press Ctrl+C to stop.")));
                 }
@@ -610,8 +659,9 @@ async fn run_tun_connect_inner(
                     .load()
                     .roster
                     .iter()
-                    .map(|(id, vip)| CtlPeer {
-                        vip: *vip,
+                    .map(|(id, v)| CtlPeer {
+                        vip: v.v4,
+                        vip6: v.v6,
                         id: id.to_string(),
                     })
                     .collect();
@@ -636,7 +686,7 @@ async fn run_tun_connect_inner(
                                 tun_r.clone(),
                                 tun_name_r.clone(),
                                 own_id,
-                                own_vip,
+                                own,
                                 msg,
                                 user_mtu,
                                 allow_r.clone(),
@@ -655,7 +705,7 @@ async fn run_tun_connect_inner(
 
             // Hub → TUN
             let tun_h = tun_io.clone();
-            let hub_vip_c = hub_vip;
+            let hub_c = hub;
             let conn_r = conn.clone();
             let hub_read = tokio::spawn(async move {
                 loop {
@@ -664,8 +714,12 @@ async fn run_tun_connect_inner(
                         r = conn_r.read_datagram() => {
                             match r {
                                 Ok(data) => {
-                                    let Some(src) = ipv4_src(&data) else { continue };
-                                    if !vip_in_mesh(src) && src != hub_vip_c {
+                                    let ok = match (ipv4_src(&data), ipv6_src(&data)) {
+                                        (Some(src), _) => vip_in_mesh(src) || src == hub_c.v4,
+                                        (None, Some(src)) => vip6_in_mesh(src) || src == hub_c.v6,
+                                        (None, None) => false,
+                                    };
+                                    if !ok {
                                         continue;
                                     }
                                     tun_h.send(data).await;
@@ -754,4 +808,12 @@ async fn run_tun_connect_inner(
     Ok(())
 }
 
-
+fn packet_is_own(pkt: &[u8], own: OwnVips) -> bool {
+    if let Some(dst) = ipv4_dst(pkt) {
+        return dst == own.v4;
+    }
+    if let Some(dst) = ipv6_dst(pkt) {
+        return dst == own.v6;
+    }
+    false
+}

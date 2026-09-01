@@ -6,6 +6,8 @@ use super::*;
 #[derive(Clone)]
 struct HubPeer {
     id: EndpointId,
+    vip: Ipv4Addr,
+    vip6: Ipv6Addr,
     conn: Connection,
     /// Non-blocking enqueue for datagrams destined to this spoke. A dedicated
     /// send task drains the channel so one congested peer cannot stall
@@ -15,13 +17,55 @@ struct HubPeer {
     hidden: bool,
 }
 
-type HubPeers = Arc<arc_swap::ArcSwap<HashMap<Ipv4Addr, HubPeer>>>;
+/// Dual-stack peer index in one ArcSwap so claim/remove update v4+v6 atomically.
+#[derive(Clone, Default)]
+struct HubPeerIndex {
+    by_v4: HashMap<Ipv4Addr, HubPeer>,
+    by_v6: HashMap<Ipv6Addr, HubPeer>,
+}
+
+type HubPeers = Arc<arc_swap::ArcSwap<HubPeerIndex>>;
 /// Control-stream writers for roster push (one per spoke).
 type RosterFans = Arc<RwLock<HashMap<EndpointId, mpsc::Sender<Bytes>>>>;
 
 fn enqueue_peer(peer: &HubPeer, pkt: Bytes) {
     // Drop on full — same semantics as a lossy link / full datagram window.
     let _ = peer.outbound.try_send(pkt);
+}
+
+/// Insert peer under both VIP keys, or leave the index unchanged if either VIP
+/// is taken. Under `rcu` contention the closure may retry; success is verified
+/// by checking that *our* `peer_id` owns `vip` afterwards (no TOCTOU window).
+fn try_claim_peer(peers: &HubPeers, peer: HubPeer) -> Result<()> {
+    let vip = peer.vip;
+    let vip6 = peer.vip6;
+    let peer_id = peer.id;
+    let after = peers.rcu(|idx| {
+        if idx.by_v4.contains_key(&vip) || idx.by_v6.contains_key(&vip6) {
+            return (**idx).clone();
+        }
+        let mut next = (**idx).clone();
+        next.by_v4.insert(vip, peer.clone());
+        next.by_v6.insert(vip6, peer.clone());
+        next
+    });
+    match after.by_v4.get(&vip) {
+        Some(p) if p.id == peer_id => Ok(()),
+        _ => bail!(tr_fmt!(
+            "virtual IP {0} / {1} is already claimed by another peer",
+            vip,
+            vip6
+        )),
+    }
+}
+
+fn peers_remove(peers: &HubPeers, vip: Ipv4Addr, vip6: Ipv6Addr) {
+    peers.rcu(|idx| {
+        let mut next = (**idx).clone();
+        next.by_v4.remove(&vip);
+        next.by_v6.remove(&vip6);
+        next
+    });
 }
 
 async fn broadcast_roster(fans: &RosterFans, msg: Bytes) {
@@ -34,41 +78,88 @@ async fn broadcast_roster(fans: &RosterFans, msg: Bytes) {
 /// Roster entries visible to other spokes (hub always included; hidden peers omitted).
 fn hub_roster_snapshot(
     own_id: EndpointId,
-    own_vip: Ipv4Addr,
+    own: OwnVips,
     peers: &HubPeers,
 ) -> Vec<RosterEntry> {
     let mut entries = vec![RosterEntry {
-        vip: own_vip,
+        vip: own.v4,
+        vip6: own.v6,
         id: own_id,
     }];
-    for (vip, p) in peers.load().iter() {
+    for p in peers.load().by_v4.values() {
         if p.hidden {
             continue;
         }
         entries.push(RosterEntry {
-            vip: *vip,
+            vip: p.vip,
+            vip6: p.vip6,
             id: p.id,
         });
     }
     entries
 }
 
+fn lookup_hub_peer(peers: &HubPeers, pkt: &[u8]) -> Option<HubPeer> {
+    let idx = peers.load();
+    if let Some(dst) = ipv4_dst(pkt) {
+        return idx.by_v4.get(&dst).cloned();
+    }
+    if let Some(dst) = ipv6_dst(pkt) {
+        return idx.by_v6.get(&dst).cloned();
+    }
+    None
+}
+
+fn packet_destined_here(pkt: &[u8], own: OwnVips) -> bool {
+    if let Some(dst) = ipv4_dst(pkt) {
+        return dst == own.v4;
+    }
+    if let Some(dst) = ipv6_dst(pkt) {
+        return dst == own.v6;
+    }
+    false
+}
+
+fn packet_src_matches_peer(pkt: &[u8], peer: &HubPeer) -> bool {
+    if let Some(src) = ipv4_src(pkt) {
+        return src == peer.vip;
+    }
+    if let Some(src) = ipv6_src(pkt) {
+        return src == peer.vip6;
+    }
+    false
+}
+
+fn mesh_dst_ok(pkt: &[u8], peer: &HubPeer) -> bool {
+    if let Some(dst) = ipv4_dst(pkt) {
+        return vip_in_mesh(dst) && dst != peer.vip;
+    }
+    if let Some(dst) = ipv6_dst(pkt) {
+        return vip6_in_mesh(dst) && dst != peer.vip6;
+    }
+    false
+}
+
 /// Hub: packets from the local TUN → spoke (by destination VIP).
 async fn hub_tun_to_peers(
     mut from_tun: mpsc::Receiver<Bytes>,
-    own_vip: Ipv4Addr,
+    own: OwnVips,
     peers: HubPeers,
 ) {
     while let Some(pkt) = from_tun.recv().await {
-        let Some(dst) = ipv4_dst(&pkt) else {
-            continue;
-        };
-        if dst == own_vip || !vip_in_mesh(dst) {
+        if packet_destined_here(&pkt, own) {
             continue;
         }
-        let peer = peers.load().get(&dst).cloned();
-        let Some(peer) = peer else {
-            tracing::debug!(%dst, "no hub peer for destination VIP; dropping");
+        let skip = match (ipv4_dst(&pkt), ipv6_dst(&pkt)) {
+            (Some(dst), _) => !vip_in_mesh(dst),
+            (None, Some(dst)) => !vip6_in_mesh(dst),
+            (None, None) => true,
+        };
+        if skip {
+            continue;
+        }
+        let Some(peer) = lookup_hub_peer(&peers, &pkt) else {
+            tracing::debug!("no hub peer for destination VIP; dropping");
             continue;
         };
         enqueue_peer(&peer, pkt);
@@ -78,42 +169,40 @@ async fn hub_tun_to_peers(
 /// Hub: packets from one spoke → local TUN and/or another spoke's outbound queue.
 async fn hub_peer_to_mesh(
     tun: TunIo,
-    own_vip: Ipv4Addr,
+    own: OwnVips,
     peers: HubPeers,
-    peer_vip: Ipv4Addr,
     peer: HubPeer,
 ) {
+    let peer_vip = peer.vip;
+    let peer_id = peer.id;
     loop {
         tokio::select! {
             _ = peer.conn.closed() => {
-                info!(peer = %peer.id, %peer_vip, "{}", tr!("peer disconnected"));
+                info!(peer = %peer_id, %peer_vip, "{}", tr!("peer disconnected"));
                 break;
             }
             r = peer.conn.read_datagram() => {
                 match r {
                     Ok(data) => {
-                        let Some(src) = ipv4_src(&data) else { continue };
-                        if src != peer_vip {
-                            tracing::debug!(%peer_vip, %src, "dropping spoofed source VIP");
+                        if !packet_src_matches_peer(&data, &peer) {
+                            tracing::debug!(%peer_vip, "dropping spoofed source VIP");
                             continue;
                         }
-                        let Some(dst) = ipv4_dst(&data) else { continue };
-                        if dst == own_vip {
+                        if packet_destined_here(&data, own) {
                             tun.send(data).await;
                             continue;
                         }
-                        if !vip_in_mesh(dst) || dst == peer_vip {
+                        if !mesh_dst_ok(&data, &peer) {
                             continue;
                         }
-                        let other = peers.load().get(&dst).cloned();
-                        let Some(other) = other else {
-                            tracing::debug!(%dst, "no hub peer for forwarded VIP; dropping");
+                        let Some(other) = lookup_hub_peer(&peers, &data) else {
+                            tracing::debug!("no hub peer for forwarded VIP; dropping");
                             continue;
                         };
                         enqueue_peer(&other, data);
                     }
                     Err(e) => {
-                        warn!(peer = %peer.id, error = %e, "{}", tr!("datagram error; assuming transient path switch (iroh may be migrating the connection)"));
+                        warn!(peer = %peer_id, error = %e, "{}", tr!("datagram error; assuming transient path switch (iroh may be migrating the connection)"));
                     }
                 }
             }
@@ -127,6 +216,7 @@ async fn hub_peer_to_mesh(
 pub async fn run_tun_serve(
     secret_key: SecretKey,
     tun_ip: Option<Ipv4Addr>,
+    tun_ip6: Option<Ipv6Addr>,
     mtu: u16,
     relay: &[String],
     relay_only: bool,
@@ -171,23 +261,25 @@ pub async fn run_tun_serve(
     };
 
     let own_id = endpoint.id();
-    let own_vip = tun_ip.unwrap_or_else(|| derive_vip(own_id));
     let signal_err = |e: &anyhow::Error| {
         if let Some(h) = &hooks {
             h.signal_ready(Err(anyhow::anyhow!("{e:#}")));
         }
     };
-    if let Err(e) = ensure_vip_free(own_vip) {
-        signal_err(&e);
-        endpoint.close().await;
-        return Err(e);
-    }
+    let own = match allocate_own_vips(tun_ip, tun_ip6, own_id) {
+        Ok(v) => v,
+        Err(e) => {
+            signal_err(&e);
+            endpoint.close().await;
+            return Err(e);
+        }
+    };
     if let Err(e) = crate::bring_endpoint_online(&endpoint, relay, no_n0_relays).await {
         signal_err(&e);
         endpoint.close().await;
         return Err(e);
     }
-    let (tun, tun_name) = match create_tun_device(own_vip, mtu) {
+    let (tun, tun_name) = match create_tun_device(own, mtu) {
         Ok(x) => x,
         Err(e) => {
             if let Some(h) = &hooks {
@@ -198,23 +290,24 @@ pub async fn run_tun_serve(
         }
     };
     if let Some(h) = &hooks {
-        h.state.set_vip(own_vip).await;
+        h.state.set_vips(own).await;
         h.signal_ready(Ok(()));
     }
     let (tun_io, from_tun) = spawn_tun_io(tun, mtu);
     let raise_gate = new_mtu_raise_gate();
-    let peers: HubPeers = Arc::new(arc_swap::ArcSwap::from_pointee(HashMap::new()));
+    let peers: HubPeers = Arc::new(arc_swap::ArcSwap::from_pointee(HubPeerIndex::default()));
     let fans: RosterFans = Arc::new(RwLock::new(HashMap::new()));
 
-    tokio::spawn(hub_tun_to_peers(from_tun, own_vip, Arc::clone(&peers)));
+    tokio::spawn(hub_tun_to_peers(from_tun, own, Arc::clone(&peers)));
 
     if hooks.is_none() {
         ui.line(styler.banner("link-p2p tun serve"));
         ui.line(format!(
             "  {}",
-            styler.dim(&tr!("your virtual IP (the peer reaches you here):"))
+            styler.dim(&tr!("your virtual IPs (the peer reaches you here):"))
         ));
-        ui.line(format!("    {}", styler.highlight(&own_vip.to_string())));
+        ui.line(format!("    {}", styler.highlight(&own.v4.to_string())));
+        ui.line(format!("    {}", styler.highlight(&own.v6.to_string())));
         ui.line(format!(
             "  {}",
             styler.dim(&tr!(
@@ -229,6 +322,12 @@ pub async fn run_tun_serve(
             "  {}",
             styler.dim(&tr!(
                 "hub mode: roster + fallback forward; spokes may peer directly"
+            ))
+        ));
+        ui.line(format!(
+            "  {}",
+            styler.dim(&tr!(
+                "transport: QUIC datagrams (apps may use TCP/UDP inside the tunnel)"
             ))
         ));
         if allow.is_some() {
@@ -300,7 +399,7 @@ pub async fn run_tun_serve(
                         tun_io,
                         tun_name,
                         own_id,
-                        own_vip,
+                        own,
                         peers,
                         fans,
                         peer_id,
@@ -339,7 +438,7 @@ async fn hub_run_spoke(
     tun: TunIo,
     tun_name: String,
     own_id: EndpointId,
-    own_vip: Ipv4Addr,
+    own: OwnVips,
     peers: HubPeers,
     fans: RosterFans,
     peer_id: EndpointId,
@@ -349,11 +448,16 @@ async fn hub_run_spoke(
     quiet: bool,
     hooks: Option<Arc<TunHooks>>,
 ) -> Result<()> {
-    let peer_vip = exchange_peer_vip(&conn, own_vip, false).await?;
-    if peer_vip == own_vip || !vip_in_mesh(peer_vip) {
+    let peer = exchange_peer_vips(&conn, own, false).await?;
+    if peer.v4 == own.v4
+        || peer.v6 == own.v6
+        || !vip_in_mesh(peer.v4)
+        || !vip6_in_mesh(peer.v6)
+    {
         bail!(tr_fmt!(
-            "peer announced an unusable virtual IP {0}",
-            peer_vip
+            "peer announced an unusable virtual IP {0} / {1}",
+            peer.v4,
+            peer.v6
         ));
     }
 
@@ -379,7 +483,7 @@ async fn hub_run_spoke(
     spawn_peer_sender(
         tun.clone(),
         tun_name.clone(),
-        own_vip,
+        own,
         peer_id,
         conn.clone(),
         out_rx,
@@ -387,42 +491,27 @@ async fn hub_run_spoke(
         raise_gate,
     );
 
-    {
-        let occupied = peers.load().contains_key(&peer_vip);
-        if occupied {
-            bail!(tr_fmt!(
-                "virtual IP {0} is already claimed by another peer",
-                peer_vip
-            ));
-        }
-        peers.rcu(|map| {
-            let mut next = (**map).clone();
-            next.insert(
-                peer_vip,
-                HubPeer {
-                    id: peer_id,
-                    conn: conn.clone(),
-                    outbound: out_tx.clone(),
-                    hidden,
-                },
-            );
-            next
-        });
-    }
+    try_claim_peer(
+        &peers,
+        HubPeer {
+            id: peer_id,
+            vip: peer.v4,
+            vip6: peer.v6,
+            conn: conn.clone(),
+            outbound: out_tx.clone(),
+            hidden,
+        },
+    )?;
     fans.write().await.insert(peer_id, fan_tx);
 
-    if let Err(e) = add_peer_route(&tun_name, peer_vip, own_vip) {
-        peers.rcu(|map| {
-            let mut next = (**map).clone();
-            next.remove(&peer_vip);
-            next
-        });
+    if let Err(e) = add_peer_route(&tun_name, peer.v4, peer.v6) {
+        peers_remove(&peers, peer.v4, peer.v6);
         fans.write().await.remove(&peer_id);
         return Err(e);
     }
 
     let session_mtu = choose_mtu(user_mtu, &conn).unwrap_or(user_mtu);
-    info!(%peer_id, %peer_vip, hidden, path = path_label(&conn), "{}", tr!("TUN session established"));
+    info!(%peer_id, vip = %peer.v4, vip6 = %peer.v6, hidden, path = path_label(&conn), "{}", tr!("TUN session established"));
     info!(%peer_id, "{}", tr_fmt!(
         "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}",
         conn.max_datagram_size().unwrap_or_default(),
@@ -432,19 +521,21 @@ async fn hub_run_spoke(
         println!(
             "{}",
             tr_fmt!(
-                "peer {0} joined at {1}",
+                "peer {0} joined at {1} / {2}",
                 peer_id.fmt_short(),
-                peer_vip
+                peer.v4,
+                peer.v6
             )
         );
     }
 
     // Snapshot to the new spoke, then Joined to everyone else (skip if hidden).
-    let snap = hub_roster_snapshot(own_id, own_vip, &peers);
+    let snap = hub_roster_snapshot(own_id, own, &peers);
     let _ = write_msg(&mut ctrl_send, &encode_snapshot(&snap)).await;
     if !hidden {
         let joined = Bytes::from(encode_joined(&RosterEntry {
-            vip: peer_vip,
+            vip: peer.v4,
+            vip6: peer.v6,
             id: peer_id,
         }));
         broadcast_roster(&fans, joined).await;
@@ -469,22 +560,21 @@ async fn hub_run_spoke(
 
     let hub_peer = HubPeer {
         id: peer_id,
+        vip: peer.v4,
+        vip6: peer.v6,
         conn: conn.clone(),
         outbound: out_tx_mesh,
         hidden,
     };
-    hub_peer_to_mesh(tun, own_vip, Arc::clone(&peers), peer_vip, hub_peer).await;
+    hub_peer_to_mesh(tun, own, Arc::clone(&peers), hub_peer).await;
 
     ctrl_send_task.abort();
-    peers.rcu(|map| {
-        let mut next = (**map).clone();
-        next.remove(&peer_vip);
-        next
-    });
+    peers_remove(&peers, peer.v4, peer.v6);
     fans.write().await.remove(&peer_id);
     if !hidden {
         let left = Bytes::from(encode_left(&RosterEntry {
-            vip: peer_vip,
+            vip: peer.v4,
+            vip6: peer.v6,
             id: peer_id,
         }));
         broadcast_roster(&fans, left).await;
@@ -492,22 +582,23 @@ async fn hub_run_spoke(
     if let Some(h) = &hooks {
         refresh_hub_peers_state(&h.state, &peers).await;
     }
-    if let Err(e) = del_peer_route(&tun_name, peer_vip) {
+    if let Err(e) = del_peer_route(&tun_name, peer.v4, peer.v6) {
         warn!(%peer_id, error = %e, "{}", tr!("could not remove peer route"));
     }
-    info!(%peer_id, %peer_vip, "{}", tr!("peer left the mesh"));
+    info!(%peer_id, vip = %peer.v4, vip6 = %peer.v6, "{}", tr!("peer left the mesh"));
     Ok(())
 }
 
 async fn refresh_hub_peers_state(state: &TunLiveState, peers: &HubPeers) {
-    let map = peers.load_full();
-    let list: Vec<CtlPeer> = map
-        .iter()
-        .map(|(vip, p)| CtlPeer {
-            vip: *vip,
+    let idx = peers.load_full();
+    let list: Vec<CtlPeer> = idx
+        .by_v4
+        .values()
+        .map(|p| CtlPeer {
+            vip: p.vip,
+            vip6: p.vip6,
             id: p.id.to_string(),
         })
         .collect();
     state.set_peers(list).await;
 }
-

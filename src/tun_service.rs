@@ -516,6 +516,13 @@ fn cmd_install_linux(exe: PathBuf, opts: InstallOpts, styler: &Styler) -> Result
             opts.identity.display().to_string()
         )
     );
+    println!(
+        "  {}",
+        tr_fmt!(
+            "logs: systemctl status {0}; journalctl -u {0} -f",
+            UNIT_NAME
+        )
+    );
     Ok(())
 }
 

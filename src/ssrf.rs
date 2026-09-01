@@ -6,24 +6,54 @@
 //! embedded-IPv4 forms (deprecated IPv4-compatible `::a.b.c.d`, NAT64
 //! well-known, 6to4, Teredo) are unwrapped or blocked so a dual-stack peer
 //! cannot smuggle a private v4 past the v6 branch.
+//!
+//! Dialing goes through [`CheckedTarget`]: resolve once → [`check_proxy_target`]
+//! → [`dial_checked`]. That type-level path prevents DNS-rebinding TOCTOU
+//! from a second `resolve` between check and connect.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
+use tokio::net::TcpStream;
 
-use crate::i18n::tr_fmt;
+use crate::i18n::{tr, tr_fmt};
+
+/// A [`SocketAddr`] that has already passed [`check_proxy_target`].
+///
+/// Opaque on purpose: callers dial via [`dial_checked`] (or [`Self::addr`] for
+/// logging) and cannot "forget" the check by connecting a raw `SocketAddr`
+/// from a fresh DNS lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CheckedTarget(SocketAddr);
+
+impl CheckedTarget {
+    pub(crate) fn addr(self) -> SocketAddr {
+        self.0
+    }
+}
 
 /// Reject `target` when it resolves into a blocked range and private dials
 /// are not allowed. Runs on the *resolved* address so domains cannot smuggle
 /// a private IP past a hostname check.
-pub(crate) fn check_proxy_target(target: SocketAddr, allow_private: bool) -> Result<()> {
+///
+/// On success returns a [`CheckedTarget`] — the only token accepted by
+/// [`dial_checked`].
+pub(crate) fn check_proxy_target(target: SocketAddr, allow_private: bool) -> Result<CheckedTarget> {
     if !allow_private && is_blocked_target(target) {
         bail!(tr_fmt!(
             "target {0} is in a private/loopback/link-local range; blocked in proxy mode (use --allow-private to permit)",
             target
         ));
     }
-    Ok(())
+    Ok(CheckedTarget(target))
+}
+
+/// Connect using an address that already passed the SSRF guard.
+pub(crate) async fn dial_checked(target: CheckedTarget) -> Result<TcpStream> {
+    let addr = target.addr();
+    TcpStream::connect(addr)
+        .await
+        .with_context(|| tr_fmt!("connecting to {0}", addr))
 }
 
 /// Loopback, RFC 1918 private, RFC 6598 CGNAT (`100.64.0.0/10`), link-local,
@@ -57,9 +87,17 @@ fn is_blocked_v4(ip: Ipv4Addr) -> bool {
     // fabrics (Tailscale also treats this range specially).
     let bits = u32::from(ip);
     let is_cgnat = (bits & 0xffc0_0000) == 0x6440_0000;
+    // RFC 3068 6to4 relay anycast 192.88.99.0/24 (protocol largely dead, but
+    // still a special-use block we refuse in proxy mode for symmetry with
+    // other tunnel embeddings).
+    let is_6to4_relay_anycast = (bits & 0xffff_ff00) == 0xc058_6300;
+    // v4 needs an explicit broadcast check: 255.255.255.255 is not in
+    // 224.0.0.0/4. v6 has no directed broadcast — multicast alone covers
+    // the analogous "not a unicast peer" cases.
     ip.is_loopback()
         || ip.is_private()
         || is_cgnat
+        || is_6to4_relay_anycast
         || ip.is_link_local()
         || ip.is_unspecified()
         || ip.is_multicast()
@@ -162,7 +200,26 @@ mod tests {
         assert!(check_proxy_target("127.0.0.1:80".parse().unwrap(), false).is_err());
         assert!(check_proxy_target("10.0.0.1:80".parse().unwrap(), false).is_err());
         assert!(check_proxy_target("8.8.8.8:80".parse().unwrap(), false).is_ok());
+        assert_eq!(
+            check_proxy_target("8.8.8.8:80".parse().unwrap(), false)
+                .unwrap()
+                .addr(),
+            "8.8.8.8:80".parse().unwrap()
+        );
         assert!(check_proxy_target("127.0.0.1:80".parse().unwrap(), true).is_ok());
+
+        // Port 0 is not an SSRF concern (connect will fail later); we only
+        // classify the IP. Public IP + port 0 must pass the guard.
+        assert!(!is_blocked_target("8.8.8.8:0".parse().unwrap()));
+        assert!(check_proxy_target("8.8.8.8:0".parse().unwrap(), false).is_ok());
+
+        // 6to4 relay anycast (RFC 3068).
+        assert!(is_blocked_ip(IpAddr::V4(
+            "192.88.99.1".parse().unwrap()
+        )));
+        assert!(is_blocked_ip(IpAddr::V4(
+            "192.88.99.255".parse().unwrap()
+        )));
     }
 
     #[test]

@@ -100,6 +100,11 @@ pub struct ResolvedPeer {
 }
 
 /// Resolve `name` / EndpointId hex / short code against the contact book.
+///
+/// Exact `BTreeMap` name match first, then a linear ASCII-case-insensitive
+/// scan (`eq_ignore_ascii_case`). Non-ASCII case folding (e.g. Turkish `I`,
+/// fullwidth Latin, CJK variants) is **not** applied — Chinese nicknames are
+/// exact-match only.
 pub fn resolve(book: &ContactBook, to: &str) -> Result<ResolvedPeer> {
     let key = to.trim();
     if let Some((name, c)) = book.contacts.get_key_value(key) {
@@ -232,6 +237,11 @@ const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 /// Anyone can forge a matching check digit; peer authenticity still comes
 /// from the QUIC/TLS handshake on the EndpointId. Do not treat this as a
 /// security boundary.
+///
+/// Designed for single-character substitutions / OCR slips (~1/32 miss rate
+/// for a random wrong check digit). Adjacent-character **transpositions** are
+/// a known weak spot of this rolling `×31` hash — we do not claim to catch
+/// those; use a Damm-like check if that becomes a real UX pain.
 fn check_symbol(data: &[u8]) -> char {
     let mut x = 0u32;
     for &b in data {

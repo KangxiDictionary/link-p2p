@@ -153,6 +153,14 @@ pub fn into_server(handle: OwnedHandle) -> Result<NamedPipeServer> {
 ///
 /// Impersonates the pipe client, checks Administrators / LocalSystem membership
 /// and `TokenElevation`, then always `RevertToSelf`. Fails closed on any error.
+///
+/// # Call-site invariant (no yield between check and privileged op)
+///
+/// The impersonated token describes the client of **this** pipe instance at
+/// call time. Callers must treat `peer_is_admin` + the privileged control
+/// action as a single synchronous critical section: do not `.await` between
+/// them (another accept/handshake must not run on the same logical trust
+/// decision). Current ctl handlers honor this; keep it that way.
 pub fn peer_is_admin(server: &NamedPipeServer) -> bool {
     let handle = server.as_raw_handle() as HANDLE;
     // SAFETY: `handle` is a live named-pipe server connected to a client.
@@ -175,6 +183,13 @@ pub fn peer_is_admin(server: &NamedPipeServer) -> bool {
 }
 
 fn token_is_admin_or_system() -> bool {
+    // Three overlapping checks (fail closed / prefer false negatives):
+    // 1) BUILTIN\Administrators membership — elevated admin tokens.
+    // 2) LocalSystem — service accounts often lack the Administrators SID.
+    // 3) TokenElevation — UAC filtered tokens may still list Administrators
+    //    as Deny-Only (so (1) is false) while elevation is the real signal;
+    //    conversely, some service contexts elevate without matching (1)/(2)
+    //    the way we expect. Doing all three is deliberate redundancy.
     if sid_member_of_current_token(admin_sid) {
         return true;
     }

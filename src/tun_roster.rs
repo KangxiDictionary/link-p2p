@@ -2,8 +2,11 @@
 //!
 //! Carried on a bidi control stream *after* the VIP exchange. Datagrams stay
 //! unreliable for IP packets; membership must not be lossy.
+//!
+//! Magic `LPR3` (TUN ALPN `link-p2p/tun/3`): each entry is
+//! IPv4 (4) + IPv6 (16) + EndpointId (32) = 52 bytes.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use anyhow::{bail, Context, Result};
 use iroh::EndpointId;
@@ -11,8 +14,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::i18n::{tr, tr_fmt};
 
-/// Control-plane magic for TUN ALPN `link-p2p/tun/2`.
-pub const ROSTER_MAGIC: &[u8; 4] = b"LPR2";
+/// Control-plane magic for TUN ALPN `link-p2p/tun/3`.
+pub const ROSTER_MAGIC: &[u8; 4] = b"LPR3";
 
 pub const MSG_SNAPSHOT: u8 = 1;
 pub const MSG_JOINED: u8 = 2;
@@ -22,28 +25,35 @@ pub const MSG_HELLO: u8 = 4;
 /// Bit 0 of HELLO flags: omit this spoke from roster broadcasts to others.
 pub const HELLO_FLAG_HIDDEN: u8 = 0x01;
 
+const ENTRY_LEN: usize = 52;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RosterEntry {
     pub vip: Ipv4Addr,
+    pub vip6: Ipv6Addr,
     pub id: EndpointId,
 }
 
 impl RosterEntry {
     pub fn encode(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.vip.octets());
+        out.extend_from_slice(&self.vip6.octets());
         out.extend_from_slice(self.id.as_bytes());
     }
 
     pub fn decode(buf: &[u8]) -> Result<(Self, usize)> {
-        if buf.len() < 36 {
+        if buf.len() < ENTRY_LEN {
             bail!(tr!("roster entry truncated"));
         }
         let vip = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
+        let mut v6 = [0u8; 16];
+        v6.copy_from_slice(&buf[4..20]);
+        let vip6 = Ipv6Addr::from(v6);
         let mut id_bytes = [0u8; 32];
-        id_bytes.copy_from_slice(&buf[4..36]);
+        id_bytes.copy_from_slice(&buf[20..52]);
         let id = EndpointId::from_bytes(&id_bytes)
             .context(tr!("invalid EndpointId in roster"))?;
-        Ok((Self { vip, id }, 36))
+        Ok((Self { vip, vip6, id }, ENTRY_LEN))
     }
 }
 
@@ -70,7 +80,7 @@ pub async fn read_hello<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<bool> {
 
 pub fn encode_snapshot(entries: &[RosterEntry]) -> Vec<u8> {
     let n = u16::try_from(entries.len()).unwrap_or(u16::MAX);
-    let mut out = Vec::with_capacity(4 + 1 + 2 + entries.len() * 36);
+    let mut out = Vec::with_capacity(4 + 1 + 2 + entries.len() * ENTRY_LEN);
     out.extend_from_slice(ROSTER_MAGIC);
     out.push(MSG_SNAPSHOT);
     out.extend_from_slice(&n.to_be_bytes());
@@ -81,7 +91,7 @@ pub fn encode_snapshot(entries: &[RosterEntry]) -> Vec<u8> {
 }
 
 pub fn encode_joined(entry: &RosterEntry) -> Vec<u8> {
-    let mut out = Vec::with_capacity(4 + 1 + 36);
+    let mut out = Vec::with_capacity(4 + 1 + ENTRY_LEN);
     out.extend_from_slice(ROSTER_MAGIC);
     out.push(MSG_JOINED);
     entry.encode(&mut out);
@@ -89,7 +99,7 @@ pub fn encode_joined(entry: &RosterEntry) -> Vec<u8> {
 }
 
 pub fn encode_left(entry: &RosterEntry) -> Vec<u8> {
-    let mut out = Vec::with_capacity(4 + 1 + 36);
+    let mut out = Vec::with_capacity(4 + 1 + ENTRY_LEN);
     out.extend_from_slice(ROSTER_MAGIC);
     out.push(MSG_LEFT);
     entry.encode(&mut out);
@@ -117,7 +127,7 @@ pub async fn read_msg<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<RosterMsg> {
             r.read_exact(&mut nb).await?;
             let n = u16::from_be_bytes(nb) as usize;
             let mut entries = Vec::with_capacity(n);
-            let mut buf = vec![0u8; 36];
+            let mut buf = vec![0u8; ENTRY_LEN];
             for _ in 0..n {
                 r.read_exact(&mut buf).await?;
                 let (e, _) = RosterEntry::decode(&buf)?;
@@ -126,13 +136,13 @@ pub async fn read_msg<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<RosterMsg> {
             Ok(RosterMsg::Snapshot(entries))
         }
         MSG_JOINED => {
-            let mut buf = [0u8; 36];
+            let mut buf = [0u8; ENTRY_LEN];
             r.read_exact(&mut buf).await?;
             let (e, _) = RosterEntry::decode(&buf)?;
             Ok(RosterMsg::Joined(e))
         }
         MSG_LEFT => {
-            let mut buf = [0u8; 36];
+            let mut buf = [0u8; ENTRY_LEN];
             r.read_exact(&mut buf).await?;
             let (e, _) = RosterEntry::decode(&buf)?;
             Ok(RosterMsg::Left(e))
@@ -148,12 +158,6 @@ pub async fn write_msg<W: AsyncWriteExt + Unpin>(w: &mut W, bytes: &[u8]) -> Res
 }
 
 /// Tie-break: the numerically lower EndpointId dials; the other waits for accept.
-///
-/// Exactly one side of any distinct pair returns true — this is the whole
-/// defence against both spokes dialing each other when two JOINED events
-/// arrive at nearly the same time. The accept path must still close an
-/// inbound that violates the tie-break (network delay / retry can still
-/// produce a dual dial); see `tun` inbound accept.
 pub fn should_dial(own: EndpointId, peer: EndpointId) -> bool {
     own < peer
 }
@@ -184,10 +188,12 @@ mod tests {
         let entries = vec![
             RosterEntry {
                 vip: Ipv4Addr::new(172, 24, 1, 1),
+                vip6: "fd24:ac18::1".parse().unwrap(),
                 id: a.public(),
             },
             RosterEntry {
-                vip: Ipv4Addr::new(172, 24, 2, 2),
+                vip: Ipv4Addr::new(172, 24, 1, 2),
+                vip6: "fd24:ac18::2".parse().unwrap(),
                 id: b.public(),
             },
         ];
@@ -213,9 +219,6 @@ mod tests {
         assert!(!should_dial(a, a));
     }
 
-    /// Property: for any distinct pair, exactly one side dials. This is what
-    /// keeps simultaneous JOINED handling from becoming a dual-dial storm
-    /// (the failure mode we saw with many processes sharing one identity).
     #[test]
     fn only_one_side_dials_across_random_pairs() {
         for _ in 0..64 {

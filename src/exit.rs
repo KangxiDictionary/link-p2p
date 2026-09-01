@@ -51,10 +51,21 @@ impl std::error::Error for CodedError {
 }
 
 /// Wrap `err` so [`code_from`] returns `code`.
+///
+/// **Contract:** do not nest `coded` wrappers. [`code_from`] returns the
+/// *outermost* [`CodedError`] in the chain; an inner, more precise code is
+/// silently ignored. Nesting is a programmer error — we `assert!` in every
+/// build profile so CI / release catches it immediately (not a silent wrong
+/// exit code months later).
 pub fn coded(code: i32, err: impl Into<anyhow::Error>) -> anyhow::Error {
+    let err = err.into();
+    assert!(
+        !err.chain().any(|c| c.is::<CodedError>()),
+        "nested exit::coded(): outermost code wins; wrap the root cause once"
+    );
     CodedError {
         code,
-        source: err.into(),
+        source: err,
     }
     .into()
 }
@@ -62,6 +73,8 @@ pub fn coded(code: i32, err: impl Into<anyhow::Error>) -> anyhow::Error {
 /// Resolve the process exit code for a failure.
 ///
 /// Returns [`OTHER`] unless a [`CodedError`] appears in the error chain.
+/// If several are nested (should not happen — see [`coded`]), the **first**
+/// (outermost) one wins.
 pub fn code_from(err: &anyhow::Error) -> i32 {
     for cause in err.chain() {
         if let Some(c) = cause.downcast_ref::<CodedError>() {
@@ -98,5 +111,25 @@ mod tests {
     fn uncoded_translated_connect_is_other() {
         let err = anyhow!("正在连接到远程端点");
         assert_eq!(code_from(&err), OTHER);
+    }
+
+    #[test]
+    fn nested_coded_outer_wins_when_built_manually() {
+        // `coded()` itself panics on nesting; `code_from` still documents
+        // outermost-wins if a `CodedError` is constructed by hand.
+        let inner = coded(TIMEOUT, anyhow!("idle"));
+        let outer = CodedError {
+            code: CONNECT,
+            source: inner,
+        };
+        let err: anyhow::Error = outer.into();
+        assert_eq!(code_from(&err), CONNECT);
+    }
+
+    #[test]
+    #[should_panic(expected = "nested exit::coded()")]
+    fn coded_rejects_nesting() {
+        let inner = coded(TIMEOUT, anyhow!("idle"));
+        let _ = coded(CONNECT, inner);
     }
 }

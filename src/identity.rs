@@ -3,6 +3,10 @@
 //! Owns path resolution (XDG + legacy migration), Argon2id + XChaCha20-Poly1305
 //! encryption, and 0600 file creation. Extracted from `main` so command
 //! dispatch does not share a file with key material logic.
+//!
+//! Callers hold the passphrase in [`zeroize::Zeroizing`] (`cli` / `main`) so
+//! Drop clears heap bytes; this module takes `&str` only for the KDF/AEAD
+//! window and zeroizes derived keys (`dk`) and plaintext hex buffers.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -102,15 +106,18 @@ pub(crate) fn migrate_identity(from: &Path, to: &Path) -> Result<()> {
 
 /// Minimum Unicode scalar values (`chars().count()`) for a passphrase.
 pub(crate) const PASSPHRASE_MIN_LEN: usize = 8;
-/// Maximum UTF-8 byte length — DoS bound for Argon2 input size (not a
-/// "character" limit). CJK passphrases hit the min via chars, the max via bytes.
+/// Maximum UTF-8 byte length. Mostly a sanity / DoS bound on how large a
+/// string we accept from CLI/env before doing anything with it — Argon2id
+/// cost is dominated by `m`/`t` (19 MiB × 2), not by a ~1 KiB password.
+/// Keep the cap so a multi-megabyte pasted blob cannot sit in memory through
+/// the KDF path.
 pub(crate) const PASSPHRASE_MAX_LEN: usize = 1024;
 
 /// Reject empty-looking, too-short, or absurdly long passphrases before KDF.
 ///
 /// - **Minimum**: Unicode scalar values (`chars()`), so CJK / emoji are not
 ///   forced to pad to 8 UTF-8 bytes.
-/// - **Maximum**: raw UTF-8 **bytes**, to bound Argon2 memory/time.
+/// - **Maximum**: raw UTF-8 **bytes** (see [`PASSPHRASE_MAX_LEN`]).
 /// - Does **not** trim whitespace: a trailing newline from a file/`echo` is
 ///   part of the passphrase (document this for callers that read from files).
 pub(crate) fn validate_passphrase(passphrase: &str) -> Result<()> {
@@ -449,6 +456,42 @@ fn key_encryption_rejects_tampered_ciphertext() {
     // header between files is blocked by the AAD (magic is the AAD).
     encrypted[KEY_FILE_MAGIC.len()] ^= 0x01;
     assert!(decrypt_key_hex(&encrypted, "hunter2").is_err());
+}
+
+/// Golden ciphertext with fixed salt/nonce (same layout / Argon2id PHC-B64
+/// salt encoding as argon2 0.5 → 0.6). Regenerate only when intentionally
+/// breaking on-disk identity format.
+#[test]
+fn decrypts_fixed_salt_nonce_identity_blob() {
+    use chacha20poly1305::aead::{Aead, Payload};
+    use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce};
+
+    let passphrase = "fixture-pass!!";
+    let hex = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let salt = [0x11u8; KEY_FILE_SALT_LEN];
+    let nonce_bytes = [0x22u8; KEY_FILE_NONCE_LEN];
+
+    let mut dk = derive_key(passphrase, &salt).unwrap();
+    let cipher = XChaCha20Poly1305::new(&Key::from(dk));
+    let ciphertext = cipher
+        .encrypt(
+            &XNonce::from(nonce_bytes),
+            Payload {
+                msg: hex.as_bytes(),
+                aad: KEY_FILE_MAGIC,
+            },
+        )
+        .unwrap();
+    dk.zeroize();
+
+    let mut blob = Vec::new();
+    blob.extend_from_slice(KEY_FILE_MAGIC);
+    blob.extend_from_slice(&salt);
+    blob.extend_from_slice(&nonce_bytes);
+    blob.extend_from_slice(&ciphertext);
+
+    assert_eq!(decrypt_key_hex(&blob, passphrase).unwrap(), hex);
+    assert!(decrypt_key_hex(&blob, "wrong-pass!!!!").is_err());
 }
 
 #[test]

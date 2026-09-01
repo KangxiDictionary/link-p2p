@@ -116,11 +116,10 @@ msgid ""
 msgstr ""
 "エンドポイントが {0} 以内にオンラインになりませんでした。\n"
 "\n"
-"最も可能性の高い原因：ファイアウォールが送信 UDP をブロックしています。\n"
-"iroh/QUIC は直接ホールパンチングとリレー接続の両方で UDP に依存しています。確認方法：\n"
-"  nc -u -v -w3 8.8.8.8 53    # UDP 送信が機能するかどうか\n"
-"  RUST_LOG=iroh=debug {1}     # どこで詰まっているかを確認"
-
+"主因の可能性: 送信 UDP がファイアウォールで遮断されています。\n"
+"iroh/QUIC は直通ホールパンチとリレーの両方で UDP が必要です。試す:\n"
+"nc -u -v -w3 8.8.8.8 53    # 送信 UDP は通るか？\n"
+"RUST_LOG=iroh=debug {1}     # どこで止まっているか確認"
 msgid "'{0}' is not a valid --relay URL"
 msgstr "'{0}' は有効な --relay URL ではありません"
 
@@ -1594,9 +1593,17 @@ msgstr "无需 python/nc 的检查：对每个 --relay 做 TCP 探测、确认 W
 msgid "Skip the loopback TCP echo drain (relay/wintun checks only)."
 msgstr "跳过回环 TCP echo drain（仅做中继/wintun 检查）。"
 
-msgid "\nYou passed --relay without --no-n0-relays: the endpoint still\nstarts on n0's public relays. If n0 is blocked on this network,\neither add --no-n0-relays (custom relay only) or ensure UDP to\nn0 works. Custom URLs are installed before this wait; if you\nstill time out, probe your relay with `link-p2p tun selftest`."
-msgstr "\n你传了 --relay 但未加 --no-n0-relays：端点仍从 n0 公共中继起步。若本网络封禁 n0，请加 --no-n0-relays（仅用自建中继）或确保到 n0 的 UDP 可用。自定义 URL 会在等待上线前安装；若仍超时，用 `link-p2p tun selftest` 探测中继。"
-
+msgid ""
+"\n"
+"You passed --relay without --no-n0-relays: the endpoint still\n"
+"starts on n0's public relays. If n0 is blocked on this network,\n"
+"either add --no-n0-relays (custom relay only) or ensure UDP to\n"
+"n0 works. Custom URLs are installed before this wait; if you\n"
+"still time out, probe your relay with `link-p2p tun selftest`."
+msgstr ""
+"\n"
+"--relay を指定し --no-n0-relays がありません: エンドポイントは引き続き n0 公開リレーで起動します。\n"
+"このネットワークで n0 が遮断されている場合は --no-n0-relays（独自リレーのみ）を付けるか、n0 への UDP を確保してください。"
 msgid "\n--no-n0-relays is set: only your --relay URL(s) are used.\nCheck that the relay is reachable (TCP) and accepts QUIC/UDP.\nTry: link-p2p tun selftest"
 msgstr "\n已设置 --no-n0-relays：仅使用你的 --relay。请确认中继 TCP 可达且接受 QUIC/UDP。\n尝试：link-p2p tun selftest"
 
@@ -1789,3 +1796,281 @@ msgstr ""
 msgid "`<peer>` to dial, or `accept|reject <peer>` for a ringing call."
 msgstr "`<peer>` to dial, or `accept|reject <peer>` for a ringing call."
 
+
+# --- auto-added TUN dual-stack / UX strings ---
+
+msgid ""
+"\n"
+"--no-n0-relays is set: only your --relay URL(s) are used.\n"
+"Check that the relay is reachable (TCP) and accepts QUIC/UDP.\n"
+"Try: link-p2p selftest"
+msgstr ""
+"\n"
+"--no-n0-relays 指定済み: --relay URL のみ使用します。\n"
+"リレーが到達可能（TCP）で QUIC/UDP を受け付けるか確認してください。\n"
+"試す: link-p2p selftest"
+
+msgid ""
+"\n"
+"You passed --relay without --no-n0-relays: the endpoint still\n"
+"starts on n0's public relays. If n0 is blocked on this network,\n"
+"either add --no-n0-relays (custom relay only) or ensure UDP to\n"
+"n0 works. Custom URLs are installed before this wait; if you\n"
+"still time out, probe your relay with `link-p2p selftest`."
+msgstr ""
+"\n"
+"--relay を指定し --no-n0-relays がありません: エンドポイントは引き続き n0 公開リレーを使います。\n"
+"n0 が遮断されている場合は --no-n0-relays（独自リレーのみ）を付けるか、n0 への UDP を確保してください。"
+
+msgid "(no ringing calls)"
+msgstr "（着信なし）"
+
+msgid "EndpointId {0} — dial with `tun call <contact>`"
+msgstr "EndpointId {0} — `tun call <連絡先>` で発信"
+
+msgid "OWASP interactive-login Argon2 params rejected by argon2 crate (please file a bug)"
+msgstr "argon2 crate が OWASP interactive-login パラメータを拒否しました（バグ報告を）"
+
+msgid "TUN call dial failed"
+msgstr "TUN 通話の発信に失敗"
+
+msgid "TUN control request timed out"
+msgstr "TUN 制御リクエストがタイムアウト"
+
+msgid ""
+"TUN daemon failed to start: {0}\n"
+"See {1} (system service: `systemctl status link-p2p-tun.service` / `journalctl -u link-p2p-tun.service -e`)."
+msgstr ""
+"TUN デーモンの起動に失敗: {0}\n"
+"{1} を確認（システムサービス: `systemctl status link-p2p-tun.service` / `journalctl -u link-p2p-tun.service -e`）。"
+
+msgid "TUN daemon is not in phone mode (start with `tun up --role phone` or `tun call`)"
+msgstr "TUN デーモンは電話モードではありません（`tun up --role phone` または `tun call`）"
+
+msgid "TUN daemon is role {0}; `tun call` needs phone mode (`tun down` then `tun call`, or `tun up --role phone`)"
+msgstr "TUN デーモンの役割は {0}；`tun call` には電話モードが必要（`tun down` 後に `tun call`、または `tun up --role phone`）"
+
+msgid "TUN phone call queue is full; try again"
+msgstr "TUN 通話キューがいっぱいです。再試行してください"
+
+msgid "`--hidden` is only valid for spoke / `tun join`"
+msgstr "`--hidden` は spoke / `tun join` のみ有効"
+
+msgid "`--role phone` cannot be combined with `--to` (use `tun call <peer>` after up)"
+msgstr "`--role phone` は `--to` と併用できません（起動後に `tun call <ピア>`）"
+
+msgid "`hub` or `spoke`. Default: spoke if `--to` is set, otherwise hub."
+msgstr "`hub` または `spoke`。既定: `--to` があれば spoke、なければ hub。"
+
+msgid "accepted {0}"
+msgstr "{0} を承認しました"
+
+msgid "already connected"
+msgstr "既に接続済み"
+
+msgid "auto-selected alternate IPv4 VIP after a local collision"
+msgstr "ローカル衝突のため代替 IPv4 VIP を自動選択しました"
+
+msgid "auto-selected alternate IPv6 VIP after a local collision"
+msgstr "ローカル衝突のため代替 IPv6 VIP を自動選択しました"
+
+msgid "bad TUN VIP exchange magic"
+msgstr "TUN VIP 交換マジックが不正です"
+
+msgid "cannot call yourself"
+msgstr "自分自身には発信できません"
+
+msgid "checking local interfaces for the virtual IPv6"
+msgstr "仮想 IPv6 のローカルインタフェースを確認中"
+
+msgid "connected"
+msgstr "接続済み"
+
+msgid "connected to {0} at {1} / {2}"
+msgstr "{0} に接続しました（{1} / {2}）"
+
+msgid "connected. your virtual IPs: {0} / {1}"
+msgstr "接続済み。仮想 IP: {0} / {1}"
+
+msgid "could not find a free IPv4 VIP in 172.24.0.0/16 on this machine; free one or pass --tun-ip"
+msgstr "このマシンの 172.24.0.0/16 に空き IPv4 VIP がありません。解放するか --tun-ip を指定してください"
+
+msgid "could not find a free IPv6 VIP in fd24:ac18::/64 on this machine; free one or pass --tun-ip6"
+msgstr "このマシンの fd24:ac18::/64 に空き IPv6 VIP がありません。解放するか --tun-ip6 を指定してください"
+
+msgid "dialing {0}"
+msgstr "{0} に発信中"
+
+msgid ""
+"endpoint did not come online within {0}.\n"
+"\n"
+"The most likely cause: outgoing UDP is blocked by a firewall.\n"
+"iroh/QUIC relies on UDP for both direct hole-punching and\n"
+"relay connections. Try:\n"
+"link-p2p selftest               # relay TCP probe + loopback\n"
+"nc -u -v -w3 8.8.8.8 53         # does UDP egress work at all?\n"
+"RUST_LOG=iroh=debug {1}          # see exactly where it's stuck{2}"
+msgstr ""
+"エンドポイントが {0} 以内にオンラインになりませんでした。\n"
+"\n"
+"主因の可能性: 送信 UDP がファイアウォールで遮断。\n"
+"iroh/QUIC は直通とリレーの両方で UDP が必要です。試す:\n"
+"link-p2p selftest"
+
+msgid "expected roster HELLO, got type {0}"
+msgstr "ロスター HELLO を期待しましたが型 {0} を受信"
+
+msgid "failed to load config; using defaults"
+msgstr "設定の読み込みに失敗；既定値を使用"
+
+msgid "forwarder error"
+msgstr "フォワーダエラー"
+
+msgid "gathering entropy for identity nonce (Unix: check /dev/urandom; containers/embedded may lack a CSPRNG)"
+msgstr "identity nonce 用のエントロピー収集中（Unix: /dev/urandom を確認；コンテナ/組込みは CSPRNG が無い場合あり）"
+
+msgid "gathering entropy for identity salt (Unix: check /dev/urandom; containers/embedded may lack a CSPRNG)"
+msgstr "identity salt 用のエントロピー収集中（Unix: /dev/urandom を確認；コンテナ/組込みは CSPRNG が無い場合あり）"
+
+msgid "hub {0} is at {1} / {2} (path {3}); peers may connect directly"
+msgstr "ハブ {0} は {1} / {2}（経路 {3}）；ピアは直接接続可能"
+
+msgid "incoming TUN call ringing"
+msgstr "着信 TUN 通話が鳴っています"
+
+msgid "invalid `--role {0}` (expected hub, spoke, or phone)"
+msgstr "無効な `--role {0}`（hub / spoke / phone）"
+
+msgid "link-p2p tun selftest"
+msgstr "link-p2p tun 自己診断"
+
+msgid "logs: systemctl status {0}; journalctl -u {0} -f"
+msgstr "ログ: systemctl status {0}; journalctl -u {0} -f"
+
+msgid "logs: {0} (or `journalctl` / `systemctl status` when using the system service)"
+msgstr "ログ: {0}（システムサービスなら `journalctl` / `systemctl status`）"
+
+msgid "mesh peer {0} at {1} / {2}"
+msgstr "メッシュピア {0}: {1} / {2}"
+
+msgid "no pending call matching that peer"
+msgstr "そのピアに一致する保留通話はありません"
+
+msgid "opening path stats {0}"
+msgstr "経路統計 {0} を開いています"
+
+msgid "passphrase is too long (max {0} UTF-8 bytes, you have {1})"
+msgstr "パスフレーズが長すぎます（最大 {0} UTF-8 バイト、現在 {1}）"
+
+msgid "passphrase must be at least {0} characters (Unicode scalar values; you have {1})"
+msgstr "パスフレーズは少なくとも {0} 文字必要です（Unicode スカラー；現在 {1}）"
+
+msgid "peer announced an unusable virtual IP {0} / {1}"
+msgstr "対向が使用できない仮想 IP {0} / {1} を通知しました"
+
+msgid "peer announced an unusable virtual IPv6 {0}"
+msgstr "対向が使用できない仮想 IPv6 {0} を通知しました"
+
+msgid "peer {0} joined at {1} / {2}"
+msgstr "ピア {0} が {1} / {2} で参加しました"
+
+msgid "permission denied: elevated privileges required for this TUN control operation"
+msgstr "権限がありません: この TUN 制御には昇格権限が必要です"
+
+msgid "phone mode up. your virtual IPs: {0} / {1}"
+msgstr "電話モード起動。仮想 IP: {0} / {1}"
+
+msgid "reading path stats {0}"
+msgstr "経路統計 {0} を読み取り中"
+
+msgid "rejected TUN call"
+msgstr "TUN 通話を拒否しました"
+
+msgid "rejected {0}"
+msgstr "{0} を拒否しました"
+
+msgid "replacing path stats {0}"
+msgstr "経路統計 {0} を置換中"
+
+msgid "rewriting path stats {0}"
+msgstr "経路統計 {0} を書き換え中"
+
+msgid "serializing path sample"
+msgstr "経路サンプルをシリアライズ中"
+
+msgid "timed out resolving {0} after {1} seconds"
+msgstr "{0} の解決が {1} 秒でタイムアウト"
+
+msgid ""
+"timed out waiting for tun daemon to become ready; check {0}\n"
+"Tip: for the system service use `systemctl status link-p2p-tun.service` and `journalctl -u link-p2p-tun.service -f`."
+msgstr ""
+"TUN デーモンの準備待ちがタイムアウトしました。{0} を確認\n"
+"ヒント: システムサービスは `systemctl status link-p2p-tun.service` と `journalctl -u link-p2p-tun.service -f`。"
+
+msgid "transport: QUIC datagrams (apps may use TCP/UDP inside the tunnel)"
+msgstr "転送: QUIC データグラム（トンネル内のアプリは TCP/UDP を使用可能）"
+
+msgid "unexpected control response: {0}"
+msgstr "予期しない制御応答: {0}"
+
+msgid "usage: tun call <peer> | tun call accept <peer> | tun call reject <peer>"
+msgstr "用法: tun call <ピア> | tun call accept <ピア> | tun call reject <ピア>"
+
+msgid "virtual IP {0} / {1} is already claimed by another peer"
+msgstr "仮想 IP {0} / {1} は別のピアが使用中です"
+
+msgid "virtual IP {0} is already assigned to a local interface"
+msgstr "仮想 IP {0} は既にローカルインタフェースに割り当てられています"
+
+msgid ""
+"virtual IP {0} is already on a local interface (you passed --tun-ip).\n"
+"Pick a free address with --tun-ip, or omit --tun-ip to auto-select.\n"
+"Detail: {1}"
+msgstr ""
+"仮想 IP {0} は既にローカルインタフェースにあります（--tun-ip を指定しました）。\n"
+"--tun-ip で空きアドレスを指定するか、--tun-ip を省略して自動選択してください。\n"
+"詳細: {1}"
+
+msgid "virtual IPv6 {0} is already assigned to a local interface"
+msgstr "仮想 IPv6 {0} は既にローカルインタフェースに割り当てられています"
+
+msgid ""
+"virtual IPv6 {0} is already on a local interface (you passed --tun-ip6).\n"
+"Pick a free address with --tun-ip6, or omit --tun-ip6 to auto-select.\n"
+"Detail: {1}"
+msgstr ""
+"仮想 IPv6 {0} は既にローカルインタフェースにあります（--tun-ip6 を指定しました）。\n"
+"--tun-ip6 で空きアドレスを指定するか、--tun-ip6 を省略して自動選択してください。\n"
+"詳細: {1}"
+
+msgid "waiting for peer to dial (EndpointId tie-break)"
+msgstr "対向の発信待ち（EndpointId タイブレーク）"
+
+msgid "waiting for peer — check `tun status` / `tun peers` (daemon keeps dialing)"
+msgstr "対向待ち — `tun status` / `tun peers` を確認（デーモンは発信を継続）"
+
+msgid "your virtual IPs (the peer reaches you here):"
+msgstr "あなたの仮想 IP（対向はここ経由で到達します）:"
+
+msgid ""
+"Make machines reachable at the IP layer over QUIC datagrams.\n"
+"\n"
+"Creates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). Preferred day-to-day commands: `tun call` (1:1 phone), `tun join <hub>` (mesh channel), `tun status` / `tun peers` / `tun down`. Also `tun up --role phone|hub|spoke`. Foreground aliases: `tun serve` / `tun connect`. Prefer `--cc bbr3` on lossy paths. Dual-stack VIPs: 172.24.0.0/16 and fd24:ac18::/64 (omit --tun-ip/--tun-ip6 to auto-pick on collision) — see docs/subsystems/tun.md."
+msgstr ""
+"QUIC データグラム上でマシン同士を IP 層で到達可能にします。\n"
+"\n"
+"TUN インタフェースを作成します（Linux/macOS は root / CAP_NET_ADMIN、Windows は管理者 + wintun.dll）。日常: `tun call`（1:1 電話）、`tun join <hub>`（メッシュ）、`tun status` / `tun peers` / `tun down`。`tun up --role phone|hub|spoke` も可。フォアグラウンド別名: `tun serve` / `tun connect`。損失の多い経路では `--cc bbr3`。デュアルスタック VIP: 172.24.0.0/16 と fd24:ac18::/64（--tun-ip/--tun-ip6 省略時は衝突で自動選択）— docs/subsystems/tun.md 参照。"
+
+# --- tun-ip6 help ---
+msgid "Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16). Omit to auto-pick a free address."
+msgstr "このノードの仮想 IP を上書き（既定は EndpointId から派生、172.24.0.0/16）。省略時は衝突で自動選択。"
+
+msgid "Override this node's IPv6 VIP (default: derived in fd24:ac18::/64). Omit to auto-pick a free address."
+msgstr "このノードの IPv6 VIP を上書き（既定は fd24:ac18::/64）。省略時は衝突で自動選択。"
+
+msgid "Dial a `tun serve` hub, install 172.24.0.0/16 and fd24:ac18::/64 on the TUN, receive the mesh roster, and attempt direct links to other spokes (packets prefer direct; otherwise via hub). Equivalent to `tun up --foreground --role spoke --to <hub>`."
+msgstr "`tun serve` ハブへダイヤルし、TUN に 172.24.0.0/16 と fd24:ac18::/64 を入れ、ロスターを受け取り、他 spoke への直通を試します（直通優先、なければハブ経由）。`tun up --foreground --role spoke --to <hub>` と同等。"
+
+msgid "`--identity-passphrase` is visible in `ps` and shell history; prefer LINK_P2P_PASSPHRASE"
+msgstr "`--identity-passphrase` は `ps` やシェル履歴に残ります。LINK_P2P_PASSPHRASE を推奨します"

@@ -49,20 +49,29 @@ other spokes cannot learn your VIP↔id to dial you directly.
 
 ## Virtual IP allocation
 
-Default VIP = deterministic function of `EndpointId`; **actual bound address
-exchanged at handshake** (supports `--tun-ip` overrides). **IPv4 only**
-(`172.24.0.0/16`).
+Default VIPs = deterministic functions of `EndpointId`; **actual bound addresses
+are exchanged at handshake** (supports `--tun-ip` / `--tun-ip6` overrides). Dual-stack:
+
+| Family | Prefix | Host derivation |
+|---|---|---|
+| IPv4 | `172.24.0.0/16` | blake3(ep) low 16 bits |
+| IPv6 | `fd24:ac18::/64` (ULA) | blake3(ep) next 64 bits |
+
+ALPN `link-p2p/tun/3` exchanges both; roster magic is `LPR3` (52-byte entries).
+Older `tun/2` peers are not compatible.
 
 ```
-vip(ep) = 172.24.0.0/16 | (blake3(ep) low 16 bits as host)
+vip4(ep) = 172.24.0.0/16 | (blake3(ep) low 16 bits as host)
+vip6(ep) = fd24:ac18::/64 | (blake3(ep) mid bits as interface id)
 ```
 
 | Rule | Rationale |
 |---|---|
 | Avoid `100.64.0.0/10` | Tailscale netfilter drops non-`tailscale0` 100.64/10 sources |
-| Spoke installs `/16`; hub installs `/32` per peer | Full mesh reachability from spokes |
-| Collision check at startup | Refuse if VIP conflicts with a local interface |
-| `--tun-ip` | Override derived address |
+| Spoke installs v4 `/16` + v6 `/64`; hub installs `/32` and `/128` per peer | Full mesh reachability from spokes |
+| Auto-pick on collision | If `--tun-ip` / `--tun-ip6` omitted, walk salted derives until free |
+| Manual override collision | Only `--tun-ip` / `--tun-ip6` fail hard with a short CLI error |
+| `--tun-ip` / `--tun-ip6` | Override derived addresses |
 
 ---
 
@@ -78,8 +87,10 @@ Final MTU = `min(--mtu, max_datagram_size())`. Default cap **1280**.
 
 ### Transport layer
 
-- Inner IP rides QUIC **datagrams** (unreliable).
-- Roster uses reliable control stream (`LPR2` frames).
+- Outer transport is **QUIC** (iroh). Inner IP rides QUIC **datagrams**
+  (unreliable, no stream flow-control window). Apps may still run **TCP or UDP
+  inside** the tunnel; that is not “TUN implemented over TCP”.
+- Roster uses a reliable control stream (`LPR3` frames).
 - Stream-mode `LPF1` hello belongs to `link-p2p/tcp-forward/1` — not used in TUN ALPN.
 
 ---
@@ -89,8 +100,8 @@ Final MTU = `min(--mtu, max_datagram_size())`. Default cap **1280**.
 ### Foreground (debug / systemd)
 
 ```bash
-link-p2p tun serve  [--tun-ip <addr>] [--mtu <mtu>] [--allow <id>]…
-link-p2p tun connect --to <EndpointId> [--allow <id>]…
+link-p2p tun serve  [--tun-ip <addr>] [--tun-ip6 <addr>] [--mtu <mtu>] [--allow <id>]…
+link-p2p tun connect --to <EndpointId> [--tun-ip <addr>] [--tun-ip6 <addr>] …
 ```
 
 Keep these forever as **foreground debug mode** (blocking, logs on stderr).
@@ -135,13 +146,24 @@ Selected **only** via `--system` on CLI — not euid heuristics, not env vars.
 | Lock | `tun.lock` | same runtime dir |
 | Pid file | `tun.pid` | **none** |
 | Log | `tun.log` (not rotated) | **none** (journald / plist) |
+
+After `tun up` (ad-hoc), the CLI prints the log path. For the system service:
+
+```bash
+systemctl status link-p2p-tun.service
+journalctl -u link-p2p-tun.service -f
+```
+
+Startup failures also surface a short error on the CLI (plus a pointer to the log /
+journal).
+
 | Session | pid + Status | **memory only**, still in Status |
 | Identity | default config dir | **`--identity` required** (Unix: `/etc/link-p2p/identity.key`; Windows: `%ProgramData%\link-p2p\identity.key`) |
 
 Path helpers are pure (no IO). `tun up --system` requires `--foreground`.
 Service example: `link-p2p tun up --foreground --role hub --system --identity /etc/link-p2p/identity.key`.
 
-**Protocol:** `LPC1` + version + JSON (`tun_ctl.rs`); separate from roster `LPR2`.
+**Protocol:** `LPC1` + version + JSON (`tun_ctl.rs`); separate from roster `LPR3`.
 
 **Ad-hoc lifecycle:** ready handshake exit codes 2/3/4; probe authoritative;
 flock on `tun.lock`; stale socket unlink; `tun down` idempotent.

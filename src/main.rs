@@ -17,6 +17,13 @@
 //! fails to compile, check `cargo doc -p iroh --open` before assuming the
 //! overall approach is wrong.
 
+// Unsafe is confined to audited Windows FFI modules (`win_*.rs` with
+// `#![allow(unsafe_code)]`). Use `deny` (not `forbid`): crate-level `forbid`
+// cannot be overridden by a module `allow`, so the Windows FFI would not
+// compile. `deny` + scoped `allow` still fails the build if someone adds
+// `unsafe` outside those modules — on every target, including Windows.
+#![deny(unsafe_code)]
+
 mod call;
 mod cli;
 mod commands;
@@ -68,7 +75,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, FromArgMatches};
 use iroh::SecretKey;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::cli::{
     localized_command, Cli, Command, ConfigCommand, ConnectMode, ContactCommand, LogFormat,
@@ -320,14 +327,25 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
 
     // Passphrase for the identity file: --identity-passphrase wins over
     // LINK_P2P_PASSPHRASE (the env var avoids the passphrase showing up in
-    // `ps`/shell history). Empty values are treated as unset.
-    let passphrase = cli
+    // `ps`/shell history). Empty values are treated as unset. Held in
+    // Zeroizing so Drop clears the heap bytes (best-effort; swap may still
+    // have seen them).
+    let from_cli_flag = cli.identity_passphrase.is_some();
+    let passphrase: Option<zeroize::Zeroizing<String>> = cli
         .identity_passphrase
-        .or_else(|| std::env::var("LINK_P2P_PASSPHRASE").ok())
+        .or_else(|| std::env::var("LINK_P2P_PASSPHRASE").ok().map(zeroize::Zeroizing::new))
         .filter(|p| !p.is_empty());
     if let Some(p) = &passphrase {
         validate_passphrase(p)?;
         info!("{}", tr!("using a passphrase-protected identity key file"));
+        if from_cli_flag {
+            warn!(
+                "{}",
+                tr!(
+                    "`--identity-passphrase` is visible in `ps` and shell history; prefer LINK_P2P_PASSPHRASE"
+                )
+            );
+        }
     }
     // --ephemeral: an in-memory identity, nothing touches the filesystem.
     let identity_from_cli = cli.identity.is_some();
@@ -338,7 +356,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
         SecretKey::generate()
     } else {
         let identity = resolve_identity_path(cli.identity)?;
-        load_or_create_secret_key(&identity, passphrase.as_deref())
+        load_or_create_secret_key(&identity, passphrase.as_deref().map(|s| s.as_str()))
             .context(tr!("loading/creating persistent identity"))?
     };
 
@@ -460,6 +478,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                     foreground,
                     system,
                     tun_ip,
+                    tun_ip6,
                     mtu,
                     allow,
                     to_addr,
@@ -471,6 +490,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                     system,
                     windows_service: false,
                     tun_ip,
+                    tun_ip6,
                     mtu,
                     allow,
                     to_addr,
@@ -497,6 +517,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                     system,
                     windows_service: _,
                     tun_ip,
+                    tun_ip6,
                     mtu,
                     allow,
                     to_addr,
@@ -540,6 +561,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                                     role,
                                     to: spoke_to,
                                     tun_ip,
+                                    tun_ip6,
                                     mtu,
                                     allow,
                                     to_addr,
@@ -556,68 +578,34 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                             )
                             .await
                         } else {
-                            match role.as_str() {
-                                "hub" => {
-                                    tun::run_tun_serve(
-                                        secret_key,
-                                        tun_ip,
-                                        mtu,
-                                        &cli.relay,
-                                        cli.relay_only,
-                                        cli.no_n0_relays,
-                                        Duration::from_secs(cli.keepalive),
-                                        Duration::from_secs(cli.idle_timeout),
-                                        tune,
-                                        allow,
-                                        ui,
-                                        styler,
-                                        None,
-                                    )
-                                    .await
-                                }
-                                "spoke" => {
-                                    let to = resolve_peer_to(to, false)?;
-                                    tun::run_tun_connect(
-                                        secret_key,
-                                        &to,
-                                        tun_ip,
-                                        mtu,
-                                        &cli.relay,
-                                        cli.relay_only,
-                                        cli.no_n0_relays,
-                                        to_addr,
-                                        Duration::from_secs(cli.keepalive),
-                                        Duration::from_secs(cli.idle_timeout),
-                                        tune,
-                                        allow,
-                                        ui,
-                                        styler,
-                                        None,
-                                    )
-                                    .await
-                                }
-                                "phone" => {
-                                    let hooks_state = tun::TunLiveState::new("phone", "fg");
-                                    let (hooks, _ready) = tun::TunHooks::new(hooks_state);
-                                    tun::run_tun_phone(
-                                        secret_key,
-                                        tun_ip,
-                                        mtu,
-                                        &cli.relay,
-                                        cli.relay_only,
-                                        cli.no_n0_relays,
-                                        Duration::from_secs(cli.keepalive),
-                                        Duration::from_secs(cli.idle_timeout),
-                                        tune,
-                                        allow,
-                                        ui,
-                                        styler,
-                                        std::sync::Arc::new(hooks),
-                                    )
-                                    .await
-                                }
-                                _ => unreachable!("resolve_up_role only returns hub|spoke|phone"),
-                            }
+                            let spoke_to = if role == "spoke" {
+                                Some(resolve_peer_to(to, false)?)
+                            } else {
+                                None
+                            };
+                            // Same opts struct as `--system`: `tun serve` /
+                            // `tun connect` aliases also call `run_adhoc_foreground`.
+                            tun_daemon::run_adhoc_foreground(
+                                tun_daemon::SupervisedUpOpts {
+                                    role,
+                                    to: spoke_to,
+                                    tun_ip,
+                                    tun_ip6,
+                                    mtu,
+                                    allow,
+                                    to_addr,
+                                    secret_key,
+                                    relays: cli.relay.clone(),
+                                    relay_only: cli.relay_only,
+                                    no_n0_relays: cli.no_n0_relays,
+                                    keepalive: Duration::from_secs(cli.keepalive),
+                                    idle_timeout: Duration::from_secs(cli.idle_timeout),
+                                    tune,
+                                },
+                                ui,
+                                styler,
+                            )
+                            .await
                         }
                     } else {
                         let allow_str: Vec<String> = allow
@@ -630,6 +618,7 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                             to.as_deref(),
                             mtu,
                             tun_ip,
+                            tun_ip6,
                             &allow_str,
                             hidden,
                             &styler,
@@ -694,58 +683,70 @@ async fn real_main(color_mode: ColorMode) -> Result<()> {
                 }
                 TunCommand::Serve {
                     tun_ip,
+                    tun_ip6,
                     mtu,
                     allow,
                 } => {
+                    // Alias of `tun up --foreground --role hub`.
                     tun::validate_mtu(mtu)?;
                     let allow = parse_tun_allow(allow)?;
-                    tun::run_tun_serve(
-                        secret_key,
-                        tun_ip,
-                        mtu,
-                        &cli.relay,
-                        cli.relay_only,
-                        cli.no_n0_relays,
-                        Duration::from_secs(cli.keepalive),
-                        Duration::from_secs(cli.idle_timeout),
-                        tune,
-                        allow,
+                    tun_daemon::run_adhoc_foreground(
+                        tun_daemon::SupervisedUpOpts {
+                            role: "hub".into(),
+                            to: None,
+                            tun_ip,
+                            tun_ip6,
+                            mtu,
+                            allow,
+                            to_addr: Vec::new(),
+                            secret_key,
+                            relays: cli.relay.clone(),
+                            relay_only: cli.relay_only,
+                            no_n0_relays: cli.no_n0_relays,
+                            keepalive: Duration::from_secs(cli.keepalive),
+                            idle_timeout: Duration::from_secs(cli.idle_timeout),
+                            tune,
+                        },
                         ui,
                         styler,
-                        None,
                     )
                     .await
                 }
                 TunCommand::Connect {
                     to,
                     tun_ip,
+                    tun_ip6,
                     mtu,
                     to_addr,
                     allow,
                     hidden,
                 } => {
+                    // Alias of `tun up --foreground --role spoke --to …`.
                     tun::validate_mtu(mtu)?;
                     let to = resolve_peer_to(to, false)?;
                     let allow = parse_tun_allow(allow)?;
                     if hidden {
                         std::env::set_var("LINK_P2P_TUN_HIDDEN", "1");
                     }
-                    tun::run_tun_connect(
-                        secret_key,
-                        &to,
-                        tun_ip,
-                        mtu,
-                        &cli.relay,
-                        cli.relay_only,
-                        cli.no_n0_relays,
-                        to_addr,
-                        Duration::from_secs(cli.keepalive),
-                        Duration::from_secs(cli.idle_timeout),
-                        tune,
-                        allow,
+                    tun_daemon::run_adhoc_foreground(
+                        tun_daemon::SupervisedUpOpts {
+                            role: "spoke".into(),
+                            to: Some(to),
+                            tun_ip,
+                            tun_ip6,
+                            mtu,
+                            allow,
+                            to_addr,
+                            secret_key,
+                            relays: cli.relay.clone(),
+                            relay_only: cli.relay_only,
+                            no_n0_relays: cli.no_n0_relays,
+                            keepalive: Duration::from_secs(cli.keepalive),
+                            idle_timeout: Duration::from_secs(cli.idle_timeout),
+                            tune,
+                        },
                         ui,
                         styler,
-                        None,
                     )
                     .await
                 }

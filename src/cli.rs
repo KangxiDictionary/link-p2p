@@ -8,11 +8,16 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
+use zeroize::Zeroizing;
 
 use crate::helptext;
 use crate::i18n::{self, tr};
 use crate::style::ColorMode;
 use crate::tun_service;
+
+fn parse_passphrase(s: &str) -> Result<Zeroizing<String>, std::convert::Infallible> {
+    Ok(Zeroizing::new(s.to_owned()))
+}
 
 #[derive(Parser)]
 #[command(
@@ -49,8 +54,15 @@ pub(crate) struct Cli {
     /// LINK_P2P_PASSPHRASE environment variable over passing it inline — the
     /// flag value is visible in `ps` and shell history. Conflicts with
     /// --ephemeral.
-    #[arg(long, global = true, conflicts_with = "ephemeral")]
-    pub(crate) identity_passphrase: Option<String>,
+    ///
+    /// Stored in [`Zeroizing`] so Drop clears the heap bytes (best-effort).
+    #[arg(
+        long,
+        global = true,
+        conflicts_with = "ephemeral",
+        value_parser = parse_passphrase
+    )]
+    pub(crate) identity_passphrase: Option<Zeroizing<String>>,
 
     /// Custom relay URL(s), repeatable. Replaces n0's default map when set
     /// (skips n0 DNS/pkarr). Pass several for failover, e.g. a self-hosted
@@ -240,11 +252,12 @@ pub(crate) enum Command {
     /// Make two machines reachable at the IP layer over QUIC datagrams.
     ///
     /// Creates a TUN interface (needs root / CAP_NET_ADMIN, or Administrator
-    /// and wintun.dll on Windows) and routes `172.24.0.0/16` through it.
+    /// and wintun.dll on Windows) and routes `172.24.0.0/16` plus
+    /// `fd24:ac18::/64` through it.
     /// Unlike `serve`/`connect`, which forward one TCP port, this bridges the
     /// whole machine: TCP, UDP and ICMP on mesh virtual IPs, with no per-port
-    /// setup. Hub coordinates the roster; spokes prefer direct links — see
-    /// docs/subsystems/tun.md.
+    /// setup. Outer transport is QUIC datagrams. Hub coordinates the roster;
+    /// spokes prefer direct links — see docs/subsystems/tun.md.
     Tun {
         #[command(subcommand)]
         command: TunCommand,
@@ -361,9 +374,13 @@ pub(crate) enum TunCommand {
         #[arg(long, hide = true)]
         windows_service: bool,
         /// Override this node's virtual IP (default: derived from its
-        /// EndpointId, inside 172.24.0.0/16).
+        /// EndpointId, inside 172.24.0.0/16). Omit to auto-pick a free address.
         #[arg(long)]
         tun_ip: Option<Ipv4Addr>,
+        /// Override this node's IPv6 VIP (default: derived in fd24:ac18::/64).
+        /// Omit to auto-pick a free address.
+        #[arg(long)]
+        tun_ip6: Option<std::net::Ipv6Addr>,
         /// Upper bound for the TUN interface MTU (default 1280). The final
         /// MTU is min(this, the negotiated QUIC datagram max); values above
         /// 1280 are refused.
@@ -391,6 +408,8 @@ pub(crate) enum TunCommand {
         system: bool,
         #[arg(long)]
         tun_ip: Option<Ipv4Addr>,
+        #[arg(long)]
+        tun_ip6: Option<std::net::Ipv6Addr>,
         #[arg(long, default_value_t = 1280)]
         mtu: u16,
         #[arg(long)]
@@ -456,6 +475,8 @@ pub(crate) enum TunCommand {
         /// EndpointId, inside 172.24.0.0/16).
         #[arg(long)]
         tun_ip: Option<Ipv4Addr>,
+        #[arg(long)]
+        tun_ip6: Option<std::net::Ipv6Addr>,
         /// Upper bound for the TUN interface MTU (default 1280). The final
         /// MTU is min(this, the negotiated QUIC datagram max); values above
         /// 1280 are refused.
@@ -477,6 +498,8 @@ pub(crate) enum TunCommand {
         /// EndpointId, inside 172.24.0.0/16).
         #[arg(long)]
         tun_ip: Option<Ipv4Addr>,
+        #[arg(long)]
+        tun_ip6: Option<std::net::Ipv6Addr>,
         /// Upper bound for the TUN interface MTU (default 1280). The final
         /// MTU is min(this, the negotiated QUIC datagram max); values above
         /// 1280 are refused.
@@ -748,7 +771,7 @@ pub(crate) fn localized_command() -> clap::Command {
                 .arg(help_arg())
                 .about(tr!("Make machines reachable at the IP layer over QUIC datagrams (mesh with hub coordination)."))
                 .long_about(helptext::hard_wrap_help(&tr!(
-                    "Make machines reachable at the IP layer over QUIC datagrams.\n\nCreates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). Preferred day-to-day commands: `tun call` (1:1 phone), `tun join <hub>` (mesh channel), `tun status` / `tun peers` / `tun down`. Also `tun up --role phone|hub|spoke`. Foreground aliases: `tun serve` / `tun connect`. Prefer `--cc bbr3` on lossy paths. Virtual IPs are IPv4 only — see docs/subsystems/tun.md."
+                    "Make machines reachable at the IP layer over QUIC datagrams.\n\nCreates a TUN interface (needs root / CAP_NET_ADMIN on Linux and macOS, or Administrator + wintun.dll on Windows). Preferred day-to-day commands: `tun call` (1:1 phone), `tun join <hub>` (mesh channel), `tun status` / `tun peers` / `tun down`. Also `tun up --role phone|hub|spoke`. Foreground aliases: `tun serve` / `tun connect`. Prefer `--cc bbr3` on lossy paths. Dual-stack VIPs: 172.24.0.0/16 and fd24:ac18::/64 (omit --tun-ip/--tun-ip6 to auto-pick on collision) — see docs/subsystems/tun.md."
                 )))
                 .mut_subcommand("up", |ss| {
                     ss.disable_help_flag(true)
@@ -775,7 +798,11 @@ pub(crate) fn localized_command() -> clap::Command {
                         )
                         .mut_arg(
                             "tun_ip",
-                            |a| helptext::set_help(a, &tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16).")),
+                            |a| helptext::set_help(a, &tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16). Omit to auto-pick a free address.")),
+                        )
+                        .mut_arg(
+                            "tun_ip6",
+                            |a| helptext::set_help(a, &tr!("Override this node's IPv6 VIP (default: derived in fd24:ac18::/64). Omit to auto-pick a free address.")),
                         )
                         .mut_arg(
                             "mtu",
@@ -806,6 +833,14 @@ pub(crate) fn localized_command() -> clap::Command {
                         .mut_arg(
                             "foreground",
                             |a| helptext::set_help(a, &tr!("Run in the foreground instead of daemonizing.")),
+                        )
+                        .mut_arg(
+                            "tun_ip",
+                            |a| helptext::set_help(a, &tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16). Omit to auto-pick a free address.")),
+                        )
+                        .mut_arg(
+                            "tun_ip6",
+                            |a| helptext::set_help(a, &tr!("Override this node's IPv6 VIP (default: derived in fd24:ac18::/64). Omit to auto-pick a free address.")),
                         )
                         .mut_arg(
                             "system",
@@ -900,7 +935,11 @@ pub(crate) fn localized_command() -> clap::Command {
                         )))
                         .mut_arg(
                             "tun_ip",
-                            |a| helptext::set_help(a, &tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16).")),
+                            |a| helptext::set_help(a, &tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16). Omit to auto-pick a free address.")),
+                        )
+                        .mut_arg(
+                            "tun_ip6",
+                            |a| helptext::set_help(a, &tr!("Override this node's IPv6 VIP (default: derived in fd24:ac18::/64). Omit to auto-pick a free address.")),
                         )
                         .mut_arg(
                             "mtu",
@@ -916,7 +955,7 @@ pub(crate) fn localized_command() -> clap::Command {
                         .arg(help_arg())
                         .about(tr!("Dial a hub, join the mesh, and try direct peer links (foreground)."))
                         .long_about(helptext::hard_wrap_help(&tr!(
-                            "Dial a `tun serve` hub, install 172.24.0.0/16 on the TUN, receive the mesh roster, and attempt direct links to other spokes (packets prefer direct; otherwise via hub). Equivalent to `tun up --foreground --role spoke --to <hub>`."
+                            "Dial a `tun serve` hub, install 172.24.0.0/16 and fd24:ac18::/64 on the TUN, receive the mesh roster, and attempt direct links to other spokes (packets prefer direct; otherwise via hub). Equivalent to `tun up --foreground --role spoke --to <hub>`."
                         )))
                         .mut_arg(
                             "to",
@@ -924,7 +963,11 @@ pub(crate) fn localized_command() -> clap::Command {
                         )
                         .mut_arg(
                             "tun_ip",
-                            |a| helptext::set_help(a, &tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16).")),
+                            |a| helptext::set_help(a, &tr!("Override this node's virtual IP (default: derived from its EndpointId, inside 172.24.0.0/16). Omit to auto-pick a free address.")),
+                        )
+                        .mut_arg(
+                            "tun_ip6",
+                            |a| helptext::set_help(a, &tr!("Override this node's IPv6 VIP (default: derived in fd24:ac18::/64). Omit to auto-pick a free address.")),
                         )
                         .mut_arg(
                             "mtu",

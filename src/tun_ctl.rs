@@ -26,7 +26,7 @@
 //! service account's `$HOME/.config/link-p2p/identity.key`.
 
 use std::fmt;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
@@ -249,9 +249,16 @@ pub const CTL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_mill
 pub const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// One peer as exported to control-plane clients (JSON-friendly).
+fn default_vip6() -> Ipv6Addr {
+    Ipv6Addr::UNSPECIFIED
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CtlPeer {
     pub vip: Ipv4Addr,
+    /// IPv6 VIP in `fd24:ac18::/64` (absent/unspecified on older ctl peers).
+    #[serde(default = "default_vip6")]
+    pub vip6: Ipv6Addr,
     /// EndpointId as hex string (same display form as CLI elsewhere).
     pub id: String,
 }
@@ -260,6 +267,7 @@ impl From<&RosterEntry> for CtlPeer {
     fn from(e: &RosterEntry) -> Self {
         Self {
             vip: e.vip,
+            vip6: e.vip6,
             id: e.id.to_string(),
         }
     }
@@ -304,6 +312,9 @@ pub enum CtlResponse {
         role: String,
         uptime_secs: u64,
         vip: Ipv4Addr,
+        /// IPv6 VIP; default unspecified for older daemons.
+        #[serde(default = "default_vip6")]
+        vip6: Ipv6Addr,
         path_kind: String,
         /// Random session token for this daemon instance — confirms the
         /// control socket belongs to the expected process (guards stale socket
@@ -689,6 +700,7 @@ mod tests {
         let sk = SecretKey::generate();
         let peers = vec![CtlPeer {
             vip: Ipv4Addr::new(172, 24, 0, 1),
+            vip6: "fd24:ac18::1".parse().unwrap(),
             id: sk.public().to_string(),
         }];
         let resps = [
@@ -696,6 +708,7 @@ mod tests {
                 role: "hub".into(),
                 uptime_secs: 42,
                 vip: Ipv4Addr::new(172, 24, 0, 1),
+                vip6: "fd24:ac18::1".parse().unwrap(),
                 path_kind: "direct".into(),
                 session: "abc".into(),
                 pending_calls: vec![],
@@ -780,6 +793,7 @@ mod tests {
         let peers: Vec<CtlPeer> = (0..CTL_MAX_PEERS + 1)
             .map(|i| CtlPeer {
                 vip: Ipv4Addr::new(10, 0, (i / 256) as u8, (i % 256) as u8),
+                vip6: Ipv6Addr::UNSPECIFIED,
                 id: format!("{i:064x}"),
             })
             .collect();
@@ -824,6 +838,7 @@ mod tests {
         let sk = SecretKey::generate();
         let e = RosterEntry {
             vip: Ipv4Addr::new(172, 24, 9, 9),
+            vip6: "fd24:ac18::99".parse().unwrap(),
             id: sk.public(),
         };
         let p = CtlPeer::from(&e);

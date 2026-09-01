@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **TUN dual-stack VIPs**: each node gets IPv4 in `172.24.0.0/16` and IPv6 ULA
+  in `fd24:ac18::/64` (`--tun-ip` / `--tun-ip6`; omit either to auto-pick on
+  collision). **Breaking:** ALPN `link-p2p/tun/2` → `tun/3`, roster magic
+  `LPR3` (52-byte entries with `vip` + `vip6`). Upgrade both sides together.
+- **`tun call` / `tun join` / phone mode**: day-to-day TUN UX via the local
+  daemon (`tun ring`, accept/reject); `tun serve` / `tun connect` remain
+  foreground debug aliases of `tun up --foreground --role …`.
+- **Windows TUN system service**: SCM + named-pipe control, Event Log, firewall
+  rule on install (verify on real Windows).
+
+### Fixed
+
+- **SSRF** (`serve --proxy`): also block RFC 3068 6to4 relay anycast
+  `192.88.99.0/24`.
+- **`--identity-passphrase`**: warn that the flag is visible in `ps` / shell
+  history; prefer `LINK_P2P_PASSPHRASE`.
+
+### Changed
+
+- Identity passphrase is held in `zeroize::Zeroizing` from CLI/env through
+  load (best-effort wipe on Drop). Derived keys were already zeroized.
+- Proxy dial path uses a `CheckedTarget` newtype so SSRF check and connect
+  cannot diverge via a second DNS resolve.
+
 ## [0.3.0] - 2026-08-31
 
 ### Fixed

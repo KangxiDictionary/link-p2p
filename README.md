@@ -5,8 +5,8 @@ TCP-over-QUIC port forwarder and optional whole-machine IP mesh, built on
 
 | Mode | What you get | Privilege |
 |---|---|---|
-| `serve` / `connect` | Forward one TCP port, or SOCKS5 proxy | none |
-| `tun serve` / `tun connect` | Virtual IP mesh (`172.24.0.0/16`), spoke↔spoke direct + hub fallback | root / `CAP_NET_ADMIN`, or Admin + `wintun.dll` on Windows |
+| `call` (or `serve` / `connect`) | Forward one TCP port, or SOCKS5 proxy | none |
+| `tun join` / `tun call` | Dual-stack VIP mesh (`172.24.0.0/16` + `fd24:ac18::/64`) | root / `CAP_NET_ADMIN`, or Admin + `wintun.dll` on Windows |
 
 Works across NAT via iroh relays; upgrades to a direct path when hole-punch
 succeeds. Prebuilt Linux binary: [GitHub Releases](https://github.com/KangxiDictionary/link-p2p/releases).
@@ -38,26 +38,27 @@ Without `locales/` beside the binary (or `LINK_P2P_LOCALEDIR`), UI falls back to
 
 ## Quick start
 
-**Port forward** (e.g. SSH):
+**Port forward** (same command on both peers — EndpointId tie-break picks who
+dials). Each side prints `SHORT_CODE=` / `ENDPOINT_ID=` at start:
 
 ```bash
-# machine A
-link-p2p serve --forward 127.0.0.1:22
-# copy the printed EndpointId
-
-# machine B
-link-p2p connect --to <EndpointId> --listen 127.0.0.1:2222
-ssh -p 2222 localhost
+# both machines (example: forward local SSH)
+link-p2p call --to <peer SHORT_CODE or EndpointId> \
+  --listen 127.0.0.1:2222 --forward 127.0.0.1:22
+# save the peer once:
+link-p2p contact add alice <their SHORT_CODE>
+# forever after:
+link-p2p call --to alice --listen 127.0.0.1:2222 --forward 127.0.0.1:22
 ```
 
 **Whole-machine mesh** (TUN):
 
 ```bash
-# hub
-sudo link-p2p tun serve
+# 1:1 "phone"
+sudo link-p2p tun call <contact-or-id>
 
-# spokes
-sudo link-p2p tun connect --to <hub EndpointId>
+# Join a hub "channel"
+sudo link-p2p tun join <hub EndpointId>
 ping 172.24.x.y
 ```
 
@@ -68,8 +69,22 @@ link-p2p serve --proxy
 link-p2p connect --socks5-listen 127.0.0.1:1080 --to <EndpointId>
 ```
 
+### Explicit roles (optional)
+
+When you want fixed hub/spoke or serve/connect roles instead of symmetric
+`call` / `tun join`:
+
+```bash
+link-p2p serve --forward 127.0.0.1:22
+link-p2p connect --to <EndpointId> --listen 127.0.0.1:2222
+
+sudo link-p2p tun serve                          # = tun up --foreground --role hub
+sudo link-p2p tun connect --to <hub EndpointId>  # = tun up --foreground --role spoke
+```
+
 Breaking note: stream ALPN is `link-p2p/tcp-forward/1` — **upgrade both sides
-together**. Details and more recipes: [usage guide](docs/user-guide/usage.md).
+together**. TUN mesh ALPN is `link-p2p/tun/3`. Details and more recipes:
+[usage guide](docs/user-guide/usage.md).
 
 ---
 

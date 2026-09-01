@@ -13,10 +13,10 @@ below are largely **measure and integrate**, not greenfield protocol design.
 
 | capability | status |
 |---|---|
-| Stream mode: TCP-over-QUIC (`serve --forward` / `connect --listen`); ALPN `link-p2p/tcp-forward/1` + `LPF1` hello | done |
+| Stream mode: TCP-over-QUIC (`call`, or `serve --forward` / `connect --listen`); ALPN `link-p2p/tcp-forward/1` + `LPF1` hello | done |
 | SOCKS5 proxy (`serve --proxy` / `connect --socks5-listen`) | done |
-| TUN: hub VIP mesh (`link-p2p/tun/2`, spoke direct + hub fallback; `--allow`); Linux/macOS/Windows | done (macOS/Windows best-effort) |
-| TUN daemon (`tun up/down/status/peers`) | **done** (ad-hoc Unix; `--system` paths Step 0) |
+| TUN: hub VIP mesh (`link-p2p/tun/3`, dual-stack `172.24/16` + `fd24:ac18::/64`, spoke direct + hub fallback; `--allow`); Linux/macOS/Windows | done (macOS/Windows best-effort) |
+| TUN daemon (`tun up/down/status/peers`, `tun join` / `tun call`) | **done** (ad-hoc Unix; `--system` paths Step 0) |
 | Persistent identity, self-hosted relay, multi-relay failover, `--relay-only` | done |
 | `call` + contacts / short codes, `config.toml` | done |
 | i18n, shell completions, benchmark/test scripts | done |
@@ -36,7 +36,7 @@ Full TUN design: [subsystems/tun.md](subsystems/tun.md).
 | **3 — Local ACL** | TOML policy: peer → allowed ports/CIDRs, default-deny | 1–2 weeks |
 | **4 — Coordination server (optional)** | Headscale-style roster, revocation, OIDC — stretch goal | open-ended |
 | **5 — Platform breadth** | macOS/Windows TUN polish, mobile, packaging — community-driven | ongoing |
-| **6 — Edge cases** | IPv6, MTU black-holes, TLS-intercepting proxies, satellite paths | ongoing |
+| **6 — Edge cases** | MTU black-holes, TLS-intercepting proxies, satellite paths | ongoing |
 
 Hard protocol choices (discovery model, ACL format) should settle before wide
 release. Platform backends and edge cases can land incrementally via issues/PRs.
@@ -167,7 +167,7 @@ Service `ExecStart` must use `tun up --foreground --role … --system --identity
 | area | current | needed |
 |---|---|---|
 | UDP-blocked networks | assumed open | QUIC-over-TCP / DERP-style fallback |
-| IPv6 | VIP v4 only | dual-stack VIP scheme |
+| IPv6 VIP mesh | **done** (dual-stack `172.24.0.0/16` + ULA `fd24:ac18::/64`, ALPN `tun/3`) | broader IPv6 *path* testing (relay/NAT) |
 | MTU black-holes | QUIC PMTUD + app refresh | extra app-layer PMTUD where needed |
 | TLS-intercepting proxies | untested | pin/trust model |
 | High-loss paths | untested | transport parameter tuning |
