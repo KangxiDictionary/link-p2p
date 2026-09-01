@@ -66,10 +66,10 @@ fslock = "0.2"
 # Lock-free snapshot swaps for TUN peer tables (read on every packet).
 arc-swap = "1"
 
-# Unix: setsid in the TUN daemon worker (detach from controlling terminal);
-# safe umask around control-socket bind (never born with broad perms).
+# Unix: passwd lookup for service install (`User::from_name`); process/fs
+# syscalls go through rustix (smaller tree, already required for umask).
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", default-features = false, features = ["process", "signal", "user", "fs"] }
+nix = { version = "0.29", default-features = false, features = ["user"] }
 rustix = { version = "1", features = ["fs", "process"] }
 
 [target.'cfg(windows)'.dependencies]

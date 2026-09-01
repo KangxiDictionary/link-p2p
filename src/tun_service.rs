@@ -259,7 +259,7 @@ fn plist_path() -> PathBuf {
 fn require_elevated() -> Result<()> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        if !nix::unistd::geteuid().is_root() {
+        if !rustix::process::geteuid().is_root() {
             bail!(exit::coded(
                 exit::USAGE,
                 anyhow::anyhow!(tr!(
@@ -369,23 +369,23 @@ fn secure_identity_for_service(path: &Path, service_user: &str) -> Result<()> {
     })?;
     #[cfg(target_os = "macos")]
     {
-        nix::unistd::chown(
+        rustix::fs::chown(
             path,
-            Some(nix::unistd::Uid::from_raw(0)),
-            Some(nix::unistd::Gid::from_raw(0)),
+            Some(rustix::fs::Uid::ROOT),
+            Some(rustix::fs::Gid::ROOT),
         )
         .with_context(|| tr_fmt!("chown identity {0}", path.display().to_string()))?;
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let uid = 0_u32;
+        let uid = rustix::fs::Uid::ROOT;
         let gid = nix::unistd::User::from_name(service_user)
             .context(tr!("looking up service user"))?
-            .map(|u| u.gid)
+            .map(|u| rustix::fs::Gid::from_raw(u.gid.as_raw()))
             .ok_or_else(|| anyhow::anyhow!(tr_fmt!("system user {0} not found", service_user)))?;
-        nix::unistd::chown(path, Some(nix::unistd::Uid::from_raw(uid)), Some(gid)).with_context(
-            || tr_fmt!("chown identity {0}", path.display().to_string()),
-        )?;
+        rustix::fs::chown(path, Some(uid), Some(gid)).with_context(|| {
+            tr_fmt!("chown identity {0}", path.display().to_string())
+        })?;
     }
     Ok(())
 }

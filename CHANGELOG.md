@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connect/ping).
 - TUN recv path reads into a reusable `BytesMut` (no per-packet
   `copy_from_slice`); peer sender tasks get a `tun_peer_sender` tracing span.
+- `TunCommand` dispatch moved to `commands/tun.rs` (pre-identity service/
+  selftest stay in `main`).
+- Unix: prefer `rustix` for kill/setsid/geteuid/chown/umask; `nix` retained
+  only for `User::from_name` (passwd) on service install.
 
 ## [0.3.0] - 2026-08-31
 

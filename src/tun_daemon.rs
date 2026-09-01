@@ -287,10 +287,11 @@ fn now_unix_ms() -> u64 {
 fn process_exists(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        use nix::sys::signal::kill;
-        use nix::unistd::Pid;
-        // `None` = existence check (kill with signal 0).
-        kill(Pid::from_raw(pid as i32), None).is_ok()
+        use rustix::process::{test_kill_process, Pid};
+        // kill(pid, 0): existence + permission check, no signal delivered.
+        Pid::from_raw(pid as i32)
+            .map(|p| test_kill_process(p).is_ok())
+            .unwrap_or(false)
     }
     #[cfg(not(unix))]
     {
@@ -1279,11 +1280,12 @@ pub async fn request_shutdown_mode(mode: RuntimeMode) -> Result<()> {
         if let Ok(rec) = PidRecord::read(&pid_path) {
             #[cfg(unix)]
             {
-                use nix::sys::signal::{kill, Signal};
-                use nix::unistd::Pid;
-                let _ = kill(Pid::from_raw(rec.pid as i32), Signal::SIGTERM);
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                let _ = kill(Pid::from_raw(rec.pid as i32), Signal::SIGKILL);
+                use rustix::process::{kill_process, Pid, Signal};
+                if let Some(p) = Pid::from_raw(rec.pid as i32) {
+                    let _ = kill_process(p, Signal::TERM);
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    let _ = kill_process(p, Signal::KILL);
+                }
             }
             let _ = rec;
         }
@@ -1356,7 +1358,7 @@ async fn run_worker_inner(
 
     #[cfg(unix)]
     if detach {
-        nix::unistd::setsid().context(tr!("setsid for TUN daemon"))?;
+        rustix::process::setsid().context(tr!("setsid for TUN daemon"))?;
     }
 
     let mut lock = try_acquire_lock(mode)?;
@@ -1774,7 +1776,9 @@ fn resolve_ctl_privilege(
 #[cfg(unix)]
 fn peer_is_privileged(stream: &tokio::net::UnixStream) -> bool {
     match stream.peer_cred() {
-        Ok(cred) => cred.uid() == 0 || cred.uid() == nix::unistd::geteuid().as_raw(),
+        Ok(cred) => {
+            cred.uid() == 0 || cred.uid() == rustix::process::geteuid().as_raw()
+        }
         Err(_) => false,
     }
 }
