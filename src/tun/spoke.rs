@@ -99,7 +99,7 @@ async fn spoke_install_direct(
     if peer.v4 == own.v4 || peer.v6 == own.v6 {
         return;
     }
-    let (tx, rx) = mpsc::channel::<Bytes>(256);
+    let (tx, rx) = mpsc::channel::<Bytes>(TUN_PKT_QUEUE);
     spawn_conn_sender(
         tun.clone(),
         tun_name.to_string(),
@@ -612,7 +612,7 @@ async fn run_tun_connect_inner(
                 h.state.set_path_kind(path_label(&conn)).await;
             }
 
-            let (hub_tx, hub_rx) = mpsc::channel::<Bytes>(256);
+            let (hub_tx, hub_rx) = mpsc::channel::<Bytes>(TUN_PKT_QUEUE);
             spawn_conn_sender(
                 tun_io.clone(),
                 tun_name.clone(),

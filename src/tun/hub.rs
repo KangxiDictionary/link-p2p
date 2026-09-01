@@ -477,8 +477,8 @@ async fn hub_run_spoke(
         _ => false,
     };
 
-    let (out_tx, out_rx) = mpsc::channel::<Bytes>(256);
-    let (fan_tx, mut fan_rx) = mpsc::channel::<Bytes>(32);
+    let (out_tx, out_rx) = mpsc::channel::<Bytes>(TUN_PKT_QUEUE);
+    let (fan_tx, mut fan_rx) = mpsc::channel::<Bytes>(TUN_CTRL_QUEUE);
     let out_tx_mesh = out_tx.clone();
     spawn_peer_sender(
         tun.clone(),

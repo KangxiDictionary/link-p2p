@@ -48,6 +48,11 @@ use crate::tun_roster::{
 /// (52-byte entries). Older `tun/2` peers are not compatible.
 pub const TUN_ALPN: &[u8] = b"link-p2p/tun/3";
 
+/// Datagram queue depth for TUN↔peer paths (hot path; drop under overload).
+pub(crate) const TUN_PKT_QUEUE: usize = 256;
+/// Low-traffic control queues (call commands, hub fan-in).
+pub(crate) const TUN_CTRL_QUEUE: usize = 32;
+
 /// 172.24.0.0/16 — a slice of RFC 1918's 172.16.0.0/12 that common tools
 /// (Docker's default bridge 172.17/16, typical home-router DHCP pools) don't
 /// grab by default. Deliberately NOT RFC 6598's 100.64.0.0/10: measured on
@@ -1607,8 +1612,8 @@ pub(crate) fn spawn_tun_io(
     tun: tun2::AsyncDevice,
     user_mtu: u16,
 ) -> (TunIo, mpsc::Receiver<Bytes>) {
-    let (to_tun_tx, mut to_tun_rx) = mpsc::channel::<Bytes>(256);
-    let (from_tun_tx, from_tun_rx) = mpsc::channel::<Bytes>(256);
+    let (to_tun_tx, mut to_tun_rx) = mpsc::channel::<Bytes>(TUN_PKT_QUEUE);
+    let (from_tun_tx, from_tun_rx) = mpsc::channel::<Bytes>(TUN_PKT_QUEUE);
     tokio::spawn(async move {
         let tun = tun;
         let mut buf = vec![0u8; user_mtu as usize + 64];

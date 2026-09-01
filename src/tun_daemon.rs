@@ -42,7 +42,7 @@ use crate::exit;
 use crate::i18n::{tr, tr_fmt};
 use crate::style::Styler;
 use crate::tun_ctl::{
-    self, write_request, write_response, CtlPeer, CtlRequest, CtlResponse,
+    self, write_request, write_response, CtlPeer, CtlRequest, CtlResponse, PrivilegedPeer,
     RuntimeMode, CTL_READ_TIMEOUT, PROBE_CONNECT_TIMEOUT, READY_TIMEOUT,
 };
 
@@ -368,7 +368,7 @@ mod ctl_sock {
         // Tighten the process umask while binding so the socket file is never
         // born with broader permissions than intended (no bind→chmod window
         // where a local peer could sneak in before the chmod lands).
-        let old = rustix::process::umask(rustix::fs::Mode::from_bits(0o177).unwrap());
+        let old = rustix::process::umask(rustix::fs::Mode::from_bits_retain(0o177));
         let bound = UnixListener::bind(path);
         rustix::process::umask(old);
         let listener = bound.with_context(|| {
@@ -1676,11 +1676,14 @@ async fn serve_ctl_until_shutdown(
 }
 
 /// Shared ctl business logic (Unix socket + Windows named pipe call this).
+///
+/// Privileged ops take [`PrivilegedPeer`]: without the token the handler
+/// returns DENIED — there is no `bool` that a future edit can forget to check.
 async fn handle_ctl_request(
     req: CtlRequest,
     hooks: &crate::tun::TunHooks,
     shutdown_tx: &watch::Sender<bool>,
-    allow_privileged: bool,
+    privileged: Option<PrivilegedPeer>,
 ) -> CtlResponse {
     let denied = || CtlResponse::Err {
         code: exit::DENIED,
@@ -1699,9 +1702,9 @@ async fn handle_ctl_request(
             },
         },
         CtlRequest::Accept { peer } => {
-            if !allow_privileged {
+            let Some(_cap) = privileged else {
                 return denied();
-            }
+            };
             match hooks.try_send_call_cmd(crate::tun::CallCmd::Accept { peer }) {
                 Ok(()) => CtlResponse::Ok,
                 Err(e) => CtlResponse::Err {
@@ -1711,9 +1714,9 @@ async fn handle_ctl_request(
             }
         }
         CtlRequest::Reject { peer } => {
-            if !allow_privileged {
+            let Some(_cap) = privileged else {
                 return denied();
-            }
+            };
             match hooks.try_send_call_cmd(crate::tun::CallCmd::Reject { peer }) {
                 Ok(()) => CtlResponse::Ok,
                 Err(e) => CtlResponse::Err {
@@ -1723,9 +1726,9 @@ async fn handle_ctl_request(
             }
         }
         CtlRequest::Shutdown => {
-            if !allow_privileged {
+            let Some(_cap) = privileged else {
                 return denied();
-            }
+            };
             let _ = shutdown_tx.send(true);
             hooks.request_shutdown();
             CtlResponse::Ok
@@ -1748,9 +1751,21 @@ async fn handle_one_connection(
         _ => return, // read timeout or bad frame: drop this connection only
     };
 
-    let allow = !require_privilege || peer_is_privileged(&stream);
-    let resp = handle_ctl_request(req, &hooks, &shutdown_tx, allow).await;
+    let privileged = resolve_ctl_privilege(require_privilege, || peer_is_privileged(&stream));
+    let resp = handle_ctl_request(req, &hooks, &shutdown_tx, privileged).await;
     let _ = timeout(CTL_READ_TIMEOUT, write_response(&mut stream, &resp)).await;
+}
+
+/// Map "must check OS trust?" + "OS says yes?" into an optional capability token.
+fn resolve_ctl_privilege(
+    require_privilege: bool,
+    is_privileged: impl FnOnce() -> bool,
+) -> Option<PrivilegedPeer> {
+    if !require_privilege || is_privileged() {
+        Some(PrivilegedPeer::grant())
+    } else {
+        None
+    }
 }
 
 /// Whether the peer behind `stream` may stop the daemon. Only consulted in
@@ -1818,8 +1833,11 @@ async fn handle_one_connection(
         _ => return,
     };
 
-    let allow = !require_privilege || crate::win_pipe::peer_is_admin(&stream);
-    let resp = handle_ctl_request(req, &hooks, &shutdown_tx, allow).await;
+    // No `.await` between trust check and privileged handling — see
+    // `win_pipe::peer_is_admin` call-site contract.
+    let privileged =
+        resolve_ctl_privilege(require_privilege, || crate::win_pipe::peer_is_admin(&stream));
+    let resp = handle_ctl_request(req, &hooks, &shutdown_tx, privileged).await;
     let _ = timeout(CTL_READ_TIMEOUT, write_response(&mut stream, &resp)).await;
 }
 
@@ -2165,6 +2183,15 @@ mod tests {
                 None => std::env::remove_var("XDG_CONFIG_HOME"),
             }
         }
+    }
+
+    #[test]
+    fn resolve_ctl_privilege_grants_when_not_required_or_trusted() {
+        assert!(resolve_ctl_privilege(false, || false).is_some());
+        assert!(resolve_ctl_privilege(true, || true).is_some());
+        assert!(resolve_ctl_privilege(true, || false).is_none());
+        // Token is opaque; grant() is the only constructor.
+        let _ = PrivilegedPeer::grant();
     }
 
     #[test]

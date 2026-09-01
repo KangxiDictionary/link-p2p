@@ -498,6 +498,24 @@ impl fmt::Display for ProtocolMismatch {
 
 impl std::error::Error for ProtocolMismatch {}
 
+/// Capability token: the ctl peer may run privileged ops (`Shutdown`,
+/// `Accept`, `Reject`). Opaque so handlers cannot invent one — only
+/// [`PrivilegedPeer::grant`] after an OS trust check (or ad-hoc mode, where
+/// privilege is not required).
+#[derive(Debug, Clone, Copy)]
+pub struct PrivilegedPeer {
+    _private: (),
+}
+
+impl PrivilegedPeer {
+    /// Mint a token after the peer passed the platform privilege check, or
+    /// when the daemon is in ad-hoc mode (local socket already restricts who
+    /// can connect).
+    pub(crate) fn grant() -> Self {
+        Self { _private: () }
+    }
+}
+
 /// Decode a full frame already buffered (header + body).
 pub fn decode_request_frame(frame: &[u8]) -> Result<CtlRequest> {
     if frame.len() < 9 {

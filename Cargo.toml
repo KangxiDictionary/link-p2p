@@ -13,7 +13,16 @@ categories = ["network-programming", "command-line-utilities"]
 # Pin to the 1.x line; iroh's API moved a lot before 1.0 landed, so avoid
 # accidentally picking up a pre-1.0 version via a loose "*" requirement.
 iroh = "1"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", default-features = false, features = [
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "io-util",
+  "io-std",
+  "sync",
+  "time",
+  "signal",
+] }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 # Generates shell completion scripts (`link-p2p completions fish`, etc).

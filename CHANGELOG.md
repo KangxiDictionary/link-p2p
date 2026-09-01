@@ -32,6 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   load (best-effort wipe on Drop). Derived keys were already zeroized.
 - Proxy dial path uses a `CheckedTarget` newtype so SSRF check and connect
   cannot diverge via a second DNS resolve.
+- TUN control privileged ops (`Shutdown` / `Accept` / `Reject`) require a
+  `PrivilegedPeer` capability token (no bare `bool`).
+- `tokio` dependency drops `features = ["full"]` for an explicit feature list
+  (`rt-multi-thread`, `net`, `io-util`, `io-std`, `sync`, `time`, `signal`,
+  `macros`).
+- TUN datagram / control mpsc depths are named constants (`TUN_PKT_QUEUE` /
+  `TUN_CTRL_QUEUE`) instead of scattered `256` / `32` literals.
 
 ## [0.3.0] - 2026-08-31
 

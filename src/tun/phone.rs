@@ -101,7 +101,7 @@ pub async fn run_tun_phone(
     styler: Styler,
     hooks: Arc<TunHooks>,
 ) -> Result<()> {
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<CallCmd>(32);
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<CallCmd>(TUN_CTRL_QUEUE);
     hooks.register_call_tx(cmd_tx);
 
     let endpoint = crate::build_endpoint(
@@ -508,7 +508,7 @@ async fn phone_run_peer(
         ));
     }
 
-    let (out_tx, out_rx) = mpsc::channel::<Bytes>(256);
+    let (out_tx, out_rx) = mpsc::channel::<Bytes>(TUN_PKT_QUEUE);
     spawn_peer_sender(
         tun.clone(),
         tun_name.clone(),

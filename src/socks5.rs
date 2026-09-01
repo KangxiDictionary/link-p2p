@@ -6,6 +6,9 @@
 //!   2. A minimal RFC 1928 SOCKS5 *server* handshake (no-auth, CONNECT only)
 //!      that `connect --socks5-listen` speaks to local clients (browsers,
 //!      tun2socks, curl --socks5, etc).
+//!
+//! Peer-input paths (`read_target`, `accept_handshake`) return [`Result`] —
+//! malformed SOCKS/proxy headers must not panic the accept loop.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
