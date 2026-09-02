@@ -21,11 +21,11 @@ use the same code path on all platforms.
 
 ## Install
 
-**Prebuilt Linux** (no Rust toolchain). Replace `0.4.0` with a newer tag from
+**Prebuilt Linux** (no Rust toolchain). Replace `0.4.1` with a newer tag from
 [Releases](https://github.com/KangxiDictionary/link-p2p/releases) if needed:
 
 ```bash
-VER=0.4.0
+VER=0.4.1
 curl -fsSL -O "https://github.com/KangxiDictionary/link-p2p/releases/download/v${VER}/link-p2p-x86_64-unknown-linux-gnu.tar.gz"
 curl -fsSL -O "https://github.com/KangxiDictionary/link-p2p/releases/download/v${VER}/SHA256SUMS"
 sha256sum -c SHA256SUMS --ignore-missing
@@ -33,7 +33,7 @@ tar -xzf link-p2p-x86_64-unknown-linux-gnu.tar.gz
 sudo install -m 0755 link-p2p-x86_64-unknown-linux-gnu/link-p2p /usr/local/bin/
 # Catalogs must sit next to the binary (or set LINK_P2P_LOCALEDIR).
 sudo cp -a link-p2p-x86_64-unknown-linux-gnu/locales /usr/local/bin/
-link-p2p --version   # expect link-p2p 0.4.0 (or the VER you picked)
+link-p2p --version   # expect link-p2p 0.4.1 (or the VER you picked)
 ```
 
 **From source:**
