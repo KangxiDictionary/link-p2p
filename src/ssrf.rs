@@ -16,7 +16,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use anyhow::{bail, Context, Result};
 use tokio::net::TcpStream;
 
-use crate::i18n::{tr, tr_fmt};
+use crate::i18n::tr_fmt;
 
 /// A [`SocketAddr`] that has already passed [`check_proxy_target`].
 ///

@@ -87,14 +87,15 @@ pub(crate) use runtime::{
     bring_endpoint_online, build_dial_addr, build_endpoint, conn_semaphore, handle_forward_stream,
     open_stream_wait, push_task, reject_relay_only_with_to_addr, spawn_path_monitor,
     spawn_reconnect_watcher, Backoff, ConnSlot, PingHandler, ServeMode, TransportTune, Ui, ALPN,
-    ENDPOINT_ONLINE_STEPS, MIN_STABLE_CONN, PING_ALPN, RECONNECT_BASE, RECONNECT_MAX,
+    MIN_STABLE_CONN, PING_ALPN, RECONNECT_BASE, RECONNECT_MAX,
 };
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use super::{Backoff, ENDPOINT_ONLINE_STEPS};
+    use super::Backoff;
+    use crate::runtime::ENDPOINT_ONLINE_STEPS;
     use crate::cli::localized_command;
 
     /// Every help/about text that clap derives must be overridden by

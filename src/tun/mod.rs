@@ -29,7 +29,6 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use tokio::sync::{mpsc, oneshot, Notify, RwLock};
 use tokio::time::{self, Duration};
 use tracing::{info, warn, Instrument};
-use tun2::AbstractDevice;
 
 use std::sync::Mutex as StdMutex;
 
@@ -359,11 +358,7 @@ fn ipv6_src(pkt: &[u8]) -> Option<Ipv6Addr> {
     Some(Ipv6Addr::from(o))
 }
 
-/// Derive this node's *default* virtual IPv4 from its EndpointId.
-pub fn derive_vip(endpoint_id: EndpointId) -> Ipv4Addr {
-    derive_vip_salted(endpoint_id, 0)
-}
-
+/// Derive salted virtual IPv4 (172.24.0.0/16 host part from EndpointId + salt).
 fn derive_vip_salted(endpoint_id: EndpointId, salt: u32) -> Ipv4Addr {
     let mut data = [0u8; 36];
     data[..32].copy_from_slice(endpoint_id.as_bytes());
@@ -373,11 +368,7 @@ fn derive_vip_salted(endpoint_id: EndpointId, salt: u32) -> Ipv4Addr {
     Ipv4Addr::from(VIP_BASE | (raw & VIP_HOST_MASK))
 }
 
-/// Default IPv6 VIP in `fd24:ac18::/64` (ULA).
-pub fn derive_vip6(endpoint_id: EndpointId) -> Ipv6Addr {
-    derive_vip6_salted(endpoint_id, 0)
-}
-
+/// Derive salted IPv6 VIP in `fd24:ac18::/64`.
 fn derive_vip6_salted(endpoint_id: EndpointId, salt: u32) -> Ipv6Addr {
     let mut data = [0u8; 36];
     data[..32].copy_from_slice(endpoint_id.as_bytes());
@@ -1286,19 +1277,19 @@ mod tests {
     fn derive_vip6_in_prefix_and_salt_changes() {
         let sk = SecretKey::generate();
         let id = sk.public();
-        let a = derive_vip6(id);
+        let a = derive_vip6_salted(id, 0);
         let b = derive_vip6_salted(id, 1);
         assert!(vip6_in_mesh(a));
         assert!(vip6_in_mesh(b));
         assert_ne!(a, b);
-        assert_eq!(derive_vip6(id), derive_vip6_salted(id, 0));
+        assert_eq!(derive_vip6_salted(id, 0), derive_vip6_salted(id, 0));
     }
 
     #[test]
     fn derive_vip_salt_changes_host() {
         let sk = SecretKey::generate();
         let id = sk.public();
-        let a = derive_vip(id);
+        let a = derive_vip_salted(id, 0);
         let b = derive_vip_salted(id, 1);
         assert!(vip_in_mesh(a));
         assert!(vip_in_mesh(b));

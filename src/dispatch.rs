@@ -4,7 +4,7 @@ use std::io::{IsTerminal, Write};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::{CommandFactory, FromArgMatches};
+use clap::FromArgMatches;
 use iroh::SecretKey;
 use tracing::{info, warn};
 

@@ -1,13 +1,11 @@
 //! `connect` — dial a peer and expose local TCP / SOCKS5 / stdio.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use iroh::SecretKey;
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
 use tracing::warn;
 
 use crate::cli::ConnectMode;

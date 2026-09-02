@@ -10,6 +10,12 @@
   `--allow`; `tun` / controller subcommands were already in the AOT scripts.
   `--identity` uses file-path hints; `--role` offers `hub|spoke|phone`.
 
+### Fixed
+
+- **Release build hygiene**: drop refactor leftovers (unused imports),
+  `#[cfg]`-gate macOS LaunchDaemon helpers on non-macOS release builds, and
+  narrow VIP derive helpers to `pub(crate)` — no behaviour change.
+
 ### Docs
 
 - **Install**: README prebuilt steps include download URL + `sha256sum` for

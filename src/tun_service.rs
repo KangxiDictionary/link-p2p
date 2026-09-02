@@ -14,7 +14,9 @@ use crate::style::Styler;
 use crate::tun_daemon;
 
 pub const UNIT_NAME: &str = "link-p2p-tun.service";
+#[cfg(any(target_os = "macos", test))]
 pub const LAUNCHD_LABEL: &str = "com.link-p2p.tun";
+#[cfg(any(target_os = "macos", test))]
 pub const PLIST_NAME: &str = "com.link-p2p.tun.plist";
 pub const DEFAULT_SERVICE_USER: &str = "link-p2p";
 
@@ -23,6 +25,7 @@ pub const DEFAULT_IDENTITY_PATH: &str = r"C:\ProgramData\link-p2p\identity.key";
 #[cfg(not(windows))]
 pub const DEFAULT_IDENTITY_PATH: &str = "/etc/link-p2p/identity.key";
 
+#[cfg(any(target_os = "macos", test))]
 const MACOS_LOG_DIR: &str = "/var/log/link-p2p";
 
 /// Options for `tun service install`.
@@ -83,6 +86,7 @@ WantedBy=multi-user.target
     ))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -90,6 +94,7 @@ fn xml_escape(s: &str) -> String {
 }
 
 /// Render a LaunchDaemon plist (pure — for tests and install).
+#[cfg(any(target_os = "macos", test))]
 pub fn render_plist(exe: &Path, opts: &InstallOpts) -> Result<String> {
     let exe = xml_escape(&exe.to_string_lossy());
     if exe.contains('\n') {

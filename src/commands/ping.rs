@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use iroh::{EndpointId, SecretKey};
 
 use crate::cli::OutputFormat;
