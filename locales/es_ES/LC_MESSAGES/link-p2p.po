@@ -1299,6 +1299,9 @@ msgstr "valor --to inválido para el plist LaunchDaemon"
 msgid "refusing service install: binary is under a Cargo target/ directory (install a release build to /usr/local/bin or similar first)"
 msgstr "rechazando instalación del servicio: el binario está bajo Cargo target/ (instala antes un build release en /usr/local/bin o similar)"
 
+msgid "no locales/ next to this binary — CLI stays English until you copy catalogs beside it (see README Install) or set LINK_P2P_LOCALEDIR"
+msgstr "no hay locales/ junto a este binario — la CLI sigue en inglés hasta que copies los catálogos al lado (ver README Install) o definas LINK_P2P_LOCALEDIR"
+
 msgid "refusing service install: binary is under /tmp (install to a system path first)"
 msgstr "rechazando instalación del servicio: el binario está bajo /tmp (instala primero en una ruta del sistema)"
 

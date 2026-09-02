@@ -177,14 +177,16 @@ macOS LaunchDaemon (Step 2) implemented — plist rendering covered by unit test
 `launchctl bootstrap`/`bootout` not yet verified on hardware.
 
 ```bash
-# Linux
-sudo cp target/release/link-p2p /usr/local/bin/
+# Linux — install binary + locales first (service refuses user-writable paths)
+sudo install -m 0755 target/release/link-p2p /usr/local/bin/
+sudo cp -a target/release/locales /usr/local/bin/
 sudo link-p2p tun service install --role hub
 link-p2p tun status --system
 sudo link-p2p tun service uninstall
 
 # macOS (LaunchDaemon as root; control socket under /var/run/link-p2p/)
-sudo cp target/release/link-p2p /usr/local/bin/
+sudo install -m 0755 target/release/link-p2p /usr/local/bin/
+sudo cp -a target/release/locales /usr/local/bin/
 sudo link-p2p tun service install --role hub
 link-p2p tun status --system
 sudo link-p2p tun service uninstall

@@ -21,24 +21,43 @@ use the same code path on all platforms.
 
 ## Install
 
-**Prebuilt** (no Rust toolchain):
+**Prebuilt Linux** (no Rust toolchain). Replace `0.4.0` with a newer tag from
+[Releases](https://github.com/KangxiDictionary/link-p2p/releases) if needed:
 
 ```bash
+VER=0.4.0
+curl -fsSL -O "https://github.com/KangxiDictionary/link-p2p/releases/download/v${VER}/link-p2p-x86_64-unknown-linux-gnu.tar.gz"
+curl -fsSL -O "https://github.com/KangxiDictionary/link-p2p/releases/download/v${VER}/SHA256SUMS"
+sha256sum -c SHA256SUMS --ignore-missing
 tar -xzf link-p2p-x86_64-unknown-linux-gnu.tar.gz
 sudo install -m 0755 link-p2p-x86_64-unknown-linux-gnu/link-p2p /usr/local/bin/
-sudo cp -r link-p2p-x86_64-unknown-linux-gnu/locales /usr/local/bin/
-link-p2p --version
+# Catalogs must sit next to the binary (or set LINK_P2P_LOCALEDIR).
+sudo cp -a link-p2p-x86_64-unknown-linux-gnu/locales /usr/local/bin/
+link-p2p --version   # expect link-p2p 0.4.0 (or the VER you picked)
 ```
 
 **From source:**
 
 ```bash
 cargo build --release
-# then put target/release/link-p2p and target/release/locales/ on PATH together
-# or: cargo install --path . && cp -a target/release/locales ~/.cargo/bin/
+sudo install -m 0755 target/release/link-p2p /usr/local/bin/
+sudo cp -a target/release/locales /usr/local/bin/
+# or for a user install:
+# cargo install --path .
+# cp -a target/release/locales ~/.cargo/bin/
 ```
 
 Without `locales/` beside the binary (or `LINK_P2P_LOCALEDIR`), UI falls back to English.
+
+**System TUN service** (after the binary + locales are on a trusted path):
+
+```bash
+sudo link-p2p tun service install --role hub   # or --role spoke --to <hub>
+link-p2p tun status --system
+```
+
+Details: [platforms](docs/user-guide/platforms.md), [TUN / systemd](docs/subsystems/tun.md),
+[Windows SCM](docs/user-guide/windows-service-setup.md).
 
 ---
 

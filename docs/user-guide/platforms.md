@@ -18,6 +18,10 @@ sudo setcap cap_net_admin+ep $(which link-p2p)
 TUN uses `/dev/net/tun` and `ip` for routing. macOS/Windows TUN details differ
 below; Linux is the maintainer baseline.
 
+**Install layout:** put the binary and a sibling `locales/` under the same
+directory (e.g. `/usr/local/bin/link-p2p` + `/usr/local/bin/locales/…`), or set
+`LINK_P2P_LOCALEDIR`. See [README Install](../../README.md#install).
+
 **Linux MTU note:** interface MTU is never programmed below **1280** so IPv6 stays
 enabled on the TUN device; smaller path ceilings use ICMP PTB on the send path.
 See [subsystems/tun.md](../subsystems/tun.md#mtu-and-pmtud).

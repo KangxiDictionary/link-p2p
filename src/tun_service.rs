@@ -1,6 +1,6 @@
 //! Platform service install/uninstall for `link-p2p tun` (Layer 4).
 //!
-//! Linux: systemd unit. macOS: LaunchDaemon plist. Windows SCM is a follow-up.
+//! Linux: systemd unit. macOS: LaunchDaemon plist. Windows: SCM (LocalSystem).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -160,6 +160,31 @@ pub fn validate_service_binary(exe: &Path) -> Result<PathBuf> {
         .with_context(|| tr_fmt!("resolving binary path {0}", exe.display().to_string()))?;
     check_service_binary_path(&exe)?;
     Ok(exe)
+}
+
+/// Soft reminder: UI catalogs load from `<binary-dir>/locales` (or
+/// `LINK_P2P_LOCALEDIR`). Service install does not copy them.
+fn warn_if_locales_missing(exe: &Path, styler: &Styler) {
+    if std::env::var_os("LINK_P2P_LOCALEDIR").is_some() {
+        return;
+    }
+    let Some(parent) = exe.parent() else {
+        return;
+    };
+    let marker = parent
+        .join("locales")
+        .join("zh_CN")
+        .join("LC_MESSAGES")
+        .join("link-p2p.mo");
+    if marker.is_file() {
+        return;
+    }
+    println!(
+        "  {}",
+        styler.warn(&tr!(
+            "no locales/ next to this binary — CLI stays English until you copy catalogs beside it (see README Install) or set LINK_P2P_LOCALEDIR"
+        ))
+    );
 }
 
 /// Path rules for a service binary (testable without a live file).
@@ -401,6 +426,7 @@ pub fn cmd_install(opts: InstallOpts, styler: &Styler) -> Result<()> {
     require_elevated()?;
 
     let exe = validate_service_binary(&std::env::current_exe().context(tr!("current_exe"))?)?;
+    warn_if_locales_missing(&exe, styler);
     tun_daemon::resolve_up_role(Some(opts.role.as_str()), opts.to.as_deref())?;
 
     // Fail early if the chosen system identity parent cannot be created/written.

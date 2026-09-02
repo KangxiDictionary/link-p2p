@@ -2,7 +2,7 @@
 name = "link-p2p"
 version = "0.4.0"
 edition = "2021"
-description = "Minimal TCP-over-QUIC forwarder on iroh, with a point-to-point TUN mode for whole-machine IP reachability"
+description = "TCP-over-QUIC port forwarder and dual-stack TUN VIP mesh on iroh"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/KangxiDictionary/link-p2p"
 readme = "README.md"

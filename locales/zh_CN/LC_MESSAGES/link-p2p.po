@@ -1311,6 +1311,9 @@ msgstr "LaunchDaemon plist 的 --to 值无效"
 msgid "refusing service install: binary is under a Cargo target/ directory (install a release build to /usr/local/bin or similar first)"
 msgstr "拒绝服务安装：二进制位于 Cargo target/ 目录下（请先安装 release 构建到 /usr/local/bin 等系统路径）"
 
+msgid "no locales/ next to this binary — CLI stays English until you copy catalogs beside it (see README Install) or set LINK_P2P_LOCALEDIR"
+msgstr "二进制旁没有 locales/ — CLI 会保持英文，直到把翻译目录拷到旁边（见 README Install）或设置 LINK_P2P_LOCALEDIR"
+
 msgid "refusing service install: binary is under /tmp (install to a system path first)"
 msgstr "拒绝服务安装：二进制位于 /tmp 下（请先安装到系统路径）"
 

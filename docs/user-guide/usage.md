@@ -251,6 +251,11 @@ link-p2p man | gzip -c > /usr/local/share/man/man1/link-p2p.1.gz   # Unix only
 Catalogs under `locales/`, compiled by `build.rs` via `msgfmt`. Language from
 env: `LANGUAGE` > `LC_ALL` > `LC_MESSAGES` > `LANG`.
 
+Runtime lookup order: `LINK_P2P_LOCALEDIR` → `<dir of binary>/locales` →
+`./locales`. After a system install, catalogs must live next to the binary
+(e.g. `/usr/local/bin/locales/`) — copying only the executable falls back to
+English (see [README Install](../../README.md#install)).
+
 ```bash
 LANG=zh_CN.utf8 link-p2p --help
 LANGUAGE=es_ES link-p2p --help

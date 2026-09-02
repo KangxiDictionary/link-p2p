@@ -1296,6 +1296,9 @@ msgstr "LaunchDaemon plist の --to 値が無効です"
 msgid "refusing service install: binary is under a Cargo target/ directory (install a release build to /usr/local/bin or similar first)"
 msgstr "サービスインストールを拒否: バイナリが Cargo target/ 配下です（先に /usr/local/bin 等へ release ビルドをインストールしてください）"
 
+msgid "no locales/ next to this binary — CLI stays English until you copy catalogs beside it (see README Install) or set LINK_P2P_LOCALEDIR"
+msgstr "このバイナリの隣に locales/ がありません — README Install のとおりカタログを置くか LINK_P2P_LOCALEDIR を設定するまで CLI は英語のままです"
+
 msgid "refusing service install: binary is under /tmp (install to a system path first)"
 msgstr "サービスインストールを拒否: バイナリが /tmp 配下です（先にシステムパスへインストールしてください）"
 

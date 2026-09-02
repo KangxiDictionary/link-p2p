@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+
+- **Install**: README prebuilt steps include download URL + `sha256sum` for
+  `v0.4.0`, copy `locales/` beside the binary, and point at `tun service install`.
+  TUN service snippets and platforms guide no longer omit catalogs; `tun_service`
+  warns when `locales/` is missing next to the service binary.
+
 ## [0.4.0] - 2026-09-02
 
 ### Added
