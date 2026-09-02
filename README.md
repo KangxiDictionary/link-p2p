@@ -11,6 +11,12 @@ TCP-over-QUIC port forwarder and optional whole-machine IP mesh, built on
 Works across NAT via iroh relays; upgrades to a direct path when hole-punch
 succeeds. Prebuilt Linux binary: [GitHub Releases](https://github.com/KangxiDictionary/link-p2p/releases).
 
+**Platform maturity:** Linux is the TUN maintainer baseline (real-hardware tested).
+macOS and Windows TUN backends ship in-tree but are **best-effort without dedicated
+CI** — run the [TUN release checklist](docs/subsystems/tun.md#release-acceptance-checklist)
+on each target OS before relying on them in production. Stream / `call` / SOCKS5
+use the same code path on all platforms.
+
 ---
 
 ## Install

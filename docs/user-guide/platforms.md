@@ -18,6 +18,10 @@ sudo setcap cap_net_admin+ep $(which link-p2p)
 TUN uses `/dev/net/tun` and `ip` for routing. macOS/Windows TUN details differ
 below; Linux is the maintainer baseline.
 
+**Linux MTU note:** interface MTU is never programmed below **1280** so IPv6 stays
+enabled on the TUN device; smaller path ceilings use ICMP PTB on the send path.
+See [subsystems/tun.md](../subsystems/tun.md#mtu-and-pmtud).
+
 ---
 
 ## macOS

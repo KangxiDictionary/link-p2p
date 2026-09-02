@@ -22,7 +22,7 @@ quick start). Everything else is here.
 | Document | Contents |
 |---|---|
 | [architecture/performance.md](architecture/performance.md) | Throughput methodology, loopback numbers, config attribution, transport matrix |
-| [subsystems/tun.md](subsystems/tun.md) | TUN design, routing, MTU, daemon control plane plan, release checklist |
+| [subsystems/tun.md](subsystems/tun.md) | TUN design, routing, MTU, daemon control plane, release checklist |
 | [roadmap.md](roadmap.md) | Known gaps and planned work |
 | [testing.md](testing.md) | Test scripts and two-machine harness |
 

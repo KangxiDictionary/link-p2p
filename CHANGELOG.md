@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-02
+
 ### Added
 
 - **TUN dual-stack VIPs**: each node gets IPv4 in `172.24.0.0/16` and IPv6 ULA
@@ -17,12 +19,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daemon (`tun ring`, accept/reject); `tun serve` / `tun connect` remain
   foreground debug aliases of `tun up --foreground --role …`.
 - **Windows TUN system service**: SCM + named-pipe control, Event Log, firewall
-  rule on install (verify on real Windows).
+  rule on install (verify on real Windows). See
+  `docs/user-guide/windows-service-setup.md`.
 - **Library target** (`link_p2p`) so ctl frame decode can be fuzzed; opt-in
-  `cargo +nightly fuzz run ctl_frame` (see `docs/testing.md`).
+  `cargo +nightly fuzz run ctl_frame` (see `docs/testing.md`; lives in repo-root
+  `fuzz/`, not under `src/`).
 - **Relay RTT cache** (`~/.config/link-p2p/relay-rtt.json`): fresh samples
   (<24h) skip a blocking TCP probe on startup; background refresh keeps the
   file warm.
+- **`SessionPhase` state machine** for daemon `Status` (Starting / Idle / Dialing
+  / Ringing / Connected) with explicit illegal-transition logging.
+- **Path-stats soft preference**: roster dial order and path-monitor nudge cadence
+  informed by local `path-stats.jsonl` direct hit rates (does not pick individual
+  QUIC paths — iroh owns that).
 
 ### Fixed
 
@@ -30,6 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `192.88.99.0/24`.
 - **`--identity-passphrase`**: warn that the flag is visible in `ps` / shell
   history; prefer `LINK_P2P_PASSPHRASE`.
+- **TUN hub `try_claim_peer`**: arc-swap `rcu` returns the pre-CAS snapshot —
+  verify ownership with `load_full()` after update (first claim was always failing).
+- **TUN hub reconnect race**: per-spoke session generation; stale teardown no
+  longer removes a live peer's route or index entry.
+- **TUN spoke `lookup_out`**: hub VIP traffic always uses the dedicated hub
+  connection; roster-learned hub entry cannot shadow it with a dead direct link.
+- **Linux TUN MTU**: floor interface MTU at **1280** so the kernel does not
+  disable IPv6 when QUIC PMTUD reports a ceiling below 1280.
 
 ### Changed
 
@@ -46,14 +63,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TUN_CTRL_QUEUE`) instead of scattered `256` / `32` literals.
 - OS TUN device/route/MTU ops live behind `tun::platform::TunPlatform`
   (`linux` / `macos` / `windows`); `tun/mod.rs` keeps thin wrappers only.
+- `tun_daemon` split into shared `mod.rs` plus `ctl_sock/` and
+  `unix` / `windows` / `unsupported` platform modules.
 - `contact` / `config` subcommands moved to `commands/` (alongside serve/
   connect/ping).
 - TUN recv path reads into a reusable `BytesMut` (no per-packet
-  `copy_from_slice`); peer sender tasks get a `tun_peer_sender` tracing span.
+  `copy_from_slice`); peer sender and key spawn tasks get tracing spans.
 - `TunCommand` dispatch moved to `commands/tun.rs` (pre-identity service/
   selftest stay in `main`).
 - Unix: prefer `rustix` for kill/setsid/geteuid/chown/umask; `nix` retained
   only for `User::from_name` (passwd) on service install.
+- **`win_pipe.rs`**: documented why hand-rolled named pipes stay (custom SDDL,
+  impersonation, `TokenElevation`) instead of the `interprocess` crate.
+
+### Docs
+
+- README and platforms guide: TUN on macOS/Windows is **best-effort** (no
+  dedicated CI); Linux is the maintainer baseline.
+- Release acceptance checklist lives in `docs/subsystems/tun.md` (replaces stale
+  references to removed `docs/tun-acceptance.md` / `docs/tun-design.md`).
+- Daemon / dual-stack / Linux MTU≥1280 docs aligned with current code.
 
 ## [0.3.0] - 2026-08-31
 
@@ -113,14 +142,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **TUN mode on macOS and Windows** (alongside Linux): `utun` / Wintun backends
   for device I/O, with platform-specific address/route/MTU setup. Windows needs
-  Administrator + `wintun.dll` next to the binary (`docs/windows.md`). macOS and
+  Administrator + `wintun.dll` next to the binary (`docs/user-guide/platforms.md`). macOS and
   Windows are best-effort without dedicated CI — please open issues for host
-  failures. Manual release checklist: `docs/tun-acceptance.md`.
+  failures. Manual release checklist: `docs/subsystems/tun.md` (acceptance table).
 
 - **TUN hub mesh**: `tun serve` accepts many concurrent peers, demuxes by
   destination VIP, and forwards spoke↔spoke so every `172.24.0.0/16` virtual IP
   can reach every other. Spokes install a `/16` route (not only the hub `/32`).
-  See `docs/tun-design.md`.
+  See `docs/subsystems/tun.md`.
 - **TUN hub I/O**: a dedicated TUN actor (channel in/out) so spoke→hub delivery
   is not starved by holding a mutex across `recv`.
 - **TUN mesh v2 (`link-p2p/tun/2`)**: hub broadcasts VIP↔EndpointId roster on a
@@ -176,15 +205,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Unix-style UX** (`docs/unix.md`, **`cfg(unix)` builds only**):
+- **Unix-style UX** (**`cfg(unix)` builds only**):
   `connect --stdio`, `--to -` (EndpointId from stdin), `link-p2p man`.
   Cross-platform: `ping --format json`, stable exit codes (0–5), `-q`/`-v`/`-vv`,
   `LINK_P2P_*` env defaults (flags win), shell completions. Windows notes:
-  `docs/windows.md`.
+  `docs/user-guide/platforms.md`.
 - **Transport tune** env/flags: `LINK_P2P_CC` / `--cc`,
   `LINK_P2P_SEND_WINDOW` / `--send-window`,
   `LINK_P2P_STREAM_RECV_WINDOW` / `--stream-recv-window` (see
-  `docs/performance.md`).
+  `docs/architecture/performance.md`).
 - `scripts/bench-transport-matrix.sh`: one-session loopback matrix
   (baseline | sysctl | bbr3 | bbr3+windows) for config exclusion before
   protocol-wall claims.
@@ -238,7 +267,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   noise allow-listed where intentional (wire casts, clap/i18n docs).
 - SOCKS5 `write_target` batches the header into one `write_all` and omits
   `.flush()` so callers can keep an unbuffered iroh QUIC `SendStream`
-  (BufWriter without flush would hang; documented in `docs/performance.md`).
+  (BufWriter without flush would hang; documented in `docs/architecture/performance.md`).
 - Reconnect wakeups are event-driven (`tokio::sync::watch`) instead of
   200ms polling: a local client arriving during a reconnect window is
   served the instant the new connection lands, not up to 200ms later.

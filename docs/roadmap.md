@@ -114,7 +114,7 @@ coordination server without changing enforcement code.
 
 | area | current | needed |
 |---|---|---|
-| TUN daemon control plane | foreground `tun serve` / `tun connect` only | `tun up/down/status/peers` — see below |
+| TUN daemon control plane | `tun up/down/status/peers`, phone mode, `--system` | polish Linux system-socket ACL; macOS LaunchDaemon |
 | TUN macOS / Windows | backends shipped, best-effort | real-hardware CI, polish |
 | Mobile | none | Android/iOS VPN APIs |
 | GUI / TUI | CLI only | status dashboard / tray (same control socket) |

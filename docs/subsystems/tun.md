@@ -79,6 +79,10 @@ vip6(ep) = fd24:ac18::/64 | (blake3(ep) mid bits as interface id)
 
 Final MTU = `min(--mtu, max_datagram_size())`. Default cap **1280**.
 
+- **Linux:** the kernel disables IPv6 on an interface when link MTU is below 1280
+  (RFC 8200 minimum). The Linux backend floors programmed interface MTU at
+  **1280**; path ceilings below that are enforced via ICMP Frag Needed / PTB on
+  the datagram send path (not by shrinking the interface below 1280).
 - Oversize packets: inject ICMP Fragmentation Needed.
 - MTU raise/lower uses hysteresis to avoid flapping.
 - Ops clamp when path is lossy: `--mtu 1162`.
@@ -105,7 +109,7 @@ link-p2p tun connect --to <EndpointId> [--tun-ip <addr>] [--tun-ip6 <addr>] …
 ```
 
 Keep these forever as **foreground debug mode** (blocking, logs on stderr).
-Equivalent target once the daemon lands: `tun up --foreground --role hub|spoke`.
+Same as `tun up --foreground --role hub|spoke` (or `tun join` / daemon phone mode).
 
 **Privileges:** root / `CAP_NET_ADMIN` (Linux, macOS); Administrator + signed
 `wintun.dll` beside the binary (Windows). Linux shortcut:
@@ -329,21 +333,22 @@ Shutdown order: `Shutdown` → `hooks.cancel` → data plane exit → `endpoint.
 
 ## Release acceptance checklist
 
-Run before shipping a release that touches `src/tun.rs` or platform routing/MTU
+Run before shipping a release that touches `src/tun/` or platform routing/MTU
 helpers. Linux is the maintainer baseline; macOS and Windows are best-effort —
 open an issue with OS, command line, and logs on failure.
 
 | # | Check | How | Pass if |
 |---|---|---|---|
 | 1 | Serve starts | `sudo link-p2p tun serve` (elevated on Windows) | Prints VIP + `ENDPOINT_ID=…`; interface up |
-| 2 | Connect + ICMP | Peer: `tun connect --to <id>`; both `ping <peer VIP>` | RTT both ways |
+| 2 | Connect + ICMP | Peer: `tun connect --to <id>`; both `ping <peer VIP>` v4 **and** v6 | RTT both ways |
 | 3 | TCP over VIP | e.g. `nc -l` / `nc` or `ssh user@<peer VIP>` | Payload round-trips |
 | 4 | Reconnect / route cleanup | Stop serve, restart, connect again | Old `/32` gone; new session works |
-| 5 | MTU raise | `RUST_LOG=link_p2p=info`; large `ping -s 1200` | No outer fragmentation; MTU raises when negotiated |
-| 6 | MTU shrink | Lower path MTU if possible | Log shows lowered MTU and/or ICMP Frag Needed; TCP recovers |
-| 7 | Ctrl+C teardown | Ctrl+C both sides | Interface removed; peer route deleted |
-| 8 | VIP collision | Same `--tun-ip` on a real local iface, then start tun | Clear error; no second binding |
-| 9 | Exit codes | Block UDP / refuse peer | Online wait → **4**; bind/connect hard fail → **3** |
+| 5 | Hub mesh reconnect | 3-node hub + 2 spokes; kill hub spoke session ~10s, redial | Traffic resumes; no stale routes |
+| 6 | MTU raise | `RUST_LOG=link_p2p=info`; large `ping -s 1200` | No outer fragmentation; MTU raises when negotiated |
+| 7 | MTU shrink | Lower path MTU if possible | Log shows lowered MTU and/or ICMP Frag Needed; TCP recovers |
+| 8 | Ctrl+C teardown | Ctrl+C both sides | Interface removed; peer route deleted |
+| 9 | VIP collision | Same `--tun-ip` on a real local iface, then start tun | Clear error; no second binding |
+| 10 | Exit codes | Block UDP / refuse peer | Online wait → **4**; bind/connect hard fail → **3** |
 
 ### Platform notes
 
