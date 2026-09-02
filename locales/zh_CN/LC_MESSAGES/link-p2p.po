@@ -1743,14 +1743,14 @@ msgstr "正在呼叫联系人 {0}…"
 msgid "dialing contact {0}..."
 msgstr "正在拨号联系人 {0}…"
 
-msgid "your identity (give SHORT_CODE to peers; both can `call --to` each other):"
-msgstr "你的身份（把 SHORT_CODE 给对方；两边都可 `call --to`）："
+msgid "your identity (give SHORT_CODE to peers; both can `call` each other):"
+msgstr "你的身份（把 SHORT_CODE 给对方；两边都可 `call`）："
 
 msgid "connecting to remote endpoint — if this fails or hangs, run: link-p2p selftest"
 msgstr "连接远端失败或卡住时，请运行：link-p2p selftest"
 
-msgid "next: link-p2p call --to {0} --listen 127.0.0.1:2222 --forward 127.0.0.1:22"
-msgstr "下一步：link-p2p call --to {0} --listen 127.0.0.1:2222 --forward 127.0.0.1:22"
+msgid "next: link-p2p call {0} --listen 127.0.0.1:2222 --forward 127.0.0.1:22"
+msgstr "下一步：link-p2p call {0} --listen 127.0.0.1:2222 --forward 127.0.0.1:22"
 
 msgid "Contact name, EndpointId, or short code. Use `-` to read one line from stdin. Also `LINK_P2P_TO`."
 msgstr "联系人名称、EndpointId 或短码。用 `-` 从 stdin 读一行。也可用 `LINK_P2P_TO`。"
@@ -1761,8 +1761,8 @@ msgstr "联系人名称、EndpointId 或短码。也可用 `LINK_P2P_TO`。"
 msgid "EndpointId hex or short code (from the peer's SHORT_CODE= line)."
 msgstr "EndpointId 十六进制或短码（来自对方的 SHORT_CODE= 行）。"
 
-msgid "Best first-time path: both sides run the same `call` with each other's SHORT_CODE (printed at start). After it connects once, `contact add <name> <short-code>` — next time use `--to <name>`. Prefer this over juggling separate serve/connect roles."
-msgstr "最佳上手路径：两边用对方启动时打印的 SHORT_CODE 跑同一条 `call`。连通一次后执行 `contact add <名字> <短码>`，以后 `--to <名字>` 即可。优先用这条，而不是分别跑 serve/connect。"
+msgid "Best first-time path: both sides run the same `call` with each other's SHORT_CODE (printed at start). After it connects once, `contact add <name> <short-code>` — next time use `call <name>`. Prefer this over juggling separate serve/connect roles."
+msgstr "最佳上手路径：两边用对方启动时打印的 SHORT_CODE 跑同一条 `call`。连通一次后执行 `contact add <名字> <短码>`，以后 `call <名字>` 即可。优先用这条，而不是分别跑 serve/connect。"
 
 msgid "dialing with address hint(s): {0}"
 msgstr "使用地址提示拨号：{0}"
@@ -2095,3 +2095,192 @@ msgstr "拨号到 `tun serve` 中枢，在 TUN 上安装 172.24.0.0/16 与 fd24:
 
 msgid "`--identity-passphrase` is visible in `ps` and shell history; prefer LINK_P2P_PASSPHRASE"
 msgstr "`--identity-passphrase` 会出现在 `ps` 与 shell 历史中；请优先使用 LINK_P2P_PASSPHRASE"
+
+# --- stream phone / call daemon (phone UX) ---
+
+msgid "{0} ringing call(s) — `link-p2p call ring`"
+msgstr "{0} 路振铃中 — `link-p2p call ring`"
+
+msgid "accepted call from {0}"
+msgstr "已接听来自 {0} 的呼叫"
+
+msgid ""
+"background `call up` is Unix-only; use `call up --foreground` on this platform"
+msgstr "后台 `call up` 仅支持 Unix；本平台请用 `call up --foreground`"
+
+msgid ""
+"background `call up` needs a persistent identity (omit --ephemeral or use --foreground)"
+msgstr "后台 `call up` 需要持久身份（去掉 --ephemeral，或改用 --foreground）"
+
+msgid "bad control magic (expected SPC1)"
+msgstr "控制协议魔数错误（期望 SPC1）"
+
+msgid "binding call control socket {0}"
+msgstr "绑定 call 控制套接字 {0}"
+
+msgid "binding call ready listener"
+msgstr "绑定 call ready 监听"
+
+msgid "call daemon did not become ready"
+msgstr "call 守护进程未能就绪"
+
+msgid "call daemon failed to start: {0}"
+msgstr "call 守护进程启动失败：{0}"
+
+msgid "call daemon is busy"
+msgstr "call 守护进程正忙"
+
+msgid "call daemon started with unexpected session"
+msgstr "call 守护进程启动的 session 不符合预期"
+
+msgid "calling {0}… waiting for answer"
+msgstr "正在呼叫 {0}… 等待接听"
+
+msgid "call phone plane exited before ready"
+msgstr "call 电话数据面在就绪前退出"
+
+msgid "cloning call log handle"
+msgstr "克隆 call 日志句柄"
+
+msgid "could not reach {0}: {1}"
+msgstr "无法连通 {0}：{1}"
+
+msgid "dial queued on the standing daemon"
+msgstr "拨号已排入常驻守护进程"
+
+msgid "forward {0}"
+msgstr "转发 {0}"
+
+msgid "incoming call from {0} — `link-p2p call accept {0}` or `call reject`"
+msgstr "来自 {0} 的来电 — `link-p2p call accept {0}` 或 `call reject`"
+
+msgid "listen {0}"
+msgstr "监听 {0}"
+
+msgid "locking {0}"
+msgstr "锁定 {0}"
+
+msgid "logs: {0}"
+msgstr "日志：{0}"
+
+msgid ""
+"next: on this machine `call up --listen …`; peer runs `call {0} --listen …`"
+msgstr "下一步：本机 `call up --listen …`；对端执行 `call {0} --listen …`"
+
+msgid "no ringing calls"
+msgstr "没有振铃中的呼叫"
+
+msgid "opening call lock {0}"
+msgstr "打开 call 锁文件 {0}"
+
+msgid "opening call log {0}"
+msgstr "打开 call 日志 {0}"
+
+msgid "Phone-mode stream call: standing callee + dial / ring / accept."
+msgstr "电话式流呼叫：常驻被叫 + 拨出 / 振铃 / 接听。"
+
+msgid "rejected call from {0}"
+msgstr "已拒接来自 {0} 的呼叫"
+
+msgid "Return after enqueueing a dial on the standing daemon."
+msgstr "把拨号排入常驻守护进程后立即返回。"
+
+msgid "role {0}  phase {1}"
+msgstr "角色 {0}  阶段 {1}"
+
+msgid "roster snapshot has too many entries ({0} > {1})"
+msgstr "roster 快照条目过多（{0} > {1}）"
+
+msgid ""
+"Run before first serve/connect/call when a dial times out. TCP-probes each --relay URL (note: TCP ok does not prove UDP/QUIC or that a peer will answer a ring), then a loopback echo. Pass --tun for wintun/system-identity checks (same as tun selftest)."
+msgstr ""
+"首次 serve/connect/call 拨号超时前可先跑。对每个 --relay URL 做 TCP 探测（注意：TCP 通不等于 UDP/QUIC 通，也不代表对端会接听振铃），再做回环回显。加 --tun 做 wintun/系统身份检查（同 tun selftest）。"
+
+msgid "setsid for call daemon"
+msgstr "为 call 守护进程 setsid"
+
+msgid "spawning call daemon worker"
+msgstr "启动 call 守护进程 worker"
+
+msgid "spoke requires --to <hub EndpointId>"
+msgstr "spoke 需要 --to <hub EndpointId>"
+
+msgid ""
+"Standing callee daemon (like tun call, without TUN). Start with `call up` (or dial and auto-spawn), then the peer runs `call <your-name>`. Known contacts auto-accept; strangers ring until `call accept` / `call reject` / timeout. Use serve/connect for explicit roles."
+msgstr ""
+"常驻被叫守护进程（类似 tun call，但不建 TUN）。先 `call up`（或拨号时自动拉起），对端再 `call <你的名字>`。通讯录联系人自动接听；陌生人振铃直至 `call accept` / `call reject` / 超时。需要固定角色时用 serve/connect。"
+
+msgid "starting stream call daemon…"
+msgstr "正在启动 stream call 守护进程…"
+
+msgid "stream call control request timed out"
+msgstr "stream call 控制请求超时"
+
+msgid "stream call daemon is already running"
+msgstr "stream call 守护进程已在运行"
+
+msgid "stream call daemon is not running"
+msgstr "stream call 守护进程未运行"
+
+msgid "stream call daemon is not running (try: link-p2p call up)"
+msgstr "stream call 守护进程未运行（可试：link-p2p call up）"
+
+msgid "stream call daemon is Unix-only in this build"
+msgstr "此构建中 stream call 守护进程仅支持 Unix"
+
+msgid ""
+"stream call daemon is Unix-only in this build; use serve/connect on this platform for now"
+msgstr "此构建中 stream call 守护进程仅支持 Unix；本平台请暂时用 serve/connect"
+
+msgid "stream call daemon protocol mismatch (daemon v{0}, CLI v{1})"
+msgstr "stream call 守护进程协议不匹配（守护进程 v{0}，CLI v{1}）"
+
+msgid "stream call daemon started (pid {0})"
+msgstr "stream call 守护进程已启动（pid {0}）"
+
+msgid "stream call daemon stopped"
+msgstr "stream call 守护进程已停止"
+
+msgid "stream call daemon worker is Unix-only in this build"
+msgstr "此构建中 stream call 守护进程 worker 仅支持 Unix"
+
+msgid "timed out waiting for call daemon ready"
+msgstr "等待 call 守护进程就绪超时"
+
+msgid "unexpected status response"
+msgstr "意外的 status 响应"
+
+msgid "unexpected Status response from call daemon: {0}"
+msgstr "call 守护进程返回了意外的 Status 响应：{0}"
+
+msgid ""
+"`up` | `down` | `ring` | `status` | `accept <peer>` | `reject <peer>` | `<peer>` to dial."
+msgstr ""
+"`up` | `down` | `ring` | `status` | `accept <对端>` | `reject <对端>` | `<对端>` 拨号。"
+
+msgid "uptime {0}s  session {1}"
+msgstr "已运行 {0}s  session {1}"
+
+msgid "usage: call accept <peer>"
+msgstr "用法: call accept <对端>"
+
+msgid ""
+"usage: call <peer> [--listen …] [--forward …] [--to-addr …] [--no-wait]"
+msgstr "用法: call <对端> [--listen …] [--forward …] [--to-addr …] [--no-wait]"
+
+msgid "usage: call reject <peer>"
+msgstr "用法: call reject <对端>"
+
+msgid "usage: call up|down|ring|status|accept <peer>|reject <peer>|<peer>"
+msgstr "用法: call up|down|ring|status|accept <对端>|reject <对端>|<对端>"
+
+msgid "usage: call up [--listen …] [--forward …] [--foreground]"
+msgstr "用法: call up [--listen …] [--forward …] [--foreground]"
+
+msgid ""
+"waiting for answer — peer must have `call up` (or `call accept` if ringing); check `call status`"
+msgstr "等待接听 — 对端需已 `call up`（振铃中则 `call accept`）；可查 `call status`"
+
+msgid "With `call up`: run in the foreground (do not daemonize)."
+msgstr "配合 `call up`：前台运行（不守护化）。"
+

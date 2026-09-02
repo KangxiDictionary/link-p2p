@@ -1731,13 +1731,13 @@ msgstr ""
 msgid "dialing contact {0}..."
 msgstr ""
 
-msgid "your identity (give SHORT_CODE to peers; both can `call --to` each other):"
+msgid "your identity (give SHORT_CODE to peers; both can `call` each other):"
 msgstr ""
 
 msgid "connecting to remote endpoint — if this fails or hangs, run: link-p2p selftest"
 msgstr ""
 
-msgid "next: link-p2p call --to {0} --listen 127.0.0.1:2222 --forward 127.0.0.1:22"
+msgid "next: link-p2p call {0} --listen 127.0.0.1:2222 --forward 127.0.0.1:22"
 msgstr ""
 
 msgid "Contact name, EndpointId, or short code. Use `-` to read one line from stdin. Also `LINK_P2P_TO`."
@@ -1749,7 +1749,7 @@ msgstr ""
 msgid "EndpointId hex or short code (from the peer's SHORT_CODE= line)."
 msgstr ""
 
-msgid "Best first-time path: both sides run the same `call` with each other's SHORT_CODE (printed at start). After it connects once, `contact add <name> <short-code>` — next time use `--to <name>`. Prefer this over juggling separate serve/connect roles."
+msgid "Best first-time path: both sides run the same `call` with each other's SHORT_CODE (printed at start). After it connects once, `contact add <name> <short-code>` — next time use `call <name>`. Prefer this over juggling separate serve/connect roles."
 msgstr ""
 
 msgid "dialing with address hint(s): {0}"
@@ -2084,3 +2084,198 @@ msgstr "Marca un hub `tun serve`, instala 172.24.0.0/16 y fd24:ac18::/64 en el T
 
 msgid "`--identity-passphrase` is visible in `ps` and shell history; prefer LINK_P2P_PASSPHRASE"
 msgstr "`--identity-passphrase` es visible en `ps` y el historial del shell; prefer LINK_P2P_PASSPHRASE"
+
+# --- stream phone / call daemon (phone UX) ---
+
+msgid "{0} ringing call(s) — `link-p2p call ring`"
+msgstr "{0} llamada(s) sonando — `link-p2p call ring`"
+
+msgid "accepted call from {0}"
+msgstr "llamada de {0} aceptada"
+
+msgid ""
+"background `call up` is Unix-only; use `call up --foreground` on this platform"
+msgstr ""
+"`call up` en segundo plano solo en Unix; en esta plataforma usa `call up --foreground`"
+
+msgid ""
+"background `call up` needs a persistent identity (omit --ephemeral or use --foreground)"
+msgstr ""
+"`call up` en segundo plano necesita una identidad persistente (omite --ephemeral o usa --foreground)"
+
+msgid "bad control magic (expected SPC1)"
+msgstr "magia de control incorrecta (se esperaba SPC1)"
+
+msgid "binding call control socket {0}"
+msgstr "enlazando el socket de control call {0}"
+
+msgid "binding call ready listener"
+msgstr "enlazando el listener ready de call"
+
+msgid "call daemon did not become ready"
+msgstr "el daemon call no llegó a estar listo"
+
+msgid "call daemon failed to start: {0}"
+msgstr "fallo al iniciar el daemon call: {0}"
+
+msgid "call daemon is busy"
+msgstr "el daemon call está ocupado"
+
+msgid "call daemon started with unexpected session"
+msgstr "el daemon call arrancó con una sesión inesperada"
+
+msgid "calling {0}… waiting for answer"
+msgstr "llamando a {0}… esperando respuesta"
+
+msgid "call phone plane exited before ready"
+msgstr "el plano telefónico call salió antes de estar listo"
+
+msgid "cloning call log handle"
+msgstr "clonando el manejador del registro call"
+
+msgid "could not reach {0}: {1}"
+msgstr "no se pudo alcanzar {0}: {1}"
+
+msgid "dial queued on the standing daemon"
+msgstr "marcación encolada en el daemon permanente"
+
+msgid "forward {0}"
+msgstr "reenvío {0}"
+
+msgid "incoming call from {0} — `link-p2p call accept {0}` or `call reject`"
+msgstr "llamada entrante de {0} — `link-p2p call accept {0}` o `call reject`"
+
+msgid "listen {0}"
+msgstr "escucha {0}"
+
+msgid "locking {0}"
+msgstr "bloqueando {0}"
+
+msgid "logs: {0}"
+msgstr "registros: {0}"
+
+msgid ""
+"next: on this machine `call up --listen …`; peer runs `call {0} --listen …`"
+msgstr ""
+"siguiente: en esta máquina `call up --listen …`; el par ejecuta `call {0} --listen …`"
+
+msgid "no ringing calls"
+msgstr "no hay llamadas sonando"
+
+msgid "opening call lock {0}"
+msgstr "abriendo el candado call {0}"
+
+msgid "opening call log {0}"
+msgstr "abriendo el registro call {0}"
+
+msgid "Phone-mode stream call: standing callee + dial / ring / accept."
+msgstr ""
+"Llamada stream modo teléfono: callee permanente + marcar / sonar / aceptar."
+
+msgid "rejected call from {0}"
+msgstr "llamada de {0} rechazada"
+
+msgid "Return after enqueueing a dial on the standing daemon."
+msgstr "Volver tras encolar la llamada en el daemon permanente."
+
+msgid "role {0}  phase {1}"
+msgstr "rol {0}  fase {1}"
+
+msgid "roster snapshot has too many entries ({0} > {1})"
+msgstr "demasiadas entradas en el snapshot de roster ({0} > {1})"
+
+msgid ""
+"Run before first serve/connect/call when a dial times out. TCP-probes each --relay URL (note: TCP ok does not prove UDP/QUIC or that a peer will answer a ring), then a loopback echo. Pass --tun for wintun/system-identity checks (same as tun selftest)."
+msgstr ""
+"Ejecutar antes del primer serve/connect/call si el dial hace timeout. Sonda TCP cada --relay (TCP ok ≠ UDP/QUIC ni que el par conteste el ring), luego eco loopback. --tun para comprobaciones wintun/identidad de sistema (igual que tun selftest)."
+
+msgid "setsid for call daemon"
+msgstr "setsid para el daemon call"
+
+msgid "spawning call daemon worker"
+msgstr "arrancando el worker del daemon call"
+
+msgid "spoke requires --to <hub EndpointId>"
+msgstr "spoke requiere --to <hub EndpointId>"
+
+msgid ""
+"Standing callee daemon (like tun call, without TUN). Start with `call up` (or dial and auto-spawn), then the peer runs `call <your-name>`. Known contacts auto-accept; strangers ring until `call accept` / `call reject` / timeout. Use serve/connect for explicit roles."
+msgstr ""
+"Daemon callee permanente (como tun call, sin TUN). Arranca con `call up` (o se autoinicia al marcar); el par ejecuta `call <tu-nombre>`. Contactos conocidos auto-aceptan; desconocidos suenan hasta `call accept` / `call reject` / timeout. Usa serve/connect para roles explícitos."
+
+msgid "starting stream call daemon…"
+msgstr "iniciando el daemon stream call…"
+
+msgid "stream call control request timed out"
+msgstr "tiempo de espera agotado en la petición de control stream call"
+
+msgid "stream call daemon is already running"
+msgstr "el daemon stream call ya está en marcha"
+
+msgid "stream call daemon is not running"
+msgstr "el daemon stream call no está en marcha"
+
+msgid "stream call daemon is not running (try: link-p2p call up)"
+msgstr "el daemon stream call no está en marcha (prueba: link-p2p call up)"
+
+msgid "stream call daemon is Unix-only in this build"
+msgstr "en esta compilación el daemon stream call solo es Unix"
+
+msgid ""
+"stream call daemon is Unix-only in this build; use serve/connect on this platform for now"
+msgstr ""
+"en esta compilación el daemon stream call solo es Unix; por ahora usa serve/connect en esta plataforma"
+
+msgid "stream call daemon protocol mismatch (daemon v{0}, CLI v{1})"
+msgstr "desajuste de protocolo del daemon stream call (daemon v{0}, CLI v{1})"
+
+msgid "stream call daemon started (pid {0})"
+msgstr "daemon stream call iniciado (pid {0})"
+
+msgid "stream call daemon stopped"
+msgstr "daemon stream call detenido"
+
+msgid "stream call daemon worker is Unix-only in this build"
+msgstr "en esta compilación el worker del daemon stream call solo es Unix"
+
+msgid "timed out waiting for call daemon ready"
+msgstr "tiempo agotado esperando que el daemon call esté listo"
+
+msgid "unexpected status response"
+msgstr "respuesta de status inesperada"
+
+msgid "unexpected Status response from call daemon: {0}"
+msgstr "respuesta Status inesperada del daemon call: {0}"
+
+msgid ""
+"`up` | `down` | `ring` | `status` | `accept <peer>` | `reject <peer>` | `<peer>` to dial."
+msgstr ""
+"`up` | `down` | `ring` | `status` | `accept <par>` | `reject <par>` | `<par>` para marcar."
+
+msgid "uptime {0}s  session {1}"
+msgstr "uptime {0}s  sesión {1}"
+
+msgid "usage: call accept <peer>"
+msgstr "uso: call accept <par>"
+
+msgid ""
+"usage: call <peer> [--listen …] [--forward …] [--to-addr …] [--no-wait]"
+msgstr "uso: call <par> [--listen …] [--forward …] [--to-addr …] [--no-wait]"
+
+msgid "usage: call reject <peer>"
+msgstr "uso: call reject <par>"
+
+msgid "usage: call up|down|ring|status|accept <peer>|reject <peer>|<peer>"
+msgstr "uso: call up|down|ring|status|accept <par>|reject <par>|<par>"
+
+msgid "usage: call up [--listen …] [--forward …] [--foreground]"
+msgstr "uso: call up [--listen …] [--forward …] [--foreground]"
+
+msgid ""
+"waiting for answer — peer must have `call up` (or `call accept` if ringing); check `call status`"
+msgstr ""
+"esperando respuesta — el par debe tener `call up` (o `call accept` si suena); revisa `call status`"
+
+msgid "With `call up`: run in the foreground (do not daemonize)."
+msgstr "Con `call up`: ejecutar en primer plano (sin daemonizar)."
+

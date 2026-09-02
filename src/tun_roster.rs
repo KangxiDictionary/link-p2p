@@ -26,6 +26,8 @@ pub const MSG_HELLO: u8 = 4;
 pub const HELLO_FLAG_HIDDEN: u8 = 0x01;
 
 const ENTRY_LEN: usize = 52;
+/// Defensive cap on snapshot membership (mirrors `tun_ctl::CTL_MAX_PEERS`).
+pub const ROSTER_MAX_ENTRIES: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RosterEntry {
@@ -79,12 +81,13 @@ pub async fn read_hello<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<bool> {
 }
 
 pub fn encode_snapshot(entries: &[RosterEntry]) -> Vec<u8> {
-    let n = u16::try_from(entries.len()).unwrap_or(u16::MAX);
-    let mut out = Vec::with_capacity(4 + 1 + 2 + entries.len() * ENTRY_LEN);
+    let n = entries.len().min(ROSTER_MAX_ENTRIES);
+    let n_u16 = u16::try_from(n).unwrap_or(u16::MAX);
+    let mut out = Vec::with_capacity(4 + 1 + 2 + n * ENTRY_LEN);
     out.extend_from_slice(ROSTER_MAGIC);
     out.push(MSG_SNAPSHOT);
-    out.extend_from_slice(&n.to_be_bytes());
-    for e in entries.iter().take(n as usize) {
+    out.extend_from_slice(&n_u16.to_be_bytes());
+    for e in entries.iter().take(n) {
         e.encode(&mut out);
     }
     out
@@ -126,6 +129,13 @@ pub async fn read_msg<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<RosterMsg> {
             let mut nb = [0u8; 2];
             r.read_exact(&mut nb).await?;
             let n = u16::from_be_bytes(nb) as usize;
+            if n > ROSTER_MAX_ENTRIES {
+                bail!(tr_fmt!(
+                    "roster snapshot has too many entries ({0} > {1})",
+                    n,
+                    ROSTER_MAX_ENTRIES
+                ));
+            }
             let mut entries = Vec::with_capacity(n);
             let mut buf = vec![0u8; ENTRY_LEN];
             for _ in 0..n {
@@ -199,6 +209,33 @@ mod tests {
         ];
         let bytes = encode_snapshot(&entries);
         assert_eq!(decode_snapshot_sync(&bytes), entries);
+    }
+
+    #[tokio::test]
+    async fn snapshot_rejects_oversized_count() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(ROSTER_MAGIC);
+        bytes.push(MSG_SNAPSHOT);
+        let n = (ROSTER_MAX_ENTRIES + 1) as u16;
+        bytes.extend_from_slice(&n.to_be_bytes());
+        let err = read_msg(&mut bytes.as_slice()).await.unwrap_err();
+        let msg = format!("{err:#}").to_ascii_lowercase();
+        assert!(msg.contains("too many") || msg.contains("entries"), "{msg}");
+    }
+
+    #[test]
+    fn encode_snapshot_caps_at_max() {
+        let id = SecretKey::generate().public();
+        let entries: Vec<_> = (0..ROSTER_MAX_ENTRIES + 3)
+            .map(|i| RosterEntry {
+                vip: Ipv4Addr::new(172, 24, (i / 256) as u8, (i % 256) as u8),
+                vip6: "fd24:ac18::1".parse().unwrap(),
+                id,
+            })
+            .collect();
+        let bytes = encode_snapshot(&entries);
+        let n = u16::from_be_bytes([bytes[5], bytes[6]]) as usize;
+        assert_eq!(n, ROSTER_MAX_ENTRIES);
     }
 
     #[test]

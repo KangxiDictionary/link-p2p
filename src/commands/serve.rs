@@ -81,7 +81,7 @@ pub(crate) async fn run_serve(
     ui.line(format!(
         "  {}",
         styler.dim(&tr!(
-            "your identity (give SHORT_CODE to peers; both can `call --to` each other):"
+            "your identity (give SHORT_CODE to peers; both can `call` each other):"
         ))
     ));
     let ep = endpoint.id();

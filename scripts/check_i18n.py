@@ -47,7 +47,7 @@ def rust_str(raw: str) -> str:
 
 def extract_msgids(src_dir: Path):
     ids = []
-    for f in sorted(src_dir.glob("*.rs")):
+    for f in sorted(src_dir.rglob("*.rs")):
         text = strip_comments(f.read_text())
         for m in re.finditer(r'\btr(?:_fmt)?!\s*\(\s*"((?:[^"\\\\]|\\.)*)"', text, re.S):
             ids.append(rust_str(m.group(1)))

@@ -1,7 +1,11 @@
-//! Symmetric `call` reconnect with persistent identities (ignored by default).
+//! Phone-mode `call`: standing callee + dial / accept (ignored by default).
 //!
 //! Needs `target/release/link-p2p` + `tools/iroh-relay`, same as `e2e.rs`.
 //! Run: `cargo test --test integration_call -- --ignored --nocapture`
+//!
+//! Unix-only (stream call ctl socket).
+
+#![cfg(unix)]
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -109,14 +113,14 @@ fn spawn_echo(port: u16) {
     });
 }
 
-fn spawn_call(
+fn spawn_up(
     guard: &mut ProcGuard,
     bin: &Path,
     identity: &Path,
+    xdg: &Path,
     relay_url: &str,
     listen: u16,
     forward: u16,
-    peer_id: &str,
     log: &Path,
 ) {
     let out = std::fs::File::create(log).unwrap();
@@ -128,25 +132,68 @@ fn spawn_call(
             identity.to_str().unwrap(),
             "--relay",
             relay_url,
+            "--no-n0-relays",
             "call",
+            "up",
+            "--foreground",
             "--listen",
             &format!("127.0.0.1:{listen}"),
             "--forward",
             &format!("127.0.0.1:{forward}"),
-            peer_id,
         ])
+        .env("XDG_CONFIG_HOME", xdg)
         .stdout(Stdio::from(out.try_clone().unwrap()))
         .stderr(Stdio::from(out))
         .spawn()
-        .expect("spawn call"),
+        .expect("spawn call up"),
     );
 }
 
-/// Kill one side and restart with the same identity; peer should redial / re-accept
-/// and local `--listen` forward should work again.
+fn run_dial(bin: &Path, identity: &Path, xdg: &Path, relay_url: &str, peer: &str) {
+    let mut cmd = Command::new(bin);
+    pin_test_locale(&mut cmd);
+    let status = cmd
+        .args([
+            "--identity",
+            identity.to_str().unwrap(),
+            "--relay",
+            relay_url,
+            "--no-n0-relays",
+            "call",
+            peer,
+            "--no-wait",
+        ])
+        .env("XDG_CONFIG_HOME", xdg)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("dial");
+    assert!(status.success(), "dial {peer} failed");
+}
+
+fn run_accept(bin: &Path, identity: &Path, xdg: &Path, peer: &str) {
+    let mut cmd = Command::new(bin);
+    pin_test_locale(&mut cmd);
+    let status = cmd
+        .args([
+            "--identity",
+            identity.to_str().unwrap(),
+            "call",
+            "accept",
+            peer,
+        ])
+        .env("XDG_CONFIG_HOME", xdg)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("accept");
+    assert!(status.success(), "accept {peer} failed");
+}
+
+/// Kill the callee and bring it back; dialer redials and local `--listen` works again.
 #[test]
 #[ignore = "needs release binary + local relay; run: cargo test --test integration_call -- --ignored"]
-fn call_reconnect_with_persistent_identity() {
+fn call_phone_reconnect_with_persistent_identity() {
     let Some(bin) = binary() else {
         eprintln!("skipping: target/release/link-p2p not built");
         return;
@@ -156,9 +203,13 @@ fn call_reconnect_with_persistent_identity() {
         return;
     };
 
-    let tmp = std::env::temp_dir().join(format!("lp-call-id-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("lp-call-phone-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
+    let xdg_a = tmp.join("xdg-a");
+    let xdg_b = tmp.join("xdg-b");
+    std::fs::create_dir_all(&xdg_a).unwrap();
+    std::fs::create_dir_all(&xdg_b).unwrap();
 
     let relay_port = free_port();
     let echo_port = free_port();
@@ -167,10 +218,6 @@ fn call_reconnect_with_persistent_identity() {
     let relay_url = format!("http://127.0.0.1:{relay_port}");
     let id_a_path = tmp.join("a.key");
     let id_b_path = tmp.join("b.key");
-    // A valid public key that nobody owns — parses as an EndpointId but is
-    // unreachable, so the bootstrap call prints ENDPOINT_ID then idles.
-    // (All-zero ids are rejected by iroh as invalid Ed25519 points.)
-    let dummy = "364eb40f6eee0089c61b56d7d20d978c0911e611fd95e75dd59c592edaf5a478";
 
     spawn_echo(echo_port);
 
@@ -192,16 +239,15 @@ fn call_reconnect_with_persistent_identity() {
     );
     std::thread::sleep(Duration::from_millis(400));
 
-    // Bootstrap A: create identity + print ENDPOINT_ID (dial dummy).
     let log_a = tmp.join("a.log");
-    spawn_call(
+    spawn_up(
         &mut guard,
         &bin,
         &id_a_path,
+        &xdg_a,
         &relay_url,
         listen_a,
         echo_port,
-        dummy,
         &log_a,
     );
     wait_for("A ENDPOINT_ID", Duration::from_secs(20), || {
@@ -210,19 +256,16 @@ fn call_reconnect_with_persistent_identity() {
             .unwrap_or(false)
     });
     let id_a = read_endpoint_id(&log_a);
-    let mut a0 = guard.0.pop().unwrap();
-    let _ = a0.kill();
-    let _ = a0.wait();
 
     let log_b = tmp.join("b.log");
-    spawn_call(
+    spawn_up(
         &mut guard,
         &bin,
         &id_b_path,
+        &xdg_b,
         &relay_url,
         listen_b,
         echo_port,
-        &id_a,
         &log_b,
     );
     wait_for("B ENDPOINT_ID", Duration::from_secs(20), || {
@@ -232,38 +275,67 @@ fn call_reconnect_with_persistent_identity() {
     });
     let id_b = read_endpoint_id(&log_b);
 
-    let log_a2 = tmp.join("a2.log");
-    spawn_call(
-        &mut guard,
-        &bin,
-        &id_a_path,
-        &relay_url,
-        listen_a,
-        echo_port,
-        &id_b,
-        &log_a2,
-    );
+    run_dial(&bin, &id_b_path, &xdg_b, &relay_url, &id_a);
+    wait_for("A ringing", Duration::from_secs(30), || {
+        std::fs::read_to_string(&log_a)
+            .map(|c| c.contains("incoming call") || c.contains("ringing"))
+            .unwrap_or(false)
+            || Command::new(&bin)
+                .args(["--identity", id_a_path.to_str().unwrap(), "call", "ring"])
+                .env("XDG_CONFIG_HOME", &xdg_a)
+                .output()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout).contains(&id_b)
+                        || String::from_utf8_lossy(&o.stderr).contains(&id_b)
+                })
+                .unwrap_or(false)
+    });
+    run_accept(&bin, &id_a_path, &xdg_a, &id_b);
 
     wait_for("initial forward", Duration::from_secs(45), || {
         tcp_echo_ok(listen_a, b"ping1")
     });
+    assert!(tcp_echo_ok(listen_b, b"ping1b"), "B listen should forward");
 
+    // Drop A's standing daemon. Spawn order: relay, A, B.
+    let b_proc = guard.0.pop().unwrap();
     let mut a_proc = guard.0.pop().unwrap();
     let _ = a_proc.kill();
     let _ = a_proc.wait();
+    guard.0.push(b_proc);
     std::thread::sleep(Duration::from_millis(500));
 
-    let log_a3 = tmp.join("a3.log");
-    spawn_call(
+    let log_a2 = tmp.join("a2.log");
+    spawn_up(
         &mut guard,
         &bin,
         &id_a_path,
+        &xdg_a,
         &relay_url,
         listen_a,
         echo_port,
-        &id_b,
-        &log_a3,
+        &log_a2,
     );
+    wait_for("A2 ENDPOINT_ID", Duration::from_secs(20), || {
+        std::fs::read_to_string(&log_a2)
+            .map(|c| c.contains("ENDPOINT_ID="))
+            .unwrap_or(false)
+    });
+
+    run_dial(&bin, &id_b_path, &xdg_b, &relay_url, &id_a);
+    wait_for("A2 ringing", Duration::from_secs(30), || {
+        Command::new(&bin)
+            .args(["--identity", id_a_path.to_str().unwrap(), "call", "ring"])
+            .env("XDG_CONFIG_HOME", &xdg_a)
+            .output()
+            .map(|o| {
+                let out = String::from_utf8_lossy(&o.stdout);
+                let err = String::from_utf8_lossy(&o.stderr);
+                out.contains(&id_b) || err.contains(&id_b) || !out.contains("no ringing")
+            })
+            .unwrap_or(false)
+    });
+    run_accept(&bin, &id_a_path, &xdg_a, &id_b);
 
     wait_for("reconnect forward", Duration::from_secs(60), || {
         tcp_echo_ok(listen_a, b"ping2")

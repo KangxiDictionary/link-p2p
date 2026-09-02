@@ -1,5 +1,6 @@
 //! User-facing subcommand implementations (stream serve/connect/ping/tun).
 
+pub(crate) mod call;
 pub(crate) mod config;
 pub(crate) mod connect;
 pub(crate) mod contact;

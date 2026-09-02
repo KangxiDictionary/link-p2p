@@ -8,11 +8,11 @@ use clap::FromArgMatches;
 use iroh::SecretKey;
 use tracing::{info, warn};
 
-use crate::call;
 use crate::cli::{
     localized_command, Cli, Command, ConnectMode, LogFormat, OutputFormat, TunCommand,
     TunServiceCommand,
 };
+use crate::commands::call::{parse_call_args, run_call_cmd};
 use crate::commands::config::run_config;
 use crate::commands::connect::run_connect;
 use crate::commands::contact::run_contact;
@@ -26,6 +26,7 @@ use crate::path_stats;
 use crate::relay_probe;
 use crate::runtime::{merge_allow_list, resolve_peer_to, ServeMode, TransportTune, Ui};
 use crate::selftest;
+use crate::stream_daemon;
 use crate::style::{apply_color_mode, ColorMode, Styler};
 use crate::tun_daemon;
 use crate::tun_service;
@@ -40,6 +41,9 @@ pub async fn real_main(color_mode: ColorMode) -> Result<()> {
     // Not a user-facing subcommand — gated on env, ahead of clap.
     if tun_daemon::is_worker_process() {
         return tun_daemon::run_worker().await;
+    }
+    if stream_daemon::is_worker_process() {
+        return stream_daemon::run_worker().await;
     }
     // Integration-test drivers (see tests/tun_daemon_spawn.rs). Not public CLI.
     if std::env::var_os("LINK_P2P_TUN_TEST_SPAWN").is_some() {
@@ -253,15 +257,22 @@ pub async fn real_main(color_mode: ColorMode) -> Result<()> {
     }
     // --ephemeral: an in-memory identity, nothing touches the filesystem.
     let identity_from_cli = cli.identity.is_some();
+    let identity_path = if cli.ephemeral {
+        None
+    } else {
+        Some(resolve_identity_path(cli.identity)?)
+    };
     let secret_key = if cli.ephemeral {
         ui.line(styler.warn(&tr!(
             "ephemeral identity: this EndpointId will not persist across restarts"
         )));
         SecretKey::generate()
     } else {
-        let identity = resolve_identity_path(cli.identity)?;
-        load_or_create_secret_key(&identity, passphrase.as_deref().map(|s| s.as_str()))
-            .context(tr!("loading/creating persistent identity"))?
+        load_or_create_secret_key(
+            identity_path.as_ref().expect("persistent identity path"),
+            passphrase.as_deref().map(|s| s.as_str()),
+        )
+        .context(tr!("loading/creating persistent identity"))?
     };
 
     match cli.command {
@@ -414,54 +425,25 @@ pub async fn real_main(color_mode: ColorMode) -> Result<()> {
             .await
         }
         Command::Call {
-            to,
+            args,
             listen,
             forward,
-            #[cfg(unix)]
-            stdio,
             to_addr,
+            no_wait,
+            foreground,
         } => {
-            #[cfg(unix)]
-            let local = match (listen, stdio) {
-                (Some(a), false) => call::CallLocal::Listen(a),
-                (None, true) => call::CallLocal::Stdio,
-                _ => {
-                    return Err(exit::coded(
-                        exit::USAGE,
-                        anyhow::anyhow!(tr!(
-                            "call requires exactly one of --listen or --stdio (and optional --forward)"
-                        )),
-                    ));
-                }
-            };
-            #[cfg(not(unix))]
-            let local = match listen {
-                Some(a) => call::CallLocal::Listen(a),
-                None => {
-                    return Err(exit::coded(
-                        exit::USAGE,
-                        anyhow::anyhow!(tr!("call requires --listen (and optional --forward)")),
-                    ));
-                }
-            };
-            #[cfg(unix)]
-            let ui = Ui {
-                quiet: ui.quiet,
-                stderr_only: matches!(local, call::CallLocal::Stdio),
-            };
-            call::run_call(
+            let cmd = parse_call_args(args, listen, forward, to_addr, no_wait, foreground)?;
+            run_call_cmd(
+                cmd,
+                identity_path.as_deref(),
                 secret_key,
-                &to,
-                local,
-                forward,
                 &cli.relay,
                 cli.no_n0_relays,
                 cli.relay_only,
-                to_addr,
-                cli.max_conns,
                 Duration::from_secs(cli.keepalive),
                 Duration::from_secs(cli.idle_timeout),
                 tune,
+                cli.max_conns,
                 ui,
                 styler,
             )

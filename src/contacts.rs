@@ -109,14 +109,6 @@ pub fn hint_save_contact(ui: crate::runtime::Ui, styler: &crate::style::Styler, 
     )));
 }
 
-/// Prompt the user to paste their identity to the peer (first-time call path).
-pub fn hint_share_identity(ui: crate::runtime::Ui, styler: &crate::style::Styler, id: EndpointId) {
-    ui.line(styler.dim(&tr!(
-        "give the other peer your SHORT_CODE (or ENDPOINT_ID); both sides run the same `call`:"
-    )));
-    ui.line(format!("  {}", styler.highlight(&encode_short_code(id))));
-}
-
 pub fn load(path: &Path) -> Result<ContactBook> {
     if !path.exists() {
         return Ok(ContactBook::default());
@@ -139,6 +131,8 @@ pub fn save(path: &Path, book: &ContactBook) -> Result<()> {
 #[derive(Debug, Clone)]
 pub struct ResolvedPeer {
     pub id: EndpointId,
+    /// Contact-book relay hints (reserved for dial; not yet consumed by phone path).
+    #[allow(dead_code)]
     pub relays: Vec<String>,
     pub addrs: Vec<SocketAddr>,
     pub name: Option<String>,
@@ -240,7 +234,7 @@ pub fn parse_endpoint_token(token: &str) -> Result<EndpointId> {
     }
 
     // Legacy: payload only (no check digit), exactly 52 Crockford chars.
-    if compact.len() == 52 {
+    if compact.chars().count() == 52 {
         if let Ok(bytes) = decode_crockford(&compact) {
             if bytes.len() >= 32 {
                 let mut arr = [0u8; 32];

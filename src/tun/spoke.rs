@@ -89,10 +89,10 @@ fn spawn_conn_sender(
     peer: EndpointId,
     conn: Connection,
     rx: mpsc::Receiver<Bytes>,
-    user_mtu: u16,
+    iface_mtu: SharedIfaceMtu,
     raise_gate: MtuRaiseGate,
 ) {
-    spawn_peer_sender(tun, tun_name, own, peer, conn, rx, user_mtu, raise_gate);
+    spawn_peer_sender(tun, tun_name, own, peer, conn, rx, iface_mtu, raise_gate);
 }
 
 async fn spoke_install_direct(
@@ -103,7 +103,7 @@ async fn spoke_install_direct(
     peer_id: EndpointId,
     peer: OwnVips,
     conn: Connection,
-    user_mtu: u16,
+    iface_mtu: SharedIfaceMtu,
     raise_gate: MtuRaiseGate,
 ) {
     if peer.v4 == own.v4 || peer.v6 == own.v6 {
@@ -117,7 +117,7 @@ async fn spoke_install_direct(
         peer_id,
         conn.clone(),
         rx,
-        user_mtu,
+        iface_mtu,
         raise_gate,
     );
     {
@@ -171,14 +171,14 @@ async fn spoke_try_dial_peer(
     own_id: EndpointId,
     own: OwnVips,
     entry: RosterEntry,
-    user_mtu: u16,
+    iface_mtu: SharedIfaceMtu,
     allow: Option<HashSet<EndpointId>>,
     raise_gate: MtuRaiseGate,
 ) {
     let peer = entry.id;
     async move {
         spoke_try_dial_peer_inner(
-            endpoint, mesh, tun, tun_name, own_id, own, entry, user_mtu, allow, raise_gate,
+            endpoint, mesh, tun, tun_name, own_id, own, entry, iface_mtu, allow, raise_gate,
         )
         .await;
     }
@@ -194,7 +194,7 @@ async fn spoke_try_dial_peer_inner(
     own_id: EndpointId,
     own: OwnVips,
     entry: RosterEntry,
-    user_mtu: u16,
+    iface_mtu: SharedIfaceMtu,
     allow: Option<HashSet<EndpointId>>,
     raise_gate: MtuRaiseGate,
 ) {
@@ -225,7 +225,7 @@ async fn spoke_try_dial_peer_inner(
                         entry.id,
                         vip,
                         conn,
-                        user_mtu,
+                        iface_mtu,
                         raise_gate,
                     )
                     .await;
@@ -260,7 +260,7 @@ async fn spoke_apply_roster_msg(
     own_id: EndpointId,
     own: OwnVips,
     msg: RosterMsg,
-    user_mtu: u16,
+    iface_mtu: SharedIfaceMtu,
     allow: Option<HashSet<EndpointId>>,
     raise_gate: MtuRaiseGate,
     quiet: bool,
@@ -290,6 +290,7 @@ async fn spoke_apply_roster_msg(
                 let tun_name = tun_name.clone();
                 let allow = allow.clone();
                 let raise_gate = Arc::clone(&raise_gate);
+                let iface_mtu = Arc::clone(&iface_mtu);
                 tokio::spawn(async move {
                     spoke_try_dial_peer(
                         ep,
@@ -299,7 +300,7 @@ async fn spoke_apply_roster_msg(
                         own_id,
                         own,
                         e,
-                        user_mtu,
+                        iface_mtu,
                         allow,
                         raise_gate,
                     )
@@ -339,7 +340,7 @@ async fn spoke_apply_roster_msg(
                 own_id,
                 own,
                 e,
-                user_mtu,
+                iface_mtu,
                 allow,
                 raise_gate,
             ));
@@ -509,6 +510,7 @@ async fn run_tun_connect_inner(
     }
     let (tun_io, mut from_tun) = spawn_tun_io(tun, mtu);
     let raise_gate = new_mtu_raise_gate();
+    let iface_mtu = new_shared_iface_mtu(mtu);
     let mesh: SharedSpokeMesh =
         Arc::new(arc_swap::ArcSwap::from_pointee(SpokeMesh::new(own_id, own)));
 
@@ -537,6 +539,7 @@ async fn run_tun_connect_inner(
         let tun_name_acc = tun_name.clone();
         let allow_acc = allow.clone();
         let raise_gate_acc = Arc::clone(&raise_gate);
+        let iface_mtu_acc = Arc::clone(&iface_mtu);
         tokio::spawn(async move {
             while let Some(incoming) = endpoint_acc.accept().await {
                 let Ok(accepting) = incoming.accept() else {
@@ -567,11 +570,12 @@ async fn run_tun_connect_inner(
                 let mesh = Arc::clone(&mesh_acc);
                 let tun_name = tun_name_acc.clone();
                 let raise_gate = Arc::clone(&raise_gate_acc);
+                let iface_mtu = Arc::clone(&iface_mtu_acc);
                 tokio::spawn(async move {
                     match exchange_peer_vips(&conn, own, false).await {
                         Ok(vip) => {
                             spoke_install_direct(
-                                &mesh, tun, &tun_name, own, peer, vip, conn, mtu, raise_gate,
+                                &mesh, tun, &tun_name, own, peer, vip, conn, iface_mtu, raise_gate,
                             )
                             .await;
                         }
@@ -632,8 +636,9 @@ async fn run_tun_connect_inner(
             drop(ctrl_send); // hub writes; we only read
 
             let user_mtu = mtu;
-            let mut session_mtu = choose_mtu(user_mtu, &conn)?;
+            let session_mtu = choose_mtu(user_mtu, &conn)?;
             set_tun_mtu(&tun_name, session_mtu)?;
+            *iface_mtu.lock().unwrap_or_else(|e| e.into_inner()) = session_mtu;
             add_mesh_route(&tun_name)?;
             info!(peer_id = %hub_id, path = path_label(&conn), "{}", tr_fmt!(
                 "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}",
@@ -663,7 +668,7 @@ async fn run_tun_connect_inner(
                 hub_id,
                 conn.clone(),
                 hub_rx,
-                user_mtu,
+                Arc::clone(&iface_mtu),
                 Arc::clone(&raise_gate),
             );
             {
@@ -718,6 +723,7 @@ async fn run_tun_connect_inner(
             let tun_name_r = tun_name.clone();
             let allow_r = allow.clone();
             let raise_gate_r = Arc::clone(&raise_gate);
+            let iface_mtu_r = Arc::clone(&iface_mtu);
             let quiet_r = ui.quiet;
             let roster_task = tokio::spawn(async move {
                 loop {
@@ -731,7 +737,7 @@ async fn run_tun_connect_inner(
                                 own_id,
                                 own,
                                 msg,
-                                user_mtu,
+                                Arc::clone(&iface_mtu_r),
                                 allow_r.clone(),
                                 Arc::clone(&raise_gate_r),
                                 quiet_r,
@@ -795,12 +801,12 @@ async fn run_tun_connect_inner(
                         break SessionEnd::PeerGone;
                     }
                     _ = time::sleep(Duration::from_secs(2)) => {
-                        let _ = refresh_tun_mtu(
+                        try_refresh_tun_mtu(
                             &tun_name,
                             user_mtu,
                             &conn,
-                            &mut session_mtu,
-                            raise_after_now(&raise_gate),
+                            &iface_mtu,
+                            &raise_gate,
                         );
                         if let Some(h) = &hooks {
                             h.state.set_path_kind(path_label(&conn)).await;

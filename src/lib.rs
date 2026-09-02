@@ -36,6 +36,7 @@ mod i18n;
 mod identity;
 mod path_kind;
 mod path_stats;
+mod phone_ring;
 mod pipe;
 mod relay_probe;
 mod relay_rtt;
@@ -43,6 +44,8 @@ mod runtime;
 mod selftest;
 mod socks5;
 mod ssrf;
+mod stream_ctl;
+mod stream_daemon;
 pub mod style;
 mod tun;
 pub mod tun_ctl;
@@ -85,9 +88,9 @@ pub fn win_eventlog_error(msg: &str) -> Result<(), String> {
 pub(crate) use identity::{load_or_create_secret_key, resolve_identity_path, validate_passphrase};
 pub(crate) use runtime::{
     bring_endpoint_online, build_dial_addr, build_endpoint, conn_semaphore, handle_forward_stream,
-    open_stream_wait, push_task, reject_relay_only_with_to_addr, spawn_path_monitor,
-    spawn_reconnect_watcher, Backoff, ConnSlot, PingHandler, ServeMode, TransportTune, Ui, ALPN,
-    MIN_STABLE_CONN, PING_ALPN, RECONNECT_BASE, RECONNECT_MAX,
+    open_stream_wait, push_task, reject_relay_only_with_to_addr, spawn_path_monitor, Backoff,
+    ConnSlot, PingHandler, ServeMode, TransportTune, Ui, ALPN, MIN_STABLE_CONN, PING_ALPN,
+    RECONNECT_BASE, RECONNECT_MAX,
 };
 
 #[cfg(test)]

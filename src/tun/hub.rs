@@ -211,9 +211,13 @@ async fn hub_tun_to_peers(
 /// Hub: packets from one spoke → local TUN and/or another spoke's outbound queue.
 async fn hub_peer_to_mesh(
     tun: TunIo,
+    tun_name: String,
     own: OwnVips,
     peers: HubPeers,
     peer: HubPeer,
+    user_mtu: u16,
+    iface_mtu: SharedIfaceMtu,
+    raise_gate: MtuRaiseGate,
 ) {
     let peer_vip = peer.vip;
     let peer_id = peer.id;
@@ -247,6 +251,15 @@ async fn hub_peer_to_mesh(
                         warn!(peer = %peer_id, error = %e, "{}", tr!("datagram error; assuming transient path switch (iroh may be migrating the connection)"));
                     }
                 }
+            }
+            _ = time::sleep(Duration::from_secs(2)) => {
+                try_refresh_tun_mtu(
+                    &tun_name,
+                    user_mtu,
+                    &peer.conn,
+                    &iface_mtu,
+                    &raise_gate,
+                );
             }
         }
     }
@@ -338,6 +351,7 @@ pub async fn run_tun_serve(
     }
     let (tun_io, from_tun) = spawn_tun_io(tun, mtu);
     let raise_gate = new_mtu_raise_gate();
+    let iface_mtu = new_shared_iface_mtu(mtu);
     let peers: HubPeers = Arc::new(arc_swap::ArcSwap::from_pointee(HubPeerIndex::default()));
     let fans: RosterFans = Arc::new(RwLock::new(HashMap::new()));
 
@@ -428,6 +442,7 @@ pub async fn run_tun_serve(
                 let fans = Arc::clone(&fans);
                 let tun_name = tun_name.clone();
                 let raise_gate = Arc::clone(&raise_gate);
+                let iface_mtu = Arc::clone(&iface_mtu);
                 let user_mtu = mtu;
                 let hooks_s = hooks.clone();
                 crate::spawn_path_monitor(
@@ -454,6 +469,7 @@ pub async fn run_tun_serve(
                             session,
                             conn,
                             user_mtu,
+                            iface_mtu,
                             raise_gate,
                             quiet,
                             hooks_s,
@@ -496,6 +512,7 @@ async fn hub_run_spoke(
     session: u64,
     conn: Connection,
     user_mtu: u16,
+    iface_mtu: SharedIfaceMtu,
     raise_gate: MtuRaiseGate,
     quiet: bool,
     hooks: Option<Arc<TunHooks>>,
@@ -539,8 +556,8 @@ async fn hub_run_spoke(
         peer_id,
         conn.clone(),
         out_rx,
-        user_mtu,
-        raise_gate,
+        Arc::clone(&iface_mtu),
+        Arc::clone(&raise_gate),
     );
 
     try_claim_peer(
@@ -566,6 +583,13 @@ async fn hub_run_spoke(
     }
 
     let session_mtu = choose_mtu(user_mtu, &conn).unwrap_or(user_mtu);
+    {
+        let mut cur = iface_mtu.lock().unwrap_or_else(|e| e.into_inner());
+        if session_mtu < *cur {
+            *cur = session_mtu;
+            let _ = set_tun_mtu(&tun_name, session_mtu);
+        }
+    }
     info!(%peer_id, vip = %peer.v4, vip6 = %peer.v6, hidden, path = path_label(&conn), "{}", tr!("TUN session established"));
     info!(%peer_id, "{}", tr_fmt!(
         "TUN datagram negotiation: max_datagram_size={0}, interface MTU={1}",
@@ -623,7 +647,17 @@ async fn hub_run_spoke(
         outbound: out_tx_mesh,
         hidden,
     };
-    hub_peer_to_mesh(tun, own, Arc::clone(&peers), hub_peer).await;
+    hub_peer_to_mesh(
+        tun,
+        tun_name.clone(),
+        own,
+        Arc::clone(&peers),
+        hub_peer,
+        user_mtu,
+        iface_mtu,
+        raise_gate,
+    )
+    .await;
 
     ctrl_send_task.abort();
     // Ownership-aware: a reconnecting peer may have replaced our entry with a

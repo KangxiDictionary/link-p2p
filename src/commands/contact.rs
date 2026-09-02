@@ -36,7 +36,7 @@ pub(crate) fn run_contact(
                 code
             )));
             ui.line(styler.dim(&tr_fmt!(
-                "next: link-p2p call --to {0} --listen 127.0.0.1:2222 --forward 127.0.0.1:22",
+                "next: on this machine `call up --listen …`; peer runs `call {0} --listen …`",
                 name
             )));
             Ok(())

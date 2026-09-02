@@ -81,20 +81,25 @@ Details: [platforms](docs/user-guide/platforms.md), [TUN / systemd](docs/subsyst
 
 ## Quick start
 
-**Port forward** (same command on both peers — EndpointId tie-break picks who
-dials). Each side prints `SHORT_CODE=` / `ENDPOINT_ID=` at start:
+**Phone-mode port forward** (standing callee + dial — same verbs as TUN phone,
+without a TUN device). Each side prints `SHORT_CODE=` / `ENDPOINT_ID=` at start:
 
 ```bash
-# both machines (example: forward local SSH)
-link-p2p call --to <peer SHORT_CODE or EndpointId> \
+# machine A — leave the callee up
+link-p2p call up --listen 127.0.0.1:2222 --forward 127.0.0.1:22
+
+# machine B — dial A (auto-spawns a standing daemon on B if needed)
+link-p2p call <peer SHORT_CODE or EndpointId> \
   --listen 127.0.0.1:2222 --forward 127.0.0.1:22
-# save the peer once:
+
+# save the peer once (known contacts auto-accept next time):
 link-p2p contact add alice <their SHORT_CODE>
 # forever after:
-link-p2p call --to alice --listen 127.0.0.1:2222 --forward 127.0.0.1:22
+link-p2p call alice --listen 127.0.0.1:2222 --forward 127.0.0.1:22
+# strangers ring until: call accept <peer> / call reject <peer>
 ```
 
-**Whole-machine mesh** (TUN):
+**Whole-machine mesh** (TUN — same phone verbs, VIP mesh):
 
 ```bash
 # 1:1 "phone"
@@ -114,8 +119,8 @@ link-p2p connect --socks5-listen 127.0.0.1:1080 --to <EndpointId>
 
 ### Explicit roles (optional)
 
-When you want fixed hub/spoke or serve/connect roles instead of symmetric
-`call` / `tun join`:
+When you want fixed hub/spoke or serve/connect roles instead of phone-mode
+`call` / `tun call` / `tun join`:
 
 ```bash
 link-p2p serve --forward 127.0.0.1:22

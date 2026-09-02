@@ -8,9 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
 use crate::contacts;
+use crate::phone_ring::RING_TIMEOUT;
 use crate::tun_ctl::PendingCall;
-
-const RING_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct Ringing {
     peer: EndpointId,
@@ -38,23 +37,15 @@ fn now_unix_ms() -> u64 {
 }
 
 fn is_known_contact(book: &contacts::ContactBook, peer: EndpointId) -> bool {
-    contacts::name_for_id(book, peer).is_some()
+    crate::phone_ring::is_known_contact(book, peer)
 }
 
 fn resolve_peer_token(book: &contacts::ContactBook, to: &str) -> Result<EndpointId> {
-    Ok(contacts::resolve(book, to)?.id)
+    crate::phone_ring::resolve_peer_token(book, to)
 }
 
 fn match_peer_token(book: &contacts::ContactBook, token: &str, peer: EndpointId) -> bool {
-    if token.eq_ignore_ascii_case(&peer.to_string()) {
-        return true;
-    }
-    if let Ok(id) = contacts::parse_endpoint_token(token) {
-        return id == peer;
-    }
-    contacts::name_for_id(book, peer)
-        .map(|n| n.eq_ignore_ascii_case(token))
-        .unwrap_or(false)
+    crate::phone_ring::match_peer_token(book, token, peer)
 }
 
 async fn publish_pending(state: &TunLiveState, ringing: &RingingList) {
@@ -174,6 +165,7 @@ pub async fn run_tun_phone(
     let peers: ActivePeers = Arc::new(arc_swap::ArcSwap::from_pointee(HashMap::new()));
     let ringing: RingingList = Arc::new(RwLock::new(Vec::new()));
     let raise_gate = new_mtu_raise_gate();
+    let iface_mtu = new_shared_iface_mtu(mtu);
 
     // Local TUN → active peer by destination VIP (v4 or v6).
     {
@@ -256,6 +248,7 @@ pub async fn run_tun_phone(
                         conn,
                         false,
                         mtu,
+                        Arc::clone(&iface_mtu),
                         Arc::clone(&raise_gate),
                         Arc::clone(&peers),
                         Arc::clone(&ringing),
@@ -314,6 +307,7 @@ pub async fn run_tun_phone(
                                 let ringing = Arc::clone(&ringing);
                                 let hooks = Arc::clone(&hooks);
                                 let raise_gate = Arc::clone(&raise_gate);
+                                let iface_mtu = Arc::clone(&iface_mtu);
                                 let endpoint = endpoint.clone();
                                 let quiet = ui.quiet;
                                 tokio::spawn(async move {
@@ -327,6 +321,7 @@ pub async fn run_tun_phone(
                                                 conn,
                                                 true,
                                                 mtu,
+                                                iface_mtu,
                                                 raise_gate,
                                                 peers,
                                                 ringing,
@@ -376,6 +371,7 @@ pub async fn run_tun_phone(
                                     r.conn,
                                     false,
                                     mtu,
+                                    Arc::clone(&iface_mtu),
                                     Arc::clone(&raise_gate),
                                     Arc::clone(&peers),
                                     Arc::clone(&ringing),
@@ -456,6 +452,7 @@ fn spawn_phone_session(
     conn: Connection,
     dialer: bool,
     mtu: u16,
+    iface_mtu: SharedIfaceMtu,
     raise_gate: MtuRaiseGate,
     peers: ActivePeers,
     ringing: RingingList,
@@ -484,6 +481,7 @@ fn spawn_phone_session(
                 conn,
                 dialer,
                 mtu,
+                iface_mtu,
                 raise_gate,
                 Arc::clone(&peers),
                 Arc::clone(&ringing),
@@ -509,6 +507,7 @@ async fn phone_run_peer(
     conn: Connection,
     dialer: bool,
     user_mtu: u16,
+    iface_mtu: SharedIfaceMtu,
     raise_gate: MtuRaiseGate,
     peers: ActivePeers,
     ringing: RingingList,
@@ -536,8 +535,8 @@ async fn phone_run_peer(
         peer_id,
         conn.clone(),
         out_rx,
-        user_mtu,
-        raise_gate,
+        Arc::clone(&iface_mtu),
+        Arc::clone(&raise_gate),
     );
 
     // Atomic claim: rcu may retry under contention; success iff our peer_id
@@ -583,7 +582,14 @@ async fn phone_run_peer(
         return Err(e);
     }
 
-    let _session_mtu = choose_mtu(user_mtu, &conn).unwrap_or(user_mtu);
+    let session_mtu = choose_mtu(user_mtu, &conn).unwrap_or(user_mtu);
+    {
+        let mut cur = iface_mtu.lock().unwrap_or_else(|e| e.into_inner());
+        if session_mtu < *cur {
+            *cur = session_mtu;
+            let _ = set_tun_mtu(&tun_name, session_mtu);
+        }
+    }
     info!(%peer_id, vip = %peer.v4, vip6 = %peer.v6, path = path_label(&conn), "{}", tr!("TUN session established"));
     hooks.state.set_path_kind(path_label(&conn)).await;
     hooks.state.apply_phase(PhaseEvent::Connected).await;
@@ -622,6 +628,15 @@ async fn phone_run_peer(
                         warn!(peer = %peer_id, error = %e, "{}", tr!("datagram error; assuming transient path switch (iroh may be migrating the connection)"));
                     }
                 }
+            }
+            _ = time::sleep(Duration::from_secs(2)) => {
+                try_refresh_tun_mtu(
+                    &tun_name,
+                    user_mtu,
+                    &conn,
+                    &iface_mtu,
+                    &raise_gate,
+                );
             }
         }
     }

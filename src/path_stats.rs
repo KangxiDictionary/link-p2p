@@ -93,6 +93,16 @@ pub fn peer_direct_rates(limit: Option<usize>) -> HashMap<String, f64> {
 /// a roster snapshot so peers that usually punch through get a head start.
 pub fn sort_by_direct_history<T>(items: &mut [T], peer_hex: impl Fn(&T) -> String) {
     let rates = peer_direct_rates(None);
+    sort_by_direct_history_with_rates(items, &rates, peer_hex);
+}
+
+/// Same ordering as [`sort_by_direct_history`], with an injected rate map
+/// (unit tests).
+pub(crate) fn sort_by_direct_history_with_rates<T>(
+    items: &mut [T],
+    rates: &HashMap<String, f64>,
+    peer_hex: impl Fn(&T) -> String,
+) {
     items.sort_by(|a, b| {
         let ra = rates.get(&peer_hex(a)).copied();
         let rb = rates.get(&peer_hex(b)).copied();
@@ -288,16 +298,7 @@ mod tests {
             m.insert("aaaa".to_string(), 0.2);
             m
         };
-        peers.sort_by(|a, b| {
-            let ra = rates.get(&a.0).copied();
-            let rb = rates.get(&b.0).copied();
-            match (ra, rb) {
-                (Some(x), Some(y)) => y.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            }
-        });
+        sort_by_direct_history_with_rates(&mut peers, &rates, |p| p.0.clone());
         assert_eq!(peers[0].0, "bbbb");
         assert_eq!(peers[1].0, "aaaa");
         assert_eq!(peers[2].0, "unknown");

@@ -1728,13 +1728,13 @@ msgstr ""
 msgid "dialing contact {0}..."
 msgstr ""
 
-msgid "your identity (give SHORT_CODE to peers; both can `call --to` each other):"
+msgid "your identity (give SHORT_CODE to peers; both can `call` each other):"
 msgstr ""
 
 msgid "connecting to remote endpoint — if this fails or hangs, run: link-p2p selftest"
 msgstr ""
 
-msgid "next: link-p2p call --to {0} --listen 127.0.0.1:2222 --forward 127.0.0.1:22"
+msgid "next: link-p2p call {0} --listen 127.0.0.1:2222 --forward 127.0.0.1:22"
 msgstr ""
 
 msgid "Contact name, EndpointId, or short code. Use `-` to read one line from stdin. Also `LINK_P2P_TO`."
@@ -1746,7 +1746,7 @@ msgstr ""
 msgid "EndpointId hex or short code (from the peer's SHORT_CODE= line)."
 msgstr ""
 
-msgid "Best first-time path: both sides run the same `call` with each other's SHORT_CODE (printed at start). After it connects once, `contact add <name> <short-code>` — next time use `--to <name>`. Prefer this over juggling separate serve/connect roles."
+msgid "Best first-time path: both sides run the same `call` with each other's SHORT_CODE (printed at start). After it connects once, `contact add <name> <short-code>` — next time use `call <name>`. Prefer this over juggling separate serve/connect roles."
 msgstr ""
 
 msgid "dialing with address hint(s): {0}"
@@ -2081,3 +2081,194 @@ msgstr "`tun serve` ハブへダイヤルし、TUN に 172.24.0.0/16 と fd24:ac
 
 msgid "`--identity-passphrase` is visible in `ps` and shell history; prefer LINK_P2P_PASSPHRASE"
 msgstr "`--identity-passphrase` は `ps` やシェル履歴に残ります。LINK_P2P_PASSPHRASE を推奨します"
+
+# --- stream phone / call daemon (phone UX) ---
+
+msgid "{0} ringing call(s) — `link-p2p call ring`"
+msgstr "着信中 {0} 件 — `link-p2p call ring`"
+
+msgid "accepted call from {0}"
+msgstr "{0} からの通話を応答しました"
+
+msgid ""
+"background `call up` is Unix-only; use `call up --foreground` on this platform"
+msgstr "バックグラウンド `call up` は Unix のみ；この環境では `call up --foreground` を使ってください"
+
+msgid ""
+"background `call up` needs a persistent identity (omit --ephemeral or use --foreground)"
+msgstr ""
+"バックグラウンド `call up` には永続 identity が必要です（--ephemeral を外すか --foreground を使う）"
+
+msgid "bad control magic (expected SPC1)"
+msgstr "制御プロトコルのマジックが不正です（SPC1 が必要）"
+
+msgid "binding call control socket {0}"
+msgstr "call 制御ソケット {0} をバインドしています"
+
+msgid "binding call ready listener"
+msgstr "call ready リスナーをバインドしています"
+
+msgid "call daemon did not become ready"
+msgstr "call デーモンが ready になりませんでした"
+
+msgid "call daemon failed to start: {0}"
+msgstr "call デーモンの起動に失敗: {0}"
+
+msgid "call daemon is busy"
+msgstr "call デーモンはビジーです"
+
+msgid "call daemon started with unexpected session"
+msgstr "call デーモンが予期しない session で起動しました"
+
+msgid "calling {0}… waiting for answer"
+msgstr "{0} に発信中… 応答待ち"
+
+msgid "call phone plane exited before ready"
+msgstr "call 電話データプレーンが ready 前に終了しました"
+
+msgid "cloning call log handle"
+msgstr "call ログハンドルを複製しています"
+
+msgid "could not reach {0}: {1}"
+msgstr "{0} に到達できません: {1}"
+
+msgid "dial queued on the standing daemon"
+msgstr "発信を常駐デーモンにキューしました"
+
+msgid "forward {0}"
+msgstr "forward {0}"
+
+msgid "incoming call from {0} — `link-p2p call accept {0}` or `call reject`"
+msgstr "{0} からの着信 — `link-p2p call accept {0}` または `call reject`"
+
+msgid "listen {0}"
+msgstr "listen {0}"
+
+msgid "locking {0}"
+msgstr "{0} をロックしています"
+
+msgid "logs: {0}"
+msgstr "ログ: {0}"
+
+msgid ""
+"next: on this machine `call up --listen …`; peer runs `call {0} --listen …`"
+msgstr "次: このマシンで `call up --listen …`；相手は `call {0} --listen …`"
+
+msgid "no ringing calls"
+msgstr "着信中の通話はありません"
+
+msgid "opening call lock {0}"
+msgstr "call ロック {0} を開いています"
+
+msgid "opening call log {0}"
+msgstr "call ログ {0} を開いています"
+
+msgid "Phone-mode stream call: standing callee + dial / ring / accept."
+msgstr "電話モードのストリーム通話：常駐着信 + 発信 / 着信 / 応答。"
+
+msgid "rejected call from {0}"
+msgstr "{0} からの通話を拒否しました"
+
+msgid "Return after enqueueing a dial on the standing daemon."
+msgstr "常駐デーモンに発信をキューしてすぐ戻る。"
+
+msgid "role {0}  phase {1}"
+msgstr "役割 {0}  フェーズ {1}"
+
+msgid "roster snapshot has too many entries ({0} > {1})"
+msgstr "roster スナップショットのエントリが多すぎます（{0} > {1}）"
+
+msgid ""
+"Run before first serve/connect/call when a dial times out. TCP-probes each --relay URL (note: TCP ok does not prove UDP/QUIC or that a peer will answer a ring), then a loopback echo. Pass --tun for wintun/system-identity checks (same as tun selftest)."
+msgstr ""
+"初回の serve/connect/call でダイヤルがタイムアウトする前に実行。各 --relay URL を TCP プローブ（TCP OK は UDP/QUIC や着信応答を保証しない）し、ループバック echo。--tun で wintun/システム identity 検査（tun selftest と同じ）。"
+
+msgid "setsid for call daemon"
+msgstr "call デーモン向け setsid"
+
+msgid "spawning call daemon worker"
+msgstr "call デーモン worker を起動しています"
+
+msgid "spoke requires --to <hub EndpointId>"
+msgstr "spoke には --to <hub EndpointId> が必要です"
+
+msgid ""
+"Standing callee daemon (like tun call, without TUN). Start with `call up` (or dial and auto-spawn), then the peer runs `call <your-name>`. Known contacts auto-accept; strangers ring until `call accept` / `call reject` / timeout. Use serve/connect for explicit roles."
+msgstr ""
+"常駐着信デーモン（tun call と同様、TUN なし）。`call up` で起動（または発信時に自動起動）し、相手は `call <あなたの名前>`。連絡先は自動応答；見知らぬ相手は `call accept` / `call reject` / タイムアウトまで着信。役割を明示するなら serve/connect。"
+
+msgid "starting stream call daemon…"
+msgstr "stream call デーモンを起動しています…"
+
+msgid "stream call control request timed out"
+msgstr "stream call 制御リクエストがタイムアウトしました"
+
+msgid "stream call daemon is already running"
+msgstr "stream call デーモンは既に動作中です"
+
+msgid "stream call daemon is not running"
+msgstr "stream call デーモンは動作していません"
+
+msgid "stream call daemon is not running (try: link-p2p call up)"
+msgstr "stream call デーモンが動いていません（試す: link-p2p call up）"
+
+msgid "stream call daemon is Unix-only in this build"
+msgstr "このビルドでは stream call デーモンは Unix のみです"
+
+msgid ""
+"stream call daemon is Unix-only in this build; use serve/connect on this platform for now"
+msgstr "このビルドでは stream call デーモンは Unix のみ；当面はこの環境で serve/connect を使ってください"
+
+msgid "stream call daemon protocol mismatch (daemon v{0}, CLI v{1})"
+msgstr "stream call デーモンのプロトコル不一致（デーモン v{0}、CLI v{1}）"
+
+msgid "stream call daemon started (pid {0})"
+msgstr "stream call デーモンを起動しました（pid {0}）"
+
+msgid "stream call daemon stopped"
+msgstr "stream call デーモンを停止しました"
+
+msgid "stream call daemon worker is Unix-only in this build"
+msgstr "このビルドでは stream call デーモン worker は Unix のみです"
+
+msgid "timed out waiting for call daemon ready"
+msgstr "call デーモンの ready 待ちがタイムアウトしました"
+
+msgid "unexpected status response"
+msgstr "予期しない status 応答"
+
+msgid "unexpected Status response from call daemon: {0}"
+msgstr "call デーモンから予期しない Status 応答: {0}"
+
+msgid ""
+"`up` | `down` | `ring` | `status` | `accept <peer>` | `reject <peer>` | `<peer>` to dial."
+msgstr ""
+"`up` | `down` | `ring` | `status` | `accept <相手>` | `reject <相手>` | `<相手>` で発信。"
+
+msgid "uptime {0}s  session {1}"
+msgstr "稼働 {0}s  session {1}"
+
+msgid "usage: call accept <peer>"
+msgstr "用法: call accept <相手>"
+
+msgid ""
+"usage: call <peer> [--listen …] [--forward …] [--to-addr …] [--no-wait]"
+msgstr "用法: call <相手> [--listen …] [--forward …] [--to-addr …] [--no-wait]"
+
+msgid "usage: call reject <peer>"
+msgstr "用法: call reject <相手>"
+
+msgid "usage: call up|down|ring|status|accept <peer>|reject <peer>|<peer>"
+msgstr "用法: call up|down|ring|status|accept <相手>|reject <相手>|<相手>"
+
+msgid "usage: call up [--listen …] [--forward …] [--foreground]"
+msgstr "用法: call up [--listen …] [--forward …] [--foreground]"
+
+msgid ""
+"waiting for answer — peer must have `call up` (or `call accept` if ringing); check `call status`"
+msgstr ""
+"応答待ち — 相手は `call up` 済みである必要があります（着信中なら `call accept`）；`call status` を確認"
+
+msgid "With `call up`: run in the foreground (do not daemonize)."
+msgstr "`call up` 時：フォアグラウンド実行（デーモン化しない）。"
+

@@ -115,19 +115,28 @@ async fn probe_one(url: &str) -> Option<Duration> {
 
 fn host_port(url: &str) -> Option<std::net::SocketAddr> {
     // Minimal parse: scheme://host:port/... or scheme://host/...
+    // Bracketed IPv6 (`[::1]` / `[::1]:443`) must not use a naive rsplit on
+    // ':' — the address itself contains colons.
     let rest = url
         .split_once("://")
         .map(|(_, r)| r)
         .unwrap_or(url);
     let hostport = rest.split('/').next()?.split('?').next()?;
     let default_port: u16 = if url.starts_with("https") { 443 } else { 80 };
-    let (host, port) = if let Some((h, p)) = hostport.rsplit_once(':') {
-        let host = h.trim_start_matches('[').trim_end_matches(']');
-        let port: u16 = p.parse().unwrap_or(default_port);
+    let (host, port) = if hostport.starts_with('[') {
+        let end = hostport.find(']')?;
+        let host = &hostport[1..end];
+        let port = if hostport[end + 1..].starts_with(':') {
+            hostport[end + 2..].parse().unwrap_or(default_port)
+        } else {
+            default_port
+        };
         (host, port)
+    } else if let Some((h, p)) = hostport.rsplit_once(':') {
+        let port: u16 = p.parse().unwrap_or(default_port);
+        (h, port)
     } else {
-        let host = hostport.trim_start_matches('[').trim_end_matches(']');
-        (host, default_port)
+        (hostport, default_port)
     };
     (host, port).to_socket_addrs().ok()?.next()
 }
@@ -146,6 +155,20 @@ mod tests {
     fn parses_ipv6_literal() {
         let a = host_port("http://[::1]:3340").expect("parse");
         assert_eq!(a.port(), 3340);
+        assert!(a.ip().is_ipv6());
+    }
+
+    #[test]
+    fn parses_ipv6_literal_default_http_port() {
+        let a = host_port("http://[::1]").expect("parse");
+        assert_eq!(a.port(), 80);
+        assert!(a.ip().is_ipv6());
+    }
+
+    #[test]
+    fn parses_ipv6_literal_default_https_port() {
+        let a = host_port("https://[::1]/path").expect("parse");
+        assert_eq!(a.port(), 443);
         assert!(a.ip().is_ipv6());
     }
 }

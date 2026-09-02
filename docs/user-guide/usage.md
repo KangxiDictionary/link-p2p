@@ -10,19 +10,26 @@ For OS-specific setup, see [platforms.md](platforms.md).
 
 ## Stream forward
 
-**Fastest first use** — same command on both peers (EndpointId tie-break picks
-who dials). Each side prints `SHORT_CODE=` / `ENDPOINT_ID=` at start — exchange
-those once out-of-band:
+**Phone mode** (same verbs as `tun call`, without TUN): one side keeps a standing
+callee (`call up`); the other dials. Each side prints `SHORT_CODE=` /
+`ENDPOINT_ID=` at start — exchange those once out-of-band:
 
 ```bash
-# both machines (example: forward local SSH)
-link-p2p call --to <peer SHORT_CODE or EndpointId> \
+# machine A — standing callee
+link-p2p call up --listen 127.0.0.1:2222 --forward 127.0.0.1:22
+
+# machine B — dial (auto-spawns a standing daemon on B if needed)
+link-p2p call <peer SHORT_CODE or EndpointId> \
   --listen 127.0.0.1:2222 --forward 127.0.0.1:22
-# when connected, the CLI reminds you to save them:
+
+# save them once (known contacts auto-accept; strangers ring):
 link-p2p contact add alice <their SHORT_CODE>
-# forever after:
-link-p2p call --to alice --listen 127.0.0.1:2222 --forward 127.0.0.1:22
+link-p2p call alice --listen 127.0.0.1:2222 --forward 127.0.0.1:22
+# while ringing: call ring / call accept <peer> / call reject <peer>
 ```
+
+`selftest` only checks local relay TCP / loopback — it does **not** mean a peer
+is discoverable or will answer a ring.
 
 Before the first dial, `link-p2p selftest` TCP-probes `--relay` URLs (TCP ok ≠
 UDP/QUIC). After a few sessions, `link-p2p stats` shows how often you got a

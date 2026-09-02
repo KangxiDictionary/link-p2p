@@ -595,6 +595,11 @@ fn set_tun_mtu(tun_name: &str, mtu: u16) -> Result<()> {
 /// `max_datagram_size()` is the max payload `send_datagram` will accept
 /// (QUIC framing already subtracted), so the interface MTU can be set to
 /// it directly.
+///
+/// Callers (spoke hub session, hub per-spoke read loop, phone peer loop)
+/// re-check about every 2s so a post-shrink path recovery can lift the
+/// interface again. [`SharedIfaceMtu`] must be the same cell
+/// [`spawn_peer_sender`] updates on shrink.
 fn refresh_tun_mtu(
     tun_name: &str,
     user_mtu: u16,
@@ -652,8 +657,17 @@ const ICMP_PTB_RATE_PER_SEC: u32 = 20;
 /// Shared "do not raise interface MTU before this Instant" gate (one per TUN).
 type MtuRaiseGate = Arc<std::sync::Mutex<Instant>>;
 
+/// Current TUN interface MTU. Shared by [`spawn_peer_sender`] (shrink on
+/// oversize) and the session read loops (periodic [`refresh_tun_mtu`]) so a
+/// shrink is visible to the next raise attempt.
+type SharedIfaceMtu = Arc<std::sync::Mutex<u16>>;
+
 fn new_mtu_raise_gate() -> MtuRaiseGate {
     Arc::new(std::sync::Mutex::new(Instant::now()))
+}
+
+fn new_shared_iface_mtu(initial: u16) -> SharedIfaceMtu {
+    Arc::new(std::sync::Mutex::new(initial))
 }
 
 fn note_mtu_shrink(gate: &MtuRaiseGate) {
@@ -664,6 +678,26 @@ fn note_mtu_shrink(gate: &MtuRaiseGate) {
 
 fn raise_after_now(gate: &MtuRaiseGate) -> Instant {
     gate.lock().map(|g| *g).unwrap_or_else(|_| Instant::now())
+}
+
+/// Periodic PMTUD catch-up used by hub / phone / spoke peer loops.
+fn try_refresh_tun_mtu(
+    tun_name: &str,
+    user_mtu: u16,
+    conn: &Connection,
+    iface_mtu: &SharedIfaceMtu,
+    raise_gate: &MtuRaiseGate,
+) {
+    let mut mtu = iface_mtu
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _ = refresh_tun_mtu(
+        tun_name,
+        user_mtu,
+        conn,
+        &mut mtu,
+        raise_after_now(raise_gate),
+    );
 }
 
 /// Internet checksum (RFC 1071) over `data`.
@@ -912,8 +946,9 @@ enum SessionEnd {
 }
 
 // Per-peer outbound datagrams: [`spawn_peer_sender`] (channel +
-// `send_datagram_wait`). TUN device I/O: [`spawn_tun_io`]. The old monolithic
-// `run_datagram_loop` was removed so hub fan-out cannot HoL on one peer's CC.
+// `send_datagram_wait`). TUN device I/O: [`spawn_tun_io`]. Peer read loops
+// (hub / phone / spoke) call [`try_refresh_tun_mtu`] about every 2s so a
+// path that recovered after [`shrink_tun_mtu`] can raise the interface again.
 
 // ---------------------------------------------------------------------------
 // Entry points.
@@ -1010,7 +1045,8 @@ pub(crate) fn spawn_tun_io(
 ///
 /// Owns ICMP Frag Needed injection (rate-limited) and interface MTU shrink on
 /// oversize; raise hold-off is recorded on [`MtuRaiseGate`] so the session's
-/// periodic [`refresh_tun_mtu`] respects it.
+/// periodic [`refresh_tun_mtu`] respects it. Shrink updates [`SharedIfaceMtu`]
+/// so the raise path sees the lowered value.
 pub(crate) fn spawn_peer_sender(
     tun: TunIo,
     tun_name: String,
@@ -1018,13 +1054,12 @@ pub(crate) fn spawn_peer_sender(
     peer: EndpointId,
     conn: Connection,
     mut rx: mpsc::Receiver<Bytes>,
-    user_mtu: u16,
+    iface_mtu: SharedIfaceMtu,
     raise_gate: MtuRaiseGate,
 ) {
     let span = tracing::info_span!("tun_peer_sender", %peer);
     tokio::spawn(
         async move {
-            let mut iface_mtu = user_mtu;
             let mut icmp_window_start = Instant::now();
             let mut icmp_window_count: u32 = 0;
             while let Some(pkt) = rx.recv().await {
@@ -1032,14 +1067,19 @@ pub(crate) fn spawn_peer_sender(
                 let ceiling = conn.max_datagram_size().unwrap_or(usize::MAX);
                 if n > ceiling {
                     let next_hop = u16::try_from(ceiling).unwrap_or(u16::MAX);
-                    if matches!(
-                        shrink_tun_mtu(&tun_name, ceiling, &mut iface_mtu),
-                        Ok(true)
-                    ) {
+                    let shrunk = {
+                        let mut cur = iface_mtu.lock().unwrap_or_else(|e| e.into_inner());
+                        shrink_tun_mtu(&tun_name, ceiling, &mut cur)
+                    };
+                    if matches!(shrunk, Ok(true)) {
                         note_mtu_shrink(&raise_gate);
+                        let cur = iface_mtu
+                            .lock()
+                            .map(|g| *g)
+                            .unwrap_or(next_hop);
                         warn!(%peer, "{}", tr_fmt!(
                             "path datagram ceiling dropped to {0}; lowered TUN interface MTU and dropped one packet",
-                            iface_mtu
+                            cur
                         ));
                     }
                     if icmp_window_start.elapsed() >= Duration::from_secs(1) {

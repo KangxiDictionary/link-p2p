@@ -198,6 +198,32 @@ pub(crate) enum ConfigCommand {
     Path,
 }
 
+/// Parsed `link-p2p call …` action (after trailing-arg parse).
+#[derive(Debug, Clone)]
+pub(crate) enum CallCommand {
+    Up {
+        listen: Option<SocketAddr>,
+        forward: Option<SocketAddr>,
+        foreground: bool,
+    },
+    Down,
+    Status,
+    Ring,
+    Accept {
+        peer: String,
+    },
+    Reject {
+        peer: String,
+    },
+    Dial {
+        to: String,
+        listen: Option<SocketAddr>,
+        forward: Option<SocketAddr>,
+        to_addr: Vec<SocketAddr>,
+        no_wait: bool,
+    },
+}
+
 /// Machine-oriented output for status commands (`ping`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum OutputFormat {
@@ -298,27 +324,30 @@ pub(crate) enum Command {
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
     },
-    /// Symmetric call: both sides publish and dial (EndpointId tie-break).
+    /// Phone-mode stream call: standing callee daemon + dial / ring / accept.
     ///
-    /// Resolves a contact name, EndpointId, or short code. Merges config.toml
-    /// relays with n0 by default. Pair with the same flags on both peers.
+    /// Examples: `call up --listen 127.0.0.1:2222`, `call alice --listen …`,
+    /// `call ring`, `call accept <peer>`, `call down`. Known contacts
+    /// auto-accept; strangers ring until accept/reject/timeout.
     Call {
-        /// Contact name, EndpointId, or short code.
-        #[arg(add = peer_completer())]
-        to: String,
+        /// `up` | `down` | `ring` | `status` | `accept <peer>` | `reject <peer>` | `<peer>` to dial.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = false)]
+        args: Vec<String>,
         /// Local TCP listen address (forwards to the peer).
-        #[arg(long, conflicts_with = "stdio")]
+        #[arg(long)]
         listen: Option<SocketAddr>,
         /// Local TCP target for streams the peer opens to us.
         #[arg(long)]
         forward: Option<SocketAddr>,
-        /// Pipe stdin/stdout (Unix). Conflicts with --listen.
-        #[cfg(unix)]
-        #[arg(long, conflicts_with = "listen")]
-        stdio: bool,
-        /// Direct address hint(s) (repeatable).
+        /// Direct address hint(s) for dial (repeatable).
         #[arg(long = "to-addr")]
         to_addr: Vec<SocketAddr>,
+        /// Return after enqueueing a dial (no short status poll).
+        #[arg(long)]
+        no_wait: bool,
+        /// With `call up`: run in the foreground (do not daemonize).
+        #[arg(long)]
+        foreground: bool,
     },
     /// Show local path history (direct vs relay) from `ping` / sessions.
     Stats {
@@ -617,11 +646,12 @@ fn version_arg() -> clap::Arg {
 /// Platform-specific quick start appended to `--help`.
 #[cfg(unix)]
 fn platform_after_help() -> &'static str {
-    "QUICK START (same command on both peers):\n\
-    \x20   link-p2p call --to <peer EndpointId> --listen 127.0.0.1:2222 --forward 127.0.0.1:22\n\
-    \x20   link-p2p contact add alice <peer EndpointId>   # then: call --to alice …\n\
-    \x20   link-p2p selftest                              # relay TCP probe before first dial\n\
-    \x20   link-p2p stats                                 # direct vs relay history\n\
+    "QUICK START (same verbs; stream phone vs TUN phone):\n\
+    \x20   link-p2p call up --listen 127.0.0.1:2222 --forward 127.0.0.1:22\n\
+    \x20   link-p2p call <peer> --listen 127.0.0.1:2222 --forward 127.0.0.1:22\n\
+    \x20   link-p2p tun call <peer>   # whole-machine VIP (needs root)\n\
+    \x20   link-p2p contact add alice <peer EndpointId>\n\
+    \x20   link-p2p selftest\n\
 \n\
 ALTERNATE (explicit roles):\n\
     \x20   link-p2p serve --forward 127.0.0.1:22\n\
@@ -639,11 +669,12 @@ See docs/user-guide/platforms.md and README.md."
 
 #[cfg(windows)]
 fn platform_after_help() -> &'static str {
-    "QUICK START (same command on both peers):\n\
-    \x20   link-p2p call --to <peer EndpointId> --listen 127.0.0.1:13389 --forward 127.0.0.1:3389\n\
-    \x20   link-p2p contact add alice <peer EndpointId>   # then: call --to alice …\n\
+    "QUICK START (same verbs; stream phone vs TUN phone):\n\
+    \x20   link-p2p call up --listen 127.0.0.1:13389 --forward 127.0.0.1:3389\n\
+    \x20   link-p2p call <peer> --listen 127.0.0.1:13389 --forward 127.0.0.1:3389\n\
+    \x20   link-p2p tun call <peer>\n\
+    \x20   link-p2p contact add alice <peer EndpointId>\n\
     \x20   link-p2p selftest\n\
-    \x20   link-p2p stats\n\
 \n\
 ALTERNATE (explicit roles):\n\
     \x20   link-p2p serve --forward 127.0.0.1:3389\n\
@@ -1079,17 +1110,16 @@ pub(crate) fn localized_command() -> clap::Command {
                 )
         })
         .mut_subcommand("call", |s| {
-            let s = s
-                .disable_help_flag(true)
+            s.disable_help_flag(true)
                 .arg(help_arg())
-                .about(tr!("Symmetric call: both peers publish and dial (tie-break by EndpointId)."))
+                .about(tr!("Phone-mode stream call: standing callee + dial / ring / accept."))
                 .long_about(helptext::hard_wrap_help(&tr!(
-                    "Best first-time path: both sides run the same `call` with each other's SHORT_CODE (printed at start). After it connects once, `contact add <name> <short-code>` — next time use `--to <name>`. Prefer this over juggling separate serve/connect roles."
+                    "Standing callee daemon (like tun call, without TUN). Start with `call up` (or dial and auto-spawn), then the peer runs `call <your-name>`. Known contacts auto-accept; strangers ring until `call accept` / `call reject` / timeout. Use serve/connect for explicit roles."
                 )))
-                .mut_arg("to", |a| {
+                .mut_arg("args", |a| {
                     helptext::set_help(
                         a,
-                        &tr!("Contact name, EndpointId, or short code from `contact code`."),
+                        &tr!("`up` | `down` | `ring` | `status` | `accept <peer>` | `reject <peer>` | `<peer>` to dial."),
                     )
                 })
                 .mut_arg("listen", |a| {
@@ -1109,15 +1139,19 @@ pub(crate) fn localized_command() -> clap::Command {
                         a,
                         &tr!("Direct address hint(s) for the peer (repeatable)."),
                     )
-                });
-            #[cfg(unix)]
-            let s = s.mut_arg("stdio", |a| {
-                helptext::set_help(
-                    a,
-                    &tr!("Pipe stdin/stdout to one stream (Unix). Conflicts with --listen."),
-                )
-            });
-            s
+                })
+                .mut_arg("no_wait", |a| {
+                    helptext::set_help(
+                        a,
+                        &tr!("Return after enqueueing a dial on the standing daemon."),
+                    )
+                })
+                .mut_arg("foreground", |a| {
+                    helptext::set_help(
+                        a,
+                        &tr!("With `call up`: run in the foreground (do not daemonize)."),
+                    )
+                })
         })
         .mut_subcommand("stats", |s| {
             s.disable_help_flag(true)
@@ -1140,7 +1174,7 @@ pub(crate) fn localized_command() -> clap::Command {
                 .arg(help_arg())
                 .about(tr!("Host diagnostics: relay TCP probe and loopback echo (no identity)."))
                 .long_about(helptext::hard_wrap_help(&tr!(
-                    "Run before first serve/connect/call when a dial times out. TCP-probes each --relay URL (note: TCP ok does not prove UDP/QUIC), then a loopback echo. Pass --tun for wintun/system-identity checks (same as tun selftest)."
+                    "Run before first serve/connect/call when a dial times out. TCP-probes each --relay URL (note: TCP ok does not prove UDP/QUIC or that a peer will answer a ring), then a loopback echo. Pass --tun for wintun/system-identity checks (same as tun selftest)."
                 )))
                 .mut_arg(
                     "no_echo",

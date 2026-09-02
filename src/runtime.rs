@@ -742,10 +742,6 @@ impl ConnSlot {
         let _ = self.0.send(conn);
     }
 
-    pub(crate) fn subscribe(&self) -> watch::Receiver<Option<Connection>> {
-        self.0.subscribe()
-    }
-
     /// Snapshot of the current connection.
     ///
     /// The returned `Connection` may become stale immediately if a reconnect

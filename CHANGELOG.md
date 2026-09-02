@@ -1,5 +1,36 @@
 ## [Unreleased]
 
+### Fixed
+
+- **TUN MTU recovery on hub/phone**: after path PMTUD shrink, hub and phone
+  peer loops periodically call the same MTU raise path as spoke (shared
+  interface MTU cell with the outbound sender) so the TUN MTU can climb again
+  once the path recovers.
+- **`sort_by_direct_history` test**: assert against the real sorter (injected
+  rates), not a duplicated comparator.
+- **`call` docs/tips**: peer is a positional arg (`call alice`), not `--to`
+  (that flag belongs to `connect`/`ping`). Tip after `contact add`, QUICK START,
+  and README/usage examples matched the wrong syntax.
+- **`call status` / `call ring` exit code**: when the stream phone daemon is
+  down, return `DAEMON_NOT_RUNNING` (6) like `tun status`, not `USAGE` (2).
+- **`relay_probe` IPv6 URLs without a port**: bracketed literals such as
+  `http://[::1]` no longer mis-split on internal colons (probe ranking only).
+- **Roster snapshot cap**: reject / truncate `MSG_SNAPSHOT` membership above
+  4096 entries (aligned with `tun_ctl` peer-list defense).
+
+### Changed
+
+- **Stream `call` is phone-mode** (aligned with `tun call`): standing callee
+  daemon (`call up` / auto-spawn on dial), then `call <peer>`, `call ring`,
+  `call accept|reject`, `call status|down`. Known contacts auto-accept;
+  strangers ring for **120s** (TUN phone ring timeout raised to match).
+  **Breaking:** the old dual-foreground symmetric `call` handshake is gone —
+  one side must be present (`call up` or a prior dial that left the daemon up).
+  `serve` / `connect` remain for explicit roles. Ring timeout is independent of
+  QUIC `--idle-timeout`.
+- **`call.rs`**: drop unused legacy symmetric `run_call` path; keep only
+  listen/forward helpers used by the stream phone daemon.
+
 ## [0.4.1] - 2026-09-02
 
 ### Added

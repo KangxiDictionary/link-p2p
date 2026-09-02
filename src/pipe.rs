@@ -181,9 +181,11 @@ where
         (Some(a), Some(b)) => merge_pipe_results(a, b),
         (Some(a), None) => {
             let _ = recv.stop(STREAM_ABORT_CODE);
+            // Loop only breaks early when this half erred (half-close waits).
+            debug_assert!(a.is_err(), "early exit requires client→remote Err");
             match a {
-                Ok(n) => PipeOutcome {
-                    sent: n,
+                Ok(_) => PipeOutcome {
+                    sent: 0,
                     recvd: 0,
                     result: Ok(()),
                 },
@@ -196,10 +198,11 @@ where
         }
         (None, Some(b)) => {
             let _ = send.reset(STREAM_ABORT_CODE);
+            debug_assert!(b.is_err(), "early exit requires remote→client Err");
             match b {
-                Ok(n) => PipeOutcome {
+                Ok(_) => PipeOutcome {
                     sent: 0,
-                    recvd: n,
+                    recvd: 0,
                     result: Ok(()),
                 },
                 Err(e) => PipeOutcome {
