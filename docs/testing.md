@@ -42,6 +42,10 @@ Shared helpers live in `scripts/lib.sh` (`pass`/`fail`, `wait_endpoint_id`, loca
 | `./scripts/phase0-*.sh` / `phase1-*.sh` | Two-machine NAT / relay / migration — see below |
 | `cargo +nightly fuzz run ctl_frame` | TUN LPC1 frame decode (needs cargo-fuzz; lives in repo-root `fuzz/`, not under `src/` — a src-only zip will not include it) |
 
+`fuzz/fuzz_targets/` is the **cargo-fuzz source layout** (harness `.rs` files). It is
+not the Cargo build output directory. Build artifacts are `target/` and
+`fuzz/target/`, both gitignored.
+
 ### Always-on integration (runs under `cargo test` / `./scripts/test.sh unit`)
 
 | Test file | Purpose | Notes |
