@@ -49,6 +49,23 @@ sudo cp -a target/release/locales /usr/local/bin/
 
 Without `locales/` beside the binary (or `LINK_P2P_LOCALEDIR`), UI falls back to English.
 
+**Shell completions** (includes `tun` / controller subcommands; dynamic mode
+also completes contact nicknames for `--to` / `tun call` / `contact remove`):
+
+```bash
+# Recommended — re-source on each shell start (bash / zsh / fish)
+echo 'source <(COMPLETE=bash link-p2p)' >> ~/.bashrc
+echo 'source <(COMPLETE=zsh link-p2p)'  >> ~/.zshrc
+echo 'COMPLETE=fish link-p2p | source'  >> ~/.config/fish/completions/link-p2p.fish
+```
+
+```powershell
+# PowerShell ($PROFILE); needs ExecutionPolicy RemoteSigned at minimum
+Add-Content $PROFILE '$env:COMPLETE = "powershell"; link-p2p | Out-String | Invoke-Expression; Remove-Item Env:\COMPLETE'
+```
+
+Static AOT scripts (packaging): `link-p2p completions bash|fish|zsh|powershell|elvish`.
+
 **System TUN service** (after the binary + locales are on a trusted path):
 
 ```bash
@@ -57,7 +74,8 @@ link-p2p tun status --system
 ```
 
 Details: [platforms](docs/user-guide/platforms.md), [TUN / systemd](docs/subsystems/tun.md),
-[Windows SCM](docs/user-guide/windows-service-setup.md).
+[Windows SCM](docs/user-guide/windows-service-setup.md),
+[usage / completions](docs/user-guide/usage.md#completions-and-man).
 
 ---
 

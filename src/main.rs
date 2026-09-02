@@ -1,9 +1,13 @@
-use link_p2p::{exit, init, lookup, real_main, style};
+use link_p2p::{exit, init, lookup, real_main, style, try_shell_complete};
 
 fn main() {
     // Language selection + catalog load first, before any output; falls
     // back to English when the language/catalog isn't available.
     init();
+
+    // Dynamic shell completions (`COMPLETE=bash|fish|zsh|powershell|…`).
+    // Must run before other stdout; exits the process when active.
+    try_shell_complete();
 
     // Scan argv for --color before clap parses, so help/error output is
     // styled correctly even on the first run.

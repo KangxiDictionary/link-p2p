@@ -236,6 +236,25 @@ jq -r 'select(.message == "connection opened") | .peer' serve.jsonl
 
 ## Completions and man
 
+Dynamic completions (recommended — includes `tun` subcommands and live contact
+nicknames for `--to` / `tun call` / `contact remove`):
+
+```bash
+# bash / zsh — add to ~/.bashrc or ~/.zshrc
+source <(COMPLETE=bash link-p2p)
+source <(COMPLETE=zsh link-p2p)
+
+# fish — write once; fish loads it as a completion file
+COMPLETE=fish link-p2p | source   # or: echo 'COMPLETE=fish link-p2p | source' > ~/.config/fish/completions/link-p2p.fish
+```
+
+```powershell
+Add-Content $PROFILE '$env:COMPLETE = "powershell"; link-p2p | Out-String | Invoke-Expression; Remove-Item Env:\COMPLETE'
+```
+
+Static AOT scripts (packaging / offline install; contact names are fixed at
+generation time):
+
 ```bash
 link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish
 link-p2p completions bash > /etc/bash_completion.d/link-p2p

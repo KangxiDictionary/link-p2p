@@ -4,11 +4,13 @@
 //! Short codes are Crockford Base32 of the 32-byte id (offline round-trip).
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use clap_complete::CompletionCandidate;
 use iroh::EndpointId;
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +37,49 @@ pub struct ContactBook {
 
 pub fn contacts_path() -> PathBuf {
     config::config_dir().join("contacts.toml")
+}
+
+/// Shell completion candidates for contact nicknames (dynamic `COMPLETE=` path).
+///
+/// Prefix match is ASCII-case-insensitive so `Al` still finds `alice`; non-ASCII
+/// names remain exact-prefix only (same policy as [`resolve`]).
+pub(crate) fn complete_peer_tokens(current: &OsStr) -> Vec<CompletionCandidate> {
+    let Some(cur) = current.to_str() else {
+        return Vec::new();
+    };
+    let Ok(book) = load(&contacts_path()) else {
+        return Vec::new();
+    };
+    let cur_lower = cur.to_ascii_lowercase();
+    book.contacts
+        .iter()
+        .filter(|(name, _)| {
+            name.starts_with(cur) || name.to_ascii_lowercase().starts_with(&cur_lower)
+        })
+        .map(|(name, c)| {
+            let help = if c.id.chars().count() > 12 {
+                let short: String = c.id.chars().take(12).collect();
+                format!("{short}…")
+            } else {
+                c.id.clone()
+            };
+            CompletionCandidate::new(name.as_str()).help(Some(help.into()))
+        })
+        .collect()
+}
+
+/// `tun call` trailing tokens: `accept` / `reject` plus contact nicknames.
+pub(crate) fn complete_tun_call_args(current: &OsStr) -> Vec<CompletionCandidate> {
+    let mut out = Vec::new();
+    if let Some(cur) = current.to_str() {
+        for kw in ["accept", "reject"] {
+            if kw.starts_with(cur) {
+                out.push(CompletionCandidate::new(kw));
+            }
+        }
+    }
+    out.extend(complete_peer_tokens(current));
+    out
 }
 
 /// Always-stdout pairing lines for scripts / the other human (ignore `-q`).
@@ -297,6 +342,58 @@ fn decode_crockford(s: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use iroh::SecretKey;
+
+    #[test]
+    fn complete_peer_tokens_prefix_match() {
+        let _guard = crate::i18n::ENV_LOCK.lock().unwrap();
+        let cfg = std::env::temp_dir().join(format!(
+            "link-p2p-comp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&cfg);
+        std::fs::create_dir_all(cfg.join("link-p2p")).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &cfg);
+        let book = ContactBook {
+            contacts: [
+                (
+                    "alice".into(),
+                    Contact {
+                        id: "aa".repeat(32),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "bob".into(),
+                    Contact {
+                        id: "bb".repeat(32),
+                        ..Default::default()
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        save(&contacts_path(), &book).unwrap();
+
+        let names: Vec<_> = complete_peer_tokens(OsStr::new("al"))
+            .into_iter()
+            .map(|c| c.get_value().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["alice"]);
+
+        let call_kw: Vec<_> = complete_tun_call_args(OsStr::new("acc"))
+            .into_iter()
+            .map(|c| c.get_value().to_string_lossy().into_owned())
+            .collect();
+        assert!(call_kw.iter().any(|s| s == "accept"));
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(&cfg);
+    }
 
     #[test]
     fn name_for_id_finds_saved_contact() {

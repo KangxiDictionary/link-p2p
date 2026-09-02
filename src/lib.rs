@@ -67,6 +67,13 @@ pub use dispatch::real_main;
 pub use i18n::init;
 pub use i18n::lookup;
 
+/// Handle `COMPLETE=<shell>` dynamic completions and exit when active.
+///
+/// Call once early in `main` (after [`init`], before any stdout writes).
+pub fn try_shell_complete() {
+    clap_complete::CompleteEnv::with_factory(cli::localized_command).complete();
+}
+
 #[cfg(windows)]
 pub use win_service::run_dispatcher as run_windows_service_dispatcher;
 

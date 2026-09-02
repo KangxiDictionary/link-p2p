@@ -6,14 +6,29 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
-use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueHint};
+use clap_complete::engine::{ArgValueCompleter, PathCompleter};
 use clap_complete::Shell;
 use zeroize::Zeroizing;
 
+use crate::contacts;
 use crate::helptext;
 use crate::i18n::{self, tr};
 use crate::style::ColorMode;
 use crate::tun_service;
+
+/// Contact / peer-token completer for `--to` and related args (dynamic shells).
+fn peer_completer() -> ArgValueCompleter {
+    ArgValueCompleter::new(contacts::complete_peer_tokens)
+}
+
+fn tun_call_completer() -> ArgValueCompleter {
+    ArgValueCompleter::new(contacts::complete_tun_call_args)
+}
+
+fn identity_path_completer() -> ArgValueCompleter {
+    ArgValueCompleter::new(PathCompleter::file())
+}
 
 fn parse_passphrase(s: &str) -> Result<Zeroizing<String>, std::convert::Infallible> {
     Ok(Zeroizing::new(s.to_owned()))
@@ -40,7 +55,13 @@ pub(crate) struct Cli {
     /// `~/.config/link-p2p/identity.key`); a legacy `./identity.key` in the
     /// working directory is migrated there once. Keep this stable if you
     /// want your EndpointId to stay the same across restarts.
-    #[arg(long, global = true, conflicts_with = "ephemeral")]
+    #[arg(
+        long,
+        global = true,
+        conflicts_with = "ephemeral",
+        value_hint = ValueHint::FilePath,
+        add = identity_path_completer()
+    )]
     pub(crate) identity: Option<PathBuf>,
 
     /// Use a temporary identity that is never written to disk: the EndpointId
@@ -156,6 +177,7 @@ pub(crate) enum ContactCommand {
     },
     /// Remove a contact.
     Remove {
+        #[arg(add = peer_completer())]
         name: String,
     },
     /// List contacts.
@@ -212,7 +234,7 @@ pub(crate) enum Command {
         /// Only accept P2P connections from these EndpointIds (repeatable).
         /// Default: accept anyone who knows this node's EndpointId. Strongly
         /// recommended when the node is reachable from untrusted networks.
-        #[arg(long)]
+        #[arg(long, add = peer_completer())]
         allow: Vec<String>,
         /// In proxy mode, allow forwarding to private/loopback/link-local
         /// addresses (blocked by default to prevent SSRF — a malicious peer
@@ -225,7 +247,7 @@ pub(crate) enum Command {
     Connect {
         /// The remote node's EndpointId (printed by `serve` on startup).
         /// On Unix, `-` reads one line from stdin. Also `LINK_P2P_TO`.
-        #[arg(long, env = "LINK_P2P_TO")]
+        #[arg(long, env = "LINK_P2P_TO", add = peer_completer())]
         to: Option<String>,
         /// Local address to listen on, e.g. 127.0.0.1:9090
         #[arg(long, conflicts_with = "socks5_listen")]
@@ -266,7 +288,7 @@ pub(crate) enum Command {
     Ping {
         /// The remote node's EndpointId (printed by `serve` on startup).
         /// Use `-` to read one line from stdin. Also `LINK_P2P_TO`.
-        #[arg(long, env = "LINK_P2P_TO")]
+        #[arg(long, env = "LINK_P2P_TO", add = peer_completer())]
         to: Option<String>,
         /// Direct address hint(s) for the peer (repeatable) — see `connect
         /// --to-addr`. Dialed directly, skipping discovery.
@@ -282,6 +304,7 @@ pub(crate) enum Command {
     /// relays with n0 by default. Pair with the same flags on both peers.
     Call {
         /// Contact name, EndpointId, or short code.
+        #[arg(add = peer_completer())]
         to: String,
         /// Local TCP listen address (forwards to the peer).
         #[arg(long, conflicts_with = "stdio")]
@@ -328,9 +351,10 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Print a shell completion script to stdout.
+    /// Print a static shell completion script to stdout (AOT).
     ///
-    /// Redirect it to wherever your shell loads completions from, e.g.
+    /// Prefer the dynamic installer (`COMPLETE=bash link-p2p`, etc.) so contact
+    /// names stay live. Redirect AOT scripts when packaging:
     /// `link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish`
     /// or `link-p2p completions powershell` on Windows.
     Completions {
@@ -359,10 +383,10 @@ pub(crate) enum TunCommand {
     /// Start the TUN mesh (background daemon, or `--foreground` like serve/connect).
     Up {
         /// `hub`, `spoke`, or `phone`. Default: `spoke` if `--to` is set, otherwise `hub`.
-        #[arg(long)]
+        #[arg(long, value_parser = ["hub", "spoke", "phone"])]
         role: Option<String>,
         /// Hub EndpointId when role is spoke (also implies `--role spoke` if role omitted).
-        #[arg(long, env = "LINK_P2P_TO")]
+        #[arg(long, env = "LINK_P2P_TO", add = peer_completer())]
         to: Option<String>,
         /// Run in the foreground (same as `tun serve` / `tun connect`). Do not daemonize.
         #[arg(long)]
@@ -389,7 +413,7 @@ pub(crate) enum TunCommand {
         /// Only accept TUN mesh connections from these EndpointIds
         /// (repeatable). Default: anyone who knows this hub's EndpointId.
         /// Also `LINK_P2P_ALLOW` (comma-separated).
-        #[arg(long)]
+        #[arg(long, add = peer_completer())]
         allow: Vec<String>,
         /// Direct address hint(s) for the hub (spoke / foreground only).
         #[arg(long = "to-addr")]
@@ -401,6 +425,7 @@ pub(crate) enum TunCommand {
     /// Join a hub mesh (alias for `tun up --to <hub>`).
     Join {
         /// Hub EndpointId / contact / short code.
+        #[arg(add = peer_completer())]
         to: String,
         #[arg(long)]
         foreground: bool,
@@ -412,7 +437,7 @@ pub(crate) enum TunCommand {
         tun_ip6: Option<std::net::Ipv6Addr>,
         #[arg(long, default_value_t = 1280)]
         mtu: u16,
-        #[arg(long)]
+        #[arg(long, add = peer_completer())]
         allow: Vec<String>,
         #[arg(long = "to-addr")]
         to_addr: Vec<SocketAddr>,
@@ -425,7 +450,11 @@ pub(crate) enum TunCommand {
     /// Examples: `tun call alice`, `tun call accept <id>`, `tun call reject <id>`.
     Call {
         /// ` <peer> ` | `accept <peer>` | `reject <peer>`
-        #[arg(trailing_var_arg = true, allow_hyphen_values = false)]
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = false,
+            add = tun_call_completer()
+        )]
         args: Vec<String>,
         /// Return after enqueueing the dial (no short status poll).
         #[arg(long)]
@@ -485,14 +514,14 @@ pub(crate) enum TunCommand {
         /// Only accept TUN mesh connections from these EndpointIds
         /// (repeatable). Default: anyone who knows this hub's EndpointId.
         /// Also `LINK_P2P_ALLOW` (comma-separated).
-        #[arg(long)]
+        #[arg(long, add = peer_completer())]
         allow: Vec<String>,
     },
     /// Dial a hub (`tun serve`), join the mesh, and try direct peer links.
     Connect {
         /// The remote node's EndpointId (printed by `tun serve` on startup).
         /// Use `-` to read one line from stdin. Also `LINK_P2P_TO`.
-        #[arg(long, env = "LINK_P2P_TO")]
+        #[arg(long, env = "LINK_P2P_TO", add = peer_completer())]
         to: Option<String>,
         /// Override this node's virtual IP (default: derived from its
         /// EndpointId, inside 172.24.0.0/16).
@@ -512,7 +541,7 @@ pub(crate) enum TunCommand {
         /// Only accept inbound direct mesh links from these EndpointIds
         /// (repeatable). Hub dial is always attempted; this gates peer↔peer
         /// accepts and outbound dials. Also `LINK_P2P_ALLOW`.
-        #[arg(long)]
+        #[arg(long, add = peer_completer())]
         allow: Vec<String>,
         /// Omit yourself from other spokes' roster (hub still knows you).
         #[arg(long)]
@@ -531,13 +560,18 @@ pub(crate) enum TunServiceCommand {
     /// Write the platform service definition and enable it.
     Install {
         /// `hub` or `spoke`. Default: spoke if `--to` is set, otherwise hub.
-        #[arg(long)]
+        #[arg(long, value_parser = ["hub", "spoke"])]
         role: Option<String>,
         /// Hub EndpointId when role is spoke.
-        #[arg(long, env = "LINK_P2P_TO")]
+        #[arg(long, env = "LINK_P2P_TO", add = peer_completer())]
         to: Option<String>,
         /// Identity key path for the service (stable EndpointId).
-        #[arg(long, default_value = tun_service::DEFAULT_IDENTITY_PATH)]
+        #[arg(
+            long,
+            default_value = tun_service::DEFAULT_IDENTITY_PATH,
+            value_hint = ValueHint::FilePath,
+            add = identity_path_completer()
+        )]
         identity: PathBuf,
         /// Unix account the Linux systemd service runs as (ignored on macOS — runs as root).
         #[arg(long, default_value = tun_service::DEFAULT_SERVICE_USER)]
@@ -597,7 +631,8 @@ UNIX-ONLY:\n\
     \x20   connect --stdio, --to -, link-p2p man\n\
 \n\
 COMPLETIONS:\n\
-    \x20   link-p2p completions fish|bash|zsh > …\n\
+    \x20   source <(COMPLETE=bash link-p2p)   # or fish/zsh; see docs\n\
+    \x20   link-p2p completions fish|bash|zsh > …   # static AOT fallback\n\
 \n\
 See docs/user-guide/platforms.md and README.md."
 }
@@ -615,7 +650,8 @@ ALTERNATE (explicit roles):\n\
     \x20   link-p2p connect --to <EndpointId> --listen 127.0.0.1:13389\n\
 \n\
 COMPLETIONS:\n\
-    \x20   link-p2p completions powershell | Out-File …\n\
+    \x20   $env:COMPLETE='powershell'; link-p2p | Out-String | Invoke-Expression\n\
+    \x20   link-p2p completions powershell   # static AOT fallback\n\
 \n\
 TUN mode needs Administrator + wintun.dll beside the binary. See docs/user-guide/platforms.md and README.md."
 }
@@ -1170,9 +1206,9 @@ pub(crate) fn localized_command() -> clap::Command {
         .mut_subcommand("completions", |s| {
             s.disable_help_flag(true)
                 .arg(help_arg())
-                .about(tr!("Print a shell completion script to stdout."))
+                .about(tr!("Print a static shell completion script to stdout."))
                 .long_about(helptext::hard_wrap_help(&tr!(
-                    "Print a shell completion script to stdout.\n\nRedirect it to wherever your shell loads completions from, e.g. `link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish`."
+                    "Print a static (AOT) shell completion script to stdout.\n\nPrefer dynamic completions so contact names stay live: add `source <(COMPLETE=bash link-p2p)` to your shell rc (fish/zsh/powershell — see docs/user-guide/usage.md). Use this subcommand when packaging files, e.g. `link-p2p completions fish > ~/.config/fish/completions/link-p2p.fish`."
                 )))
                 .mut_arg(
                     "shell",

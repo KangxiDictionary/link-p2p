@@ -25,9 +25,10 @@ tokio = { version = "1", default-features = false, features = [
 ] }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
-# Generates shell completion scripts (`link-p2p completions fish`, etc).
+# Shell completions: AOT via `completions <shell>`, live via `COMPLETE=<shell>`
+# (`unstable-dynamic` → CompleteEnv + ArgValueCompleter for contact names).
 # Version must track clap's major version.
-clap_complete = "4"
+clap_complete = { version = "4", features = ["unstable-dynamic"] }
 # Must match the noq-proto line iroh locks so
 # `congestion_controller_factory(Bbr3Config)` type-checks against one crate.
 # Keep `default-features = false` aligned with iroh's dependency line.

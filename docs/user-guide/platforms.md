@@ -65,8 +65,20 @@ Override with `LINK_P2P_LOCALEDIR` or `LANGUAGE=zh_CN`.
 
 ### Shell completions
 
+Prefer **dynamic** completions (re-run `link-p2p` on each Tab so contact names
+and the full `tun` tree stay current):
+
 ```powershell
-link-p2p completions powershell | Out-File -Encoding utf8 $PROFILE\link-p2p.ps1
+# Append once to $PROFILE (file, not a directory). Needs ExecutionPolicy
+# RemoteSigned at minimum so $PROFILE scripts can run.
+Add-Content $PROFILE '$env:COMPLETE = "powershell"; link-p2p | Out-String | Invoke-Expression; Remove-Item Env:\COMPLETE'
+```
+
+Static AOT fallback (no live contact names):
+
+```powershell
+link-p2p completions powershell | Out-File -Encoding utf8 (Join-Path (Split-Path $PROFILE) 'link-p2p.ps1')
+# then: . (Join-Path (Split-Path $PROFILE) 'link-p2p.ps1')
 ```
 
 ### TUN / Wintun
@@ -115,7 +127,8 @@ key fight over relay/discovery.
 ### Completions and man
 
 ```bash
-link-p2p completions fish|bash|zsh|powershell|elvish
+link-p2p completions fish|bash|zsh|powershell|elvish   # static AOT
+# preferred: source <(COMPLETE=bash link-p2p)  — see usage.md / README Install
 link-p2p man | gzip -c > /usr/local/share/man/man1/link-p2p.1.gz
 ```
 
