@@ -26,8 +26,10 @@ use std::ptr;
 
 use anyhow::{bail, Context, Result};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, NamedPipeServer};
+// windows-sys 0.61 moved `BOOL` to `windows_sys::core` (Foundation keeps TRUE/FALSE).
+use windows_sys::core::BOOL;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, LocalFree, BOOL, ERROR_PIPE_BUSY, FALSE, HANDLE, INVALID_HANDLE_VALUE, TRUE,
+    CloseHandle, LocalFree, ERROR_PIPE_BUSY, FALSE, HANDLE, INVALID_HANDLE_VALUE, TRUE,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
